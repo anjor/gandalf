@@ -1,0 +1,43 @@
+EXECUTABLE := gandalf
+
+CUFILES := gandalf.cu
+
+CU_DEPS := \
+	c_fortran_namelist3.c \
+	reduc_kernel.cu \
+	device_funcs.cu \
+	k_funcs.cu \
+	reduc_kernel.cu \
+	work_kernel.cu \
+	diag_kernel.cu \
+	maxReduc.cu \
+	init_func.cu \
+	nlps_kernel.cu \
+	init_kernel.cu \
+	timestep_kernel.cu \
+	nlps.cu \
+	nonlin.cu \
+	courant.cu \
+	timestep.cu \
+	sumReduc_nopad.cu \
+	forcing.cu \
+	damping_kernel.cu \
+	zderiv_kernel.cu \
+	slowmodes.cu \
+	diagnostics.cu
+      
+
+USECUFFT := 1
+
+verbose = 1
+
+valgrind = 0
+
+cudagdb = 0
+
+OMIT_CUTIL_LIB := 1
+
+include ../common.mk
+
+test:
+	@echo $(CUBINS)

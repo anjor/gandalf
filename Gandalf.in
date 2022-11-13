@@ -1,0 +1,147 @@
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Example input file by AVK
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Algorithm knobs
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+&algo
+  debug = 0
+  restart = 0
+  rest = alf
+  nwrite = 1
+  nforce = 1
+  maxdt = .1
+  cfl = .1
+/
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Initial conditions
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+&init
+  decaying = 0
+  nuno_recon = 0
+  driven = 1
+  orszag_tang = 0
+  noise = 0
+/
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Grid
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+&grid
+  Nx = 128
+  Ny = 128
+  Nz = 128
+  X0 = 1.0
+  Y0 = 1.0
+  Z0 = 1.0
+  Nm = 4
+  nsteps = 1000
+/
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Dissipation
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+&dissipation
+  alpha_z = 3
+  nu_kz = 1.0
+  alpha_hyper = 3
+  nu_hyper = 1.0
+  nu = 0.0
+  eta = 0.0
+/
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Forcing
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+&forcing
+  nkstir = 6
+  fampl = 1.e-0
+  gm_nkstir = 6
+  gm_fampl = 0.e-0
+/
+
+&stir_0
+  kx = 1
+  ky = 0
+  kz = 1
+/
+
+&stir_1
+  kx = 0
+  ky = 1
+  kz = 1
+/
+
+&stir_2
+  kx = -1
+  ky = 0
+  kz = 1
+/
+
+&stir_3
+  kx = 1
+  ky = 1
+  kz = -1
+/
+
+&stir_4
+  kx = 0
+  ky = 1
+  kz = -1
+/
+
+&stir_5
+  kx = -1
+  ky = 1
+  kz = -1
+/
+&gm_stir_0
+  kx = 1
+  ky = 0
+  kz = 1
+/
+
+&gm_stir_1
+  kx = 0 
+  ky = 1
+  kz = 1
+/
+
+&gm_stir_2
+  kx = -1
+  ky = 0
+  kz = 1
+/
+&gm_stir_3
+  kx = 1
+  ky = 1
+  kz = 1
+/
+&gm_stir_4
+  kx = -1
+  ky = 1
+  kz = 1
+/
+&gm_stir_5
+  kx = 1
+  ky = 0
+  kz = 2
+/
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Slow modes
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+&slow
+  beta = 1.0
+  nu_coll = 1.0
+  alpha_m = 3
+  nu_kp_g = 1.0
+  alpha_kp_g = 3
+  nu_kz_g = 1.0
+  alpha_kz_g = 2
+
+/
