@@ -128,9 +128,9 @@ checkpoints to return to.
 ## Reference Parameters
 Typical astrophysical parameters:
 - β (plasma beta): 0.01 - 100
-- τ (T_i/T_e): 1 - 10  
+- τ (T_i/T_e): 1 - 10
 - Resolution: 256² to 1024²
-- k_max ρ_s: ~1-2 (resolve ion scales)
+- k_max ρ_s << 1 (KRMHD valid only at scales larger than ion gyroradius)
 
 ## Questions for User
 Track any clarifications needed during development

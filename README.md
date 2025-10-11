@@ -117,7 +117,7 @@ Reference values for astrophysical plasmas:
 - **Plasma beta**: 0.01 - 100 (ratio of thermal to magnetic pressure)
 - **Temperature ratio tau**: 1 - 10 (T_i/T_e)
 - **Resolution**: 256^2 to 1024^2 grid points
-- **Scale range**: k_max rho_s ~ 1-2 (resolve ion gyroradius scales)
+- **Scale range**: k_max rho_s << 1 (KRMHD valid only at scales larger than ion gyroradius)
 
 ## Validation Tests
 
