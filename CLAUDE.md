@@ -1,7 +1,9 @@
 # KRMHD Spectral Solver Project
 
 ## Context
-You are implementing a Kinetic Reduced MHD (KRMHD) solver using spectral methods for studying turbulent magnetized plasmas in astrophysical environments. This code is a modern rewrite of GANDALF (https://github.com/anjor/gandalf), a legacy Fortran+CUDA implementation.
+You are implementing a **full Kinetic Reduced MHD (KRMHD)** solver using spectral methods for studying turbulent magnetized plasmas in astrophysical environments. This code is a modern rewrite of GANDALF (https://github.com/anjor/gandalf-original), a legacy Fortran+CUDA implementation.
+
+**Scope:** This is a **kinetic** implementation using Hermite moment expansion in parallel velocity space (v∥). This captures Landau damping, phase mixing, and collisional effects. We are NOT implementing a simplified fluid closure.
 
 The user is an expert plasma physicist familiar with gyrokinetics, Landau damping, and turbulence theory. No basic explanations needed.
 
@@ -61,8 +63,10 @@ krmhd/
 ├── spectral.py      # ✅ COMPLETE: FFT operations, derivatives, dealiasing (2D/3D)
 ├── physics.py       # KRMHD equations, Poisson brackets (TODO)
 ├── timestepping.py  # RK4/RK45 integrators (TODO)
-├── hermite.py       # Hermite basis functions (TODO, if needed)
-├── diagnostics.py   # Energy, spectra, fluxes (TODO)
+├── hermite.py       # ⚠️ REQUIRED: Hermite basis for kinetic physics (Issues #21-24)
+├── collisions.py    # Lenard-Bernstein collision operators (Issue #23)
+├── forcing.py       # Gaussian white noise forcing (Issue #29)
+├── diagnostics.py   # Energy, spectra, fluxes, field line following (TODO)
 ├── io.py           # HDF5 checkpointing (TODO)
 └── validation.py    # Linear physics tests (TODO)
 ```
@@ -133,19 +137,46 @@ checkpoints to return to.
 5. **Slow mode coupling**: Any back-reaction indicates coding error
 
 ## Current Development Status
-- [x] Basic spectral infrastructure (COMPLETE: 2D/3D with 50 passing tests)
+
+### Completed (Issues #1-2)
+- [x] Basic spectral infrastructure (2D/3D with 50 passing tests)
   - SpectralGrid2D/3D with Pydantic validation
   - SpectralField2D/3D with lazy evaluation
   - All derivative operators (x, y, z) and Laplacian
   - 2/3 dealiasing implementation
   - Memory-efficient rfft2/rfftn transforms
+
+### Fluid RMHD Core (Issues #3-8)
 - [ ] Poisson solver (Issue #3 - next step)
 - [ ] Poisson bracket implementation (Issue #4)
-- [ ] KRMHD equation implementation
-- [ ] Time integration (RK4/RK45)
-- [ ] Linear validation tests
-- [ ] Nonlinear turbulence runs
-- [ ] Production diagnostics
+- [ ] KRMHD state and initialization (Issue #5)
+- [ ] Alfvén dynamics (Issue #6)
+- [ ] Passive scalar evolution (Issue #7)
+- [ ] Time integration RK4 (Issue #8)
+
+### Kinetic Physics (Issues #21-24) - REQUIRED
+- [ ] Hermite basis infrastructure (Issue #21)
+- [ ] Hermite moment hierarchy (Issue #22)
+- [ ] Collision operators (Issue #23)
+- [ ] Hermite closures (Issue #24)
+
+### Diagnostics (Issues #9, #25-26)
+- [ ] Basic diagnostics - energy, spectra (Issue #9)
+- [ ] Field line following - k∥ spectra (Issue #25)
+- [ ] Phase mixing diagnostics (Issue #26)
+
+### Validation (Issues #10-12, #27)
+- [ ] Linear physics tests (Issue #10)
+- [ ] Orszag-Tang vortex (Issue #11)
+- [ ] Decaying turbulence (Issue #12)
+- [ ] Kinetic FDT validation (Issue #27)
+
+### Production Features (Issues #13-15, #28-30)
+- [ ] HDF5 I/O (Issue #13)
+- [ ] Hyper-dissipation (Issue #28)
+- [ ] Forcing mechanisms (Issue #29)
+- [ ] Integrating factor timestepper (Issue #30, optional)
+- [ ] Configuration files and run scripts (Issue #15)
 
 ## Reference Parameters
 Typical astrophysical parameters:
