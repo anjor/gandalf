@@ -1,0 +1,26 @@
+[project]
+name = "krmhd"
+version = "0.1.0"
+description = "Kinetic Reduced MHD (KRMHD) spectral solver for magnetized plasma turbulence"
+readme = "README.md"
+authors = [
+    { name = "anjor", email = "anjor@umd.edu" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "h5py>=3.11.0",
+    "jax-metal>=0.0.4",
+    "matplotlib>=3.7.5",
+    "numpy>=1.24.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.15,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14.1",
+    "pytest>=8.3.5",
+    "ruff>=0.14.0",
+]
