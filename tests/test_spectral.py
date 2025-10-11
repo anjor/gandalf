@@ -16,11 +16,16 @@ from pydantic import ValidationError
 
 from krmhd.spectral import (
     SpectralGrid2D,
+    SpectralGrid3D,
     SpectralField2D,
+    SpectralField3D,
     rfft2_forward,
     rfft2_inverse,
+    rfftn_forward,
+    rfftn_inverse,
     derivative_x,
     derivative_y,
+    derivative_z,
     laplacian,
     dealias,
 )
@@ -450,6 +455,350 @@ class TestSpectralField2D:
 
         with pytest.raises(ValueError, match="does not match expected Fourier shape"):
             SpectralField2D.from_fourier(wrong_shape_field, grid)
+
+
+class TestSpectralGrid3D:
+    """Test suite for SpectralGrid3D Pydantic model."""
+
+    def test_create_basic_grid(self):
+        """Test basic 3D grid creation with default parameters."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+
+        assert grid.Nx == 64
+        assert grid.Ny == 64
+        assert grid.Nz == 64
+        assert jnp.isclose(grid.Lx, 2 * jnp.pi)
+        assert jnp.isclose(grid.Ly, 2 * jnp.pi)
+        assert jnp.isclose(grid.Lz, 2 * jnp.pi)
+
+        # Check wavenumber array shapes
+        assert grid.kx.shape == (64 // 2 + 1,)  # rfftn convention
+        assert grid.ky.shape == (64,)
+        assert grid.kz.shape == (64,)
+        assert grid.dealias_mask.shape == (64, 64, 64 // 2 + 1)
+
+    def test_create_custom_domain(self):
+        """Test 3D grid creation with custom domain sizes."""
+        grid = SpectralGrid3D.create(
+            Nx=128, Ny=64, Nz=32, Lx=4 * jnp.pi, Ly=2 * jnp.pi, Lz=jnp.pi
+        )
+
+        assert grid.Nx == 128
+        assert grid.Ny == 64
+        assert grid.Nz == 32
+        assert jnp.isclose(grid.Lx, 4 * jnp.pi)
+        assert jnp.isclose(grid.Ly, 2 * jnp.pi)
+        assert jnp.isclose(grid.Lz, jnp.pi)
+
+    def test_grid_immutability(self):
+        """Test that SpectralGrid3D is immutable (frozen=True)."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+
+        with pytest.raises(ValidationError):
+            grid.Nx = 128
+
+    def test_validation_positive_dimensions(self):
+        """Test that factory method validates positive dimensions."""
+        with pytest.raises(ValueError, match="must be positive"):
+            SpectralGrid3D.create(Nx=-64, Ny=64, Nz=64)
+
+        with pytest.raises(ValueError, match="must be positive"):
+            SpectralGrid3D.create(Nx=64, Ny=64, Nz=0)
+
+    def test_validation_even_dimensions(self):
+        """Test that grid dimensions must be even."""
+        with pytest.raises(ValueError, match="must be even"):
+            SpectralGrid3D.create(Nx=63, Ny=64, Nz=64)
+
+        with pytest.raises(ValueError, match="must be even"):
+            SpectralGrid3D.create(Nx=64, Ny=64, Nz=65)
+
+    def test_wavenumber_arrays(self):
+        """Test that wavenumber arrays follow correct FFT conventions."""
+        grid = SpectralGrid3D.create(
+            Nx=64, Ny=64, Nz=64, Lx=2 * jnp.pi, Ly=2 * jnp.pi, Lz=2 * jnp.pi
+        )
+
+        # kx should be non-negative (rfftn convention)
+        assert jnp.all(grid.kx >= 0)
+        assert grid.kx[0] == 0.0
+        assert grid.kx[-1] == 32  # Nyquist: Nx//2
+
+        # ky and kz should include negative frequencies (standard FFT ordering)
+        assert grid.ky[0] == 0.0
+        assert grid.ky[grid.Ny // 2] == -32  # Nyquist wraps to negative
+        assert grid.kz[0] == 0.0
+        assert grid.kz[grid.Nz // 2] == -32  # Nyquist wraps to negative
+
+    def test_dealias_mask_3d(self):
+        """Test that 3D dealiasing mask correctly implements 2/3 rule."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+
+        # Low-k modes should be kept
+        assert grid.dealias_mask[0, 0, 0]  # k=0 mode
+        assert grid.dealias_mask[1, 1, 1]  # Low-k mode
+
+        # High-k modes should be zeroed
+        # Max kx, ky, kz is 32, so 2/3 * 32 ≈ 21.3
+        assert not grid.dealias_mask[0, 0, -1]  # kx = Nyquist
+        assert not grid.dealias_mask[0, 32, 0]  # ky = Nyquist
+        assert not grid.dealias_mask[32, 0, 0]  # kz = Nyquist
+
+
+class TestFFTOperations3D:
+    """Test suite for 3D FFT forward/inverse operations."""
+
+    def test_fft_roundtrip_3d(self):
+        """Test that 3D FFT -> IFFT recovers original field."""
+        # Create random real field
+        key = jax.random.PRNGKey(0)
+        field_real = jax.random.normal(key, (64, 64, 64))
+
+        # Forward and inverse transform
+        field_fourier = rfftn_forward(field_real)
+        field_recovered = rfftn_inverse(field_fourier, 64, 64, 64)
+
+        # Should match to float32 precision (~1e-6)
+        assert jnp.allclose(field_real, field_recovered, atol=1e-6)
+
+    def test_fft_shapes_3d(self):
+        """Test that 3D FFT operations produce correct output shapes."""
+        Nx, Ny, Nz = 128, 64, 32
+        field_real = jnp.zeros((Nz, Ny, Nx))
+
+        field_fourier = rfftn_forward(field_real)
+        assert field_fourier.shape == (Nz, Ny, Nx // 2 + 1)
+
+        field_back = rfftn_inverse(field_fourier, Nz, Ny, Nx)
+        assert field_back.shape == (Nz, Ny, Nx)
+
+    def test_reality_condition_3d(self):
+        """Test that rfftn preserves reality condition."""
+        # Create real field
+        x = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        z = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
+        # Transpose to [Nz, Ny, Nx]
+        X, Y, Z = X.transpose(2, 1, 0), Y.transpose(2, 1, 0), Z.transpose(2, 1, 0)
+        field_real = jnp.sin(3 * X) + jnp.cos(2 * Y) + jnp.sin(Z)
+
+        field_fourier = rfftn_forward(field_real)
+        field_back = rfftn_inverse(field_fourier, 64, 64, 64)
+
+        # Inverse should be purely real
+        assert jnp.allclose(field_back.imag, 0.0, atol=1e-12)
+
+
+class TestDerivatives3D:
+    """Test suite for 3D spectral derivative operators."""
+
+    def test_derivative_z_sine(self):
+        """Test ∂z(sin(kz)) = k·cos(kz)."""
+        grid = SpectralGrid3D.create(
+            Nx=128, Ny=128, Nz=128, Lx=2 * jnp.pi, Ly=2 * jnp.pi, Lz=2 * jnp.pi
+        )
+
+        # Create coordinate arrays
+        x = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        z = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
+        Z = Z.transpose(2, 1, 0)  # Shape [Nz, Ny, Nx]
+
+        # Test multiple wavenumbers
+        for n in [1, 2, 3, 5]:
+            # f(z) = sin(n*z)
+            field_real = jnp.sin(n * Z)
+            field_fourier = rfftn_forward(field_real)
+
+            # Compute spectral derivative
+            dfdz_fourier = derivative_z(field_fourier, grid.kz)
+            dfdz_real = rfftn_inverse(dfdz_fourier, 128, 128, 128)
+
+            # Analytical derivative: df/dz = n·cos(n*z)
+            dfdz_exact = n * jnp.cos(n * Z)
+
+            # Should match to float32 precision
+            assert jnp.allclose(dfdz_real, dfdz_exact, atol=1e-5)
+
+    def test_derivative_3d_function(self):
+        """Test all three derivatives on 3D function."""
+        grid = SpectralGrid3D.create(
+            Nx=128, Ny=128, Nz=128, Lx=2 * jnp.pi, Ly=2 * jnp.pi, Lz=2 * jnp.pi
+        )
+
+        # Create coordinate arrays
+        x = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        z = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
+        X, Y, Z = X.transpose(2, 1, 0), Y.transpose(2, 1, 0), Z.transpose(2, 1, 0)
+
+        kx, ky, kz = 3, 2, 4
+        field_real = jnp.sin(kx * X) * jnp.cos(ky * Y) * jnp.sin(kz * Z)
+        field_fourier = rfftn_forward(field_real)
+
+        # Test ∂x
+        dfdx_fourier = derivative_x(field_fourier, grid.kx)
+        dfdx_real = rfftn_inverse(dfdx_fourier, 128, 128, 128)
+        dfdx_exact = kx * jnp.cos(kx * X) * jnp.cos(ky * Y) * jnp.sin(kz * Z)
+        # Looser tolerance for 3D: 128³ grid → more accumulated rounding error
+        # from 6 FFT operations (3 forward + 3 inverse) compared to 2D (4 ops)
+        assert jnp.allclose(dfdx_real, dfdx_exact, rtol=1e-4, atol=1e-4)
+
+        # Test ∂y
+        dfdy_fourier = derivative_y(field_fourier, grid.ky)
+        dfdy_real = rfftn_inverse(dfdy_fourier, 128, 128, 128)
+        dfdy_exact = -ky * jnp.sin(kx * X) * jnp.sin(ky * Y) * jnp.sin(kz * Z)
+        assert jnp.allclose(dfdy_real, dfdy_exact, rtol=1e-4, atol=1e-4)
+
+        # Test ∂z
+        dfdz_fourier = derivative_z(field_fourier, grid.kz)
+        dfdz_real = rfftn_inverse(dfdz_fourier, 128, 128, 128)
+        dfdz_exact = kz * jnp.sin(kx * X) * jnp.cos(ky * Y) * jnp.cos(kz * Z)
+        assert jnp.allclose(dfdz_real, dfdz_exact, rtol=1e-4, atol=1e-4)
+
+    def test_laplacian_3d_full(self):
+        """Test full 3D Laplacian with all three directions."""
+        grid = SpectralGrid3D.create(
+            Nx=128, Ny=128, Nz=128, Lx=2 * jnp.pi, Ly=2 * jnp.pi, Lz=2 * jnp.pi
+        )
+
+        # Create coordinate arrays
+        x = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        z = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
+        X, Y, Z = X.transpose(2, 1, 0), Y.transpose(2, 1, 0), Z.transpose(2, 1, 0)
+
+        kx, ky, kz = 4, 3, 2
+        # f(x,y,z) = sin(kx*x)·sin(ky*y)·sin(kz*z)
+        field_real = jnp.sin(kx * X) * jnp.sin(ky * Y) * jnp.sin(kz * Z)
+        field_fourier = rfftn_forward(field_real)
+
+        # Compute 3D Laplacian
+        lap_fourier = laplacian(field_fourier, grid.kx, grid.ky, grid.kz)
+        lap_real = rfftn_inverse(lap_fourier, 128, 128, 128)
+
+        # Analytical: ∇²f = -(kx² + ky² + kz²)·f
+        lap_exact = -(kx**2 + ky**2 + kz**2) * field_real
+
+        # Looser tolerance for 3D Laplacian: accumulated error from multiple FFT operations
+        # rtol=1e-4 accounts for float32 precision on 128³ grid
+        assert jnp.allclose(lap_real, lap_exact, rtol=1e-4, atol=1e-2)
+
+    def test_laplacian_3d_perpendicular_only(self):
+        """Test perpendicular Laplacian (kz=None) on 3D field."""
+        grid = SpectralGrid3D.create(
+            Nx=128, Ny=128, Nz=128, Lx=2 * jnp.pi, Ly=2 * jnp.pi, Lz=2 * jnp.pi
+        )
+
+        # Create coordinate arrays
+        x = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        z = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
+        X, Y, Z = X.transpose(2, 1, 0), Y.transpose(2, 1, 0), Z.transpose(2, 1, 0)
+
+        kx, ky, kz = 4, 3, 2
+        field_real = jnp.sin(kx * X) * jnp.sin(ky * Y) * jnp.sin(kz * Z)
+        field_fourier = rfftn_forward(field_real)
+
+        # Compute perpendicular Laplacian only (kz=None)
+        lap_perp_fourier = laplacian(field_fourier, grid.kx, grid.ky, kz=None)
+        lap_perp_real = rfftn_inverse(lap_perp_fourier, 128, 128, 128)
+
+        # Analytical: ∇²⊥f = -(kx² + ky²)·f (no kz contribution)
+        lap_perp_exact = -(kx**2 + ky**2) * field_real
+
+        # Perpendicular Laplacian should have similar accuracy to full 3D
+        assert jnp.allclose(lap_perp_real, lap_perp_exact, rtol=1e-4, atol=1e-2)
+
+
+class TestNegativeCases:
+    """Test suite for error handling and edge cases."""
+
+    def test_derivative_z_on_2d_field_raises(self):
+        """Test that derivative_z fails gracefully on 2D fields."""
+        grid2d = SpectralGrid2D.create(64, 64)
+        field_2d = jnp.ones((64, 33), dtype=jnp.complex64)
+
+        with pytest.raises(ValueError, match="Unsupported field dimensionality: 2"):
+            derivative_z(field_2d, jnp.ones(64))
+
+    def test_derivative_x_invalid_ndim(self):
+        """Test that derivative_x fails on 1D or 4D fields."""
+        # 1D field should fail
+        field_1d = jnp.ones(64, dtype=jnp.complex64)
+        with pytest.raises(ValueError, match="Unsupported field dimensionality"):
+            derivative_x(field_1d, jnp.ones(33))
+
+        # 4D field should fail
+        field_4d = jnp.ones((32, 32, 32, 17), dtype=jnp.complex64)
+        with pytest.raises(ValueError, match="Unsupported field dimensionality"):
+            derivative_x(field_4d, jnp.ones(33))
+
+    def test_laplacian_3d_without_kz(self):
+        """Test that perpendicular Laplacian works correctly (kz=None on 3D field)."""
+        grid = SpectralGrid3D.create(64, 64, 64)
+        field_fourier = jnp.ones((64, 64, 33), dtype=jnp.complex64)
+
+        # Should work without error (perpendicular Laplacian only)
+        lap_perp = laplacian(field_fourier, grid.kx, grid.ky, kz=None)
+        assert lap_perp.shape == field_fourier.shape
+
+
+class TestSpectralField3D:
+    """Test suite for SpectralField3D lazy evaluation."""
+
+    def test_from_real_3d(self):
+        """Test creating SpectralField3D from real-space data."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        field_real = jnp.ones((64, 64, 64))
+
+        field = SpectralField3D.from_real(field_real, grid)
+
+        # Real should be cached
+        assert jnp.allclose(field.real, field_real)
+
+        # Fourier should be computed lazily
+        field_fourier = field.fourier
+        assert field_fourier.shape == (64, 64, 64 // 2 + 1)
+
+    def test_from_fourier_3d(self):
+        """Test creating SpectralField3D from Fourier-space data."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        field_fourier = jnp.ones((64, 64, 64 // 2 + 1), dtype=jnp.complex64)
+
+        field = SpectralField3D.from_fourier(field_fourier, grid)
+
+        # Fourier should be cached
+        assert jnp.allclose(field.fourier, field_fourier)
+
+        # Real should be computed lazily
+        field_real = field.real
+        assert field_real.shape == (64, 64, 64)
+
+    def test_roundtrip_consistency_3d(self):
+        """Test that real -> Fourier -> real preserves data (3D)."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+
+        # Create field from real data
+        x = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        z = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
+        X, Y, Z = X.transpose(2, 1, 0), Y.transpose(2, 1, 0), Z.transpose(2, 1, 0)
+        field_real_original = jnp.sin(3 * X) + jnp.cos(2 * Y) + jnp.sin(Z)
+
+        field = SpectralField3D.from_real(field_real_original, grid)
+
+        # Access Fourier, then real again
+        _ = field.fourier
+        field_real_recovered = field.real
+
+        assert jnp.allclose(field_real_original, field_real_recovered, atol=1e-12)
 
 
 if __name__ == "__main__":

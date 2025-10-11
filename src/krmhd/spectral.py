@@ -1,16 +1,18 @@
 """
 Core spectral infrastructure for KRMHD solver.
 
-This module provides 2D spectral operations using FFT methods:
-- SpectralGrid2D: Pydantic model defining grid parameters and wavenumbers
-- SpectralField2D: Manages real-space and Fourier-space representations
-- FFT operations using rfft2 for real-to-complex transforms
-- Spectral derivatives (∂x, ∂y) computed as multiplication in Fourier space
+This module provides 2D and 3D spectral operations using FFT methods:
+- SpectralGrid2D: Pydantic model defining 2D grid parameters and wavenumbers
+- SpectralGrid3D: Pydantic model defining 3D grid parameters and wavenumbers
+- SpectralField2D/3D: Manages real-space and Fourier-space representations
+- FFT operations using rfft2/rfftn for real-to-complex transforms
+- Spectral derivatives (∂x, ∂y, ∂z) computed as multiplication in Fourier space
 - Dealiasing using the 2/3 rule to prevent aliasing errors
 
 All performance-critical functions are JIT-compiled with JAX.
 """
 
+from functools import partial
 from typing import Optional
 import jax
 import jax.numpy as jnp
@@ -106,13 +108,20 @@ class SpectralGrid2D(BaseModel):
         ky_max = jnp.max(jnp.abs(ky))
 
         # Create 2D mesh for mask computation
+        # meshgrid with indexing="ij" produces [len(kx), len(ky)]
         kx_2d, ky_2d = jnp.meshgrid(kx, ky, indexing="ij")
-        kx_2d = kx_2d.T  # Transpose to [Ny, Nx//2+1]
+
+        # Transpose to match rfft2 output shape [Ny, Nx//2+1]
+        # meshgrid order: [len(kx), len(ky)] = [Nx//2+1, Ny]
+        # After .T: [len(ky), len(kx)] = [Ny, Nx//2+1] ✓
+        kx_2d = kx_2d.T
         ky_2d = ky_2d.T
 
         # Mask: True where mode should be kept, False where it should be zeroed
-        dealias_mask = (jnp.abs(kx_2d) <= 2 / 3 * kx_max) & (
-            jnp.abs(ky_2d) <= 2 / 3 * ky_max
+        # Use explicit float32 for 2/3 threshold to match JAX default precision
+        threshold = jnp.float32(2.0 / 3.0)
+        dealias_mask = (jnp.abs(kx_2d) <= threshold * kx_max) & (
+            jnp.abs(ky_2d) <= threshold * ky_max
         )
 
         return cls(
@@ -122,6 +131,149 @@ class SpectralGrid2D(BaseModel):
             Ly=Ly,
             kx=kx,
             ky=ky,
+            dealias_mask=dealias_mask,
+        )
+
+
+class SpectralGrid3D(BaseModel):
+    """
+    Immutable 3D spectral grid specification with wavenumber arrays.
+
+    Defines a rectangular grid in real space (Nx × Ny × Nz) with periodic boundary
+    conditions. Wavenumber arrays are pre-computed for spectral derivatives,
+    and a dealiasing mask implements the 2/3 rule for nonlinear operations.
+
+    The z-direction is parallel to the background magnetic field B₀.
+
+    Attributes:
+        Nx: Number of grid points in x direction (must be > 0, even)
+        Ny: Number of grid points in y direction (must be > 0, even)
+        Nz: Number of grid points in z direction (must be > 0, even)
+        Lx: Physical domain size in x direction (must be > 0)
+        Ly: Physical domain size in y direction (must be > 0)
+        Lz: Physical domain size in z direction (must be > 0)
+        kx: Wavenumber array in x (shape: [Nx//2+1], non-negative for rfftn)
+        ky: Wavenumber array in y (shape: [Ny], includes negative frequencies)
+        kz: Wavenumber array in z (shape: [Nz], includes negative frequencies)
+        dealias_mask: Boolean mask for 2/3 rule dealiasing (shape: [Nz, Ny, Nx//2+1])
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=128, Ny=128, Nz=128,
+        ...                               Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        >>> grid.Nx
+        128
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    Nx: int = Field(gt=0, description="Number of grid points in x")
+    Ny: int = Field(gt=0, description="Number of grid points in y")
+    Nz: int = Field(gt=0, description="Number of grid points in z")
+    Lx: float = Field(gt=0.0, description="Domain size in x")
+    Ly: float = Field(gt=0.0, description="Domain size in y")
+    Lz: float = Field(gt=0.0, description="Domain size in z")
+    kx: Array = Field(description="Wavenumber array in x (non-negative)")
+    ky: Array = Field(description="Wavenumber array in y (includes negative)")
+    kz: Array = Field(description="Wavenumber array in z (includes negative)")
+    dealias_mask: Array = Field(description="Boolean mask for 2/3 rule dealiasing")
+
+    @field_validator("Nx", "Ny", "Nz")
+    @classmethod
+    def validate_even_dimensions(cls, v: int) -> int:
+        """Ensure grid dimensions are even for proper FFT symmetry."""
+        if v % 2 != 0:
+            raise ValueError(f"Grid dimension must be even, got {v}")
+        return v
+
+    @classmethod
+    def create(
+        cls,
+        Nx: int,
+        Ny: int,
+        Nz: int,
+        Lx: float = 2 * jnp.pi,
+        Ly: float = 2 * jnp.pi,
+        Lz: float = 2 * jnp.pi,
+    ) -> "SpectralGrid3D":
+        """
+        Factory method to create a SpectralGrid3D with computed wavenumbers.
+
+        Wavenumber arrays follow the rfftn convention:
+        - kx: [0, 1, 2, ..., Nx//2] (non-negative only, exploits reality)
+        - ky: [0, 1, ..., Ny//2-1, -Ny//2, ..., -1] (standard FFT ordering)
+        - kz: [0, 1, ..., Nz//2-1, -Nz//2, ..., -1] (standard FFT ordering)
+
+        The 2/3 dealiasing mask zeros modes where max(|kx|/kx_max, |ky|/ky_max, |kz|/kz_max) > 2/3
+        to prevent aliasing errors in nonlinear terms.
+
+        Args:
+            Nx: Number of grid points in x (must be even and > 0)
+            Ny: Number of grid points in y (must be even and > 0)
+            Nz: Number of grid points in z (must be even and > 0)
+            Lx: Physical domain size in x (default: 2π)
+            Ly: Physical domain size in y (default: 2π)
+            Lz: Physical domain size in z (default: 2π)
+
+        Returns:
+            SpectralGrid3D instance with pre-computed wavenumbers and mask
+
+        Raises:
+            ValueError: If Nx, Ny, or Nz are not positive even integers, or if Lx, Ly, Lz ≤ 0
+        """
+        # Early validation before JAX operations
+        if Nx <= 0 or Ny <= 0 or Nz <= 0:
+            raise ValueError(
+                f"Grid dimensions must be positive, got Nx={Nx}, Ny={Ny}, Nz={Nz}"
+            )
+        if Nx % 2 != 0 or Ny % 2 != 0 or Nz % 2 != 0:
+            raise ValueError(
+                f"Grid dimensions must be even, got Nx={Nx}, Ny={Ny}, Nz={Nz}"
+            )
+        if Lx <= 0 or Ly <= 0 or Lz <= 0:
+            raise ValueError(
+                f"Domain sizes must be positive, got Lx={Lx}, Ly={Ly}, Lz={Lz}"
+            )
+
+        # Wavenumber arrays (frequency space)
+        kx = jnp.fft.rfftfreq(Nx, d=Lx / (2 * jnp.pi * Nx))
+        ky = jnp.fft.fftfreq(Ny, d=Ly / (2 * jnp.pi * Ny))
+        kz = jnp.fft.fftfreq(Nz, d=Lz / (2 * jnp.pi * Nz))
+
+        # 2/3 rule dealiasing: zero modes beyond |k| > (2/3) * k_max
+        kx_max = jnp.max(jnp.abs(kx))
+        ky_max = jnp.max(jnp.abs(ky))
+        kz_max = jnp.max(jnp.abs(kz))
+
+        # Create 3D mesh for mask computation
+        # meshgrid with indexing="ij" produces [len(kx), len(ky), len(kz)]
+        kx_3d, ky_3d, kz_3d = jnp.meshgrid(kx, ky, kz, indexing="ij")
+
+        # Transpose to match rfftn output shape [Nz, Ny, Nx//2+1]
+        # meshgrid order: [len(kx), len(ky), len(kz)] = [Nx//2+1, Ny, Nz]
+        # After transpose(2,1,0): [len(kz), len(ky), len(kx)] = [Nz, Ny, Nx//2+1] ✓
+        kx_3d = kx_3d.transpose(2, 1, 0)
+        ky_3d = ky_3d.transpose(2, 1, 0)
+        kz_3d = kz_3d.transpose(2, 1, 0)
+
+        # Mask: True where mode should be kept, False where it should be zeroed
+        # Use explicit float32 for 2/3 threshold to match JAX default precision
+        threshold = jnp.float32(2.0 / 3.0)
+        dealias_mask = (
+            (jnp.abs(kx_3d) <= threshold * kx_max)
+            & (jnp.abs(ky_3d) <= threshold * ky_max)
+            & (jnp.abs(kz_3d) <= threshold * kz_max)
+        )
+
+        return cls(
+            Nx=Nx,
+            Ny=Ny,
+            Nz=Nz,
+            Lx=Lx,
+            Ly=Ly,
+            Lz=Lz,
+            kx=kx,
+            ky=ky,
+            kz=kz,
             dealias_mask=dealias_mask,
         )
 
@@ -240,6 +392,122 @@ class SpectralField2D(BaseModel):
         return self._fourier
 
 
+class SpectralField3D(BaseModel):
+    """
+    Manages a 3D field in both real and Fourier space with lazy evaluation.
+
+    Stores a field in ONE of {real, Fourier} representation and transforms
+    on-demand when the other is accessed. This avoids redundant FFTs.
+
+    Attributes:
+        grid: The spectral grid defining the field's domain
+        _real: Private cache for real-space representation (Nz × Ny × Nx)
+        _fourier: Private cache for Fourier-space representation (Nz × Ny × Nx//2+1)
+
+    Example:
+        >>> grid = SpectralGrid3D.create(64, 64, 64)
+        >>> field_real = jnp.sin(jnp.linspace(0, 2*jnp.pi, 64*64*64).reshape(64,64,64))
+        >>> field = SpectralField3D.from_real(field_real, grid)
+        >>> field_k = field.fourier  # Lazy FFT on first access
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    grid: SpectralGrid3D
+    _real: Optional[Array] = PrivateAttr(default=None)
+    _fourier: Optional[Array] = PrivateAttr(default=None)
+
+    @classmethod
+    def from_real(cls, field_real: Array, grid: SpectralGrid3D) -> "SpectralField3D":
+        """
+        Create a SpectralField3D from real-space data.
+
+        Args:
+            field_real: Real-space field array (shape: [Nz, Ny, Nx])
+            grid: SpectralGrid3D defining the domain
+
+        Returns:
+            SpectralField3D with real data cached
+
+        Raises:
+            ValueError: If field_real shape does not match grid dimensions
+        """
+        expected_shape = (grid.Nz, grid.Ny, grid.Nx)
+        if field_real.shape != expected_shape:
+            raise ValueError(
+                f"Field shape {field_real.shape} does not match grid shape {expected_shape}"
+            )
+        instance = cls(grid=grid)
+        instance._real = field_real
+        return instance
+
+    @classmethod
+    def from_fourier(
+        cls, field_fourier: Array, grid: SpectralGrid3D
+    ) -> "SpectralField3D":
+        """
+        Create a SpectralField3D from Fourier-space data.
+
+        Args:
+            field_fourier: Fourier-space field array (shape: [Nz, Ny, Nx//2+1])
+            grid: SpectralGrid3D defining the domain
+
+        Returns:
+            SpectralField3D with Fourier data cached
+
+        Raises:
+            ValueError: If field_fourier shape does not match grid dimensions
+        """
+        expected_shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        if field_fourier.shape != expected_shape:
+            raise ValueError(
+                f"Field shape {field_fourier.shape} does not match expected Fourier shape {expected_shape}"
+            )
+        instance = cls(grid=grid)
+        instance._fourier = field_fourier
+        return instance
+
+    @property
+    def real(self) -> Array:
+        """
+        Get real-space representation, transforming from Fourier if needed.
+
+        Returns:
+            Real-space array (shape: [Nz, Ny, Nx])
+
+        Warning:
+            The returned array is cached. While JAX arrays are conceptually immutable,
+            do not modify the returned array as it may lead to inconsistent state.
+            Create a copy if modifications are needed: `field.real.copy()`
+        """
+        if self._real is None:
+            if self._fourier is None:
+                raise ValueError("Field has neither real nor Fourier data")
+            self._real = rfftn_inverse(
+                self._fourier, self.grid.Nz, self.grid.Ny, self.grid.Nx
+            )
+        return self._real
+
+    @property
+    def fourier(self) -> Array:
+        """
+        Get Fourier-space representation, transforming from real if needed.
+
+        Returns:
+            Fourier-space array (shape: [Nz, Ny, Nx//2+1])
+
+        Warning:
+            The returned array is cached. While JAX arrays are conceptually immutable,
+            do not modify the returned array as it may lead to inconsistent state.
+            Create a copy if modifications are needed: `field.fourier.copy()`
+        """
+        if self._fourier is None:
+            if self._real is None:
+                raise ValueError("Field has neither real nor Fourier data")
+            self._fourier = rfftn_forward(self._real)
+        return self._fourier
+
+
 # =============================================================================
 # FFT Operations (JIT-compiled)
 # =============================================================================
@@ -284,9 +552,103 @@ def rfft2_inverse(field_fourier: Array, Ny: int, Nx: int) -> Array:
     return jnp.fft.irfft2(field_fourier, s=(Ny, Nx))
 
 
+@jax.jit
+def rfftn_forward(field_real: Array) -> Array:
+    """
+    Forward 3D real-to-complex FFT.
+
+    Uses rfftn to exploit reality condition: F(-k) = F*(k), saving ~50% memory.
+    The real FFT is performed only in the x-direction (last axis).
+
+    Args:
+        field_real: Real-space field (shape: [Nz, Ny, Nx])
+
+    Returns:
+        Fourier-space field (shape: [Nz, Ny, Nx//2+1], complex)
+
+    Note:
+        No normalization on forward transform (normalization is on inverse).
+        Uses axes=(0, 1, 2) for full 3D transform with rfft in x-direction.
+    """
+    return jnp.fft.rfftn(field_real, axes=(0, 1, 2))
+
+
+def rfftn_inverse(field_fourier: Array, Nz: int, Ny: int, Nx: int) -> Array:
+    """
+    Inverse 3D complex-to-real FFT.
+
+    Args:
+        field_fourier: Fourier-space field (shape: [Nz, Ny, Nx//2+1], complex)
+        Nz: Output shape in z direction
+        Ny: Output shape in y direction
+        Nx: Output shape in x direction
+
+    Returns:
+        Real-space field (shape: [Nz, Ny, Nx], real)
+
+    Note:
+        Normalization factor 1/(Nx*Ny*Nz) is automatically applied by irfftn.
+        Not JIT-compiled because shape arguments cannot be traced.
+        The underlying jnp.fft.irfftn is already highly optimized.
+    """
+    return jnp.fft.irfftn(field_fourier, s=(Nz, Ny, Nx), axes=(0, 1, 2))
+
+
 # =============================================================================
 # Spectral Derivatives (JIT-compiled)
 # =============================================================================
+
+
+@partial(jax.jit, static_argnames=['ndim'])
+def _broadcast_wavenumber_x(k: Array, ndim: int) -> Array:
+    """
+    Broadcast 1D wavenumber array for x-direction to match field dimensionality.
+
+    Args:
+        k: 1D wavenumber array
+        ndim: Target dimensionality (2 or 3) - static argument for JIT compilation
+
+    Returns:
+        Broadcasted array with shape appropriate for element-wise multiplication
+        - 2D: [1, len(k)] for shape [Ny, Nx//2+1]
+        - 3D: [1, 1, len(k)] for shape [Nz, Ny, Nx//2+1]
+
+    Note:
+        JIT-compiled with ndim as a static argument, allowing JAX to specialize
+        the function for each dimensionality without recompilation overhead.
+    """
+    if ndim == 2:
+        return k[jnp.newaxis, :]  # [1, Nx//2+1]
+    elif ndim == 3:
+        return k[jnp.newaxis, jnp.newaxis, :]  # [1, 1, Nx//2+1]
+    else:
+        raise ValueError(f"Unsupported field dimensionality: {ndim}")
+
+
+@partial(jax.jit, static_argnames=['ndim'])
+def _broadcast_wavenumber_y(k: Array, ndim: int) -> Array:
+    """
+    Broadcast 1D wavenumber array for y-direction to match field dimensionality.
+
+    Args:
+        k: 1D wavenumber array
+        ndim: Target dimensionality (2 or 3) - static argument for JIT compilation
+
+    Returns:
+        Broadcasted array with shape appropriate for element-wise multiplication
+        - 2D: [len(k), 1] for shape [Ny, Nx//2+1]
+        - 3D: [1, len(k), 1] for shape [Nz, Ny, Nx//2+1]
+
+    Note:
+        JIT-compiled with ndim as a static argument, allowing JAX to specialize
+        the function for each dimensionality without recompilation overhead.
+    """
+    if ndim == 2:
+        return k[:, jnp.newaxis]  # [Ny, 1]
+    elif ndim == 3:
+        return k[jnp.newaxis, :, jnp.newaxis]  # [1, Ny, 1]
+    else:
+        raise ValueError(f"Unsupported field dimensionality: {ndim}")
 
 
 @jax.jit
@@ -297,20 +659,19 @@ def derivative_x(field_fourier: Array, kx: Array) -> Array:
     This is exact for band-limited functions (no truncation error).
 
     Args:
-        field_fourier: Fourier-space field (shape: [Ny, Nx//2+1])
+        field_fourier: Fourier-space field (shape: [Ny, Nx//2+1] or [Nz, Ny, Nx//2+1])
         kx: Wavenumber array in x (shape: [Nx//2+1])
 
     Returns:
-        Fourier-space derivative ∂f/∂x (shape: [Ny, Nx//2+1])
+        Fourier-space derivative ∂f/∂x (same shape as input)
 
     Example:
         >>> # For f(x) = sin(kx), ∂f/∂x = k·cos(kx)
         >>> df_dx_fourier = derivative_x(f_fourier, grid.kx)
         >>> df_dx_real = rfft2_inverse(df_dx_fourier, grid.Ny, grid.Nx)
     """
-    # Broadcast kx to shape [Ny, Nx//2+1]
-    kx_2d = kx[jnp.newaxis, :]  # Shape: [1, Nx//2+1]
-    return 1j * kx_2d * field_fourier
+    kx_nd = _broadcast_wavenumber_x(kx, field_fourier.ndim)
+    return 1j * kx_nd * field_fourier
 
 
 @jax.jit
@@ -321,55 +682,99 @@ def derivative_y(field_fourier: Array, ky: Array) -> Array:
     This is exact for band-limited functions (no truncation error).
 
     Args:
-        field_fourier: Fourier-space field (shape: [Ny, Nx//2+1])
+        field_fourier: Fourier-space field (shape: [Ny, Nx//2+1] or [Nz, Ny, Nx//2+1])
         ky: Wavenumber array in y (shape: [Ny])
 
     Returns:
-        Fourier-space derivative ∂f/∂y (shape: [Ny, Nx//2+1])
+        Fourier-space derivative ∂f/∂y (same shape as input)
 
     Example:
         >>> # For f(y) = sin(ky), ∂f/∂y = k·cos(ky)
         >>> df_dy_fourier = derivative_y(f_fourier, grid.ky)
         >>> df_dy_real = rfft2_inverse(df_dy_fourier, grid.Ny, grid.Nx)
     """
-    # Broadcast ky to shape [Ny, Nx//2+1]
-    ky_2d = ky[:, jnp.newaxis]  # Shape: [Ny, 1]
-    return 1j * ky_2d * field_fourier
+    ky_nd = _broadcast_wavenumber_y(ky, field_fourier.ndim)
+    return 1j * ky_nd * field_fourier
 
 
 @jax.jit
-def laplacian(field_fourier: Array, kx: Array, ky: Array) -> Array:
+def derivative_z(field_fourier: Array, kz: Array) -> Array:
     """
-    Compute Laplacian ∇²f in Fourier space: ∇²f → -(kx² + ky²)·f̂(k).
+    Compute ∂f/∂z in Fourier space: ∂f/∂z → i·kz·f̂(k).
 
-    This is a fundamental operation in KRMHD for the Poisson solver and
-    dissipation terms. More efficient than computing ∂²/∂x² and ∂²/∂y² separately.
+    This is the parallel gradient operator ∇∥ for KRMHD with B₀ = B₀ẑ.
+    Exact for band-limited functions (no truncation error).
 
     Args:
-        field_fourier: Fourier-space field (shape: [Ny, Nx//2+1])
-        kx: Wavenumber array in x (shape: [Nx//2+1])
-        ky: Wavenumber array in y (shape: [Ny])
+        field_fourier: Fourier-space field (shape: [Nz, Ny, Nx//2+1])
+        kz: Wavenumber array in z (shape: [Nz])
 
     Returns:
-        Fourier-space Laplacian ∇²f (shape: [Ny, Nx//2+1])
+        Fourier-space derivative ∂f/∂z (shape: [Nz, Ny, Nx//2+1])
+
+    Raises:
+        ValueError: If field_fourier is not 3D
 
     Example:
-        >>> # For f(x,y) = sin(kx*x)·sin(ky*y), ∇²f = -(kx² + ky²)·f
+        >>> # For f(z) = sin(kz), ∂f/∂z = k·cos(kz)
+        >>> df_dz_fourier = derivative_z(f_fourier, grid.kz)
+        >>> df_dz_real = rfftn_inverse(df_dz_fourier, grid.Nz, grid.Ny, grid.Nx)
+    """
+    if field_fourier.ndim != 3:
+        raise ValueError(f"Unsupported field dimensionality: {field_fourier.ndim}")
+    # Broadcast kz to shape [Nz, Ny, Nx//2+1]
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
+    return 1j * kz_3d * field_fourier
+
+
+@jax.jit
+def laplacian(field_fourier: Array, kx: Array, ky: Array, kz: Optional[Array] = None) -> Array:
+    """
+    Compute Laplacian ∇²f in Fourier space.
+
+    For 2D: ∇²f → -(kx² + ky²)·f̂(k)
+    For 3D: ∇²f → -(kx² + ky² + kz²)·f̂(k)
+
+    This is a fundamental operation in KRMHD for the Poisson solver and
+    dissipation terms. More efficient than computing individual second derivatives.
+
+    Args:
+        field_fourier: Fourier-space field (shape: [Ny, Nx//2+1] or [Nz, Ny, Nx//2+1])
+        kx: Wavenumber array in x (shape: [Nx//2+1])
+        ky: Wavenumber array in y (shape: [Ny])
+        kz: Wavenumber array in z (shape: [Nz], optional for 3D)
+
+    Returns:
+        Fourier-space Laplacian ∇²f (same shape as input)
+
+    Example:
+        >>> # 2D: For f(x,y) = sin(kx*x)·sin(ky*y), ∇²f = -(kx² + ky²)·f
         >>> lap_fourier = laplacian(f_fourier, grid.kx, grid.ky)
         >>> lap_real = rfft2_inverse(lap_fourier, grid.Ny, grid.Nx)
 
+        >>> # 3D: Include kz for full 3D Laplacian
+        >>> lap_fourier_3d = laplacian(f_fourier_3d, grid.kx, grid.ky, grid.kz)
+
     Note:
-        This will be essential for the Poisson solver in Step 3:
-        k²φ = ∇²⊥A∥ → φ = ∇²⊥A∥ / k²
+        **When to use kz=None:**
+        - KRMHD Poisson solver: k²φ = ∇²⊥A∥ requires perpendicular Laplacian only
+        - Perpendicular dynamics: Use kz=None for ∇²⊥ = ∂²/∂x² + ∂²/∂y²
+        - Dissipation in 3D: Use kz=grid.kz for full 3D Laplacian ∇² = ∇²⊥ + ∂²/∂z²
+
+        For 3D fields, kz=None computes perpendicular Laplacian at each z-plane,
+        which is the standard form for KRMHD turbulent cascade operators.
     """
-    # Broadcast wavenumbers to 2D
-    kx_2d = kx[jnp.newaxis, :]  # Shape: [1, Nx//2+1]
-    ky_2d = ky[:, jnp.newaxis]  # Shape: [Ny, 1]
+    ndim = field_fourier.ndim
+    kx_nd = _broadcast_wavenumber_x(kx, ndim)
+    ky_nd = _broadcast_wavenumber_y(ky, ndim)
+    k_squared = kx_nd**2 + ky_nd**2
 
-    # Compute k² = kx² + ky²
-    k_squared = kx_2d**2 + ky_2d**2
+    # Add z-component for full 3D Laplacian if requested
+    if ndim == 3 and kz is not None:
+        kz_nd = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
+        k_squared = k_squared + kz_nd**2
 
-    # ∇²f = -(kx² + ky²)·f̂(k)
+    # ∇²f = -k²·f̂(k)
     return -k_squared * field_fourier
 
 
