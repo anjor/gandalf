@@ -1,26 +1,35 @@
 """
-Hermite polynomial basis for kinetic velocity-space representation.
+Hermite basis functions for kinetic velocity-space representation.
 
-This module implements Hermite polynomials weighted by a Maxwellian distribution
-for expanding the electron distribution function along the parallel direction:
+This module implements orthonormal Hermite functions (quantum harmonic oscillator
+eigenfunctions) for expanding the electron distribution function along the parallel
+direction:
 
-    g(v∥) = Σ_m g_m · H_m(v∥/v_th) · F_0(v∥)
+    g(v∥) = Σ_m g_m · ψ_m(v∥/v_th)
 
-where F_0(v) = exp(-v²/(2v_th²))/√(2πv_th²) is the background Maxwellian.
+where ψ_m(v) = N_m · H_m(v) · exp(-v²/2) are orthonormal Hermite functions.
+
+The orthonormality condition is:
+    ∫ ψ_m(v) · ψ_n(v) dv = δ_{mn}
+
+This differs from bare Hermite polynomials H_m(v) which satisfy:
+    ∫ H_m(v) · H_n(v) · exp(-v²) dv = √π · 2^m · m! · δ_{mn}
 
 Key functions:
-- hermite_polynomial: Evaluate H_m(v) using recurrence relations
-- hermite_normalization: Compute normalization 1/√(2^m·m!)
-- distribution_to_moments: Project g(v) onto Hermite basis
-- moments_to_distribution: Reconstruct g(v) from Hermite moments
+- hermite_polynomial: Evaluate physicist's Hermite polynomial H_m(v)
+- hermite_normalization: Compute N_m = 1/√(2^m·m!·√π) for orthonormal basis
+- hermite_basis_function: Evaluate ψ_m(v) = N_m · H_m(v) · exp(-v²/2)
+- distribution_to_moments: Project g(v) onto orthonormal basis
+- moments_to_distribution: Reconstruct g(v) from moments
 
 All functions are JIT-compiled for performance and use JAX arrays for
 automatic differentiation compatibility.
 
 Physical context (Thesis §2.2, Eq 2.1):
 The Hermite representation captures Landau damping and phase mixing in
-velocity space, essential for kinetic plasma physics. The orthogonal basis
-with Maxwellian weight ensures proper treatment of the thermal distribution.
+velocity space, essential for kinetic plasma physics. The orthonormal basis
+with Maxwellian weight exp(-v²/2) ensures proper treatment of the thermal
+distribution and enables efficient moment truncation.
 """
 
 from functools import partial
@@ -31,7 +40,7 @@ from jax import Array
 
 
 @jax.jit
-def hermite_normalization(m: int) -> float:
+def hermite_normalization(m: int) -> Array:
     """
     Compute normalization constant for orthonormal Hermite functions.
 
@@ -48,13 +57,13 @@ def hermite_normalization(m: int) -> float:
         m: Hermite function order (must be non-negative)
 
     Returns:
-        Normalization constant 1/√(2^m · m! · √π)
+        Normalization constant 1/√(2^m · m! · √π) as a JAX scalar Array
 
     Example:
         >>> hermite_normalization(0)
-        0.751125...  # 1/π^(1/4)
+        Array(0.751125..., dtype=float32)  # 1/π^(1/4)
         >>> hermite_normalization(1)
-        0.531126...  # 1/(√2 · π^(1/4))
+        Array(0.531126..., dtype=float32)  # 1/(√2 · π^(1/4))
     """
     # N_m = 1 / √(2^m · m! · √π)
     # log(N_m) = -0.5 * [m·ln(2) + ln(m!) + 0.5·ln(π)]
@@ -226,7 +235,7 @@ def distribution_to_moments(
         g_v: Distribution function values on velocity grid, shape (..., Nv)
         v_grid: Velocity grid points, shape (Nv,)
         M: Number of moments to compute (will return M+1 moments: 0 to M)
-        v_th: Thermal velocity
+        v_th: Thermal velocity (must be > 0)
 
     Returns:
         Hermite moments array, shape (..., M+1)
@@ -235,6 +244,8 @@ def distribution_to_moments(
         - Assumes v_grid has uniform spacing for trapezoidal rule
         - Integration performed via JAX's trapezoid function
         - Batch dimensions in g_v are preserved
+        - For accurate results with M moments, recommend Nv ≥ 100*M grid points
+        - Velocity grid should span at least ±5*v_th for exponential decay
 
     Example:
         >>> v = jnp.linspace(-10, 10, 1000)
@@ -300,11 +311,16 @@ def moments_to_distribution(
     Args:
         g_m: Hermite moments, shape (..., M+1)
         v_grid: Velocity grid for reconstruction, shape (Nv,)
-        v_th: Thermal velocity
+        v_th: Thermal velocity (must be > 0)
         M: Number of moments (inferred from g_m if not provided)
 
     Returns:
         Reconstructed distribution, shape (..., Nv)
+
+    Notes:
+        - Truncation at M moments introduces approximation error
+        - For accurate reconstruction, M should be large enough that
+          |g_M| ≪ |g_0| (typically requiring M ≥ 10-20)
 
     Example:
         >>> v = jnp.linspace(-10, 10, 1000)
