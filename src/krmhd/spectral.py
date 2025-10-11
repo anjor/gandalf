@@ -11,7 +11,7 @@ This module provides 2D spectral operations using FFT methods:
 All performance-critical functions are JIT-compiled with JAX.
 """
 
-from typing import Tuple, Optional
+from typing import Optional
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -162,7 +162,15 @@ class SpectralField2D(BaseModel):
 
         Returns:
             SpectralField2D with real data cached
+
+        Raises:
+            ValueError: If field_real shape does not match grid dimensions
         """
+        expected_shape = (grid.Ny, grid.Nx)
+        if field_real.shape != expected_shape:
+            raise ValueError(
+                f"Field shape {field_real.shape} does not match grid shape {expected_shape}"
+            )
         instance = cls(grid=grid)
         instance._real = field_real
         return instance
@@ -180,7 +188,15 @@ class SpectralField2D(BaseModel):
 
         Returns:
             SpectralField2D with Fourier data cached
+
+        Raises:
+            ValueError: If field_fourier shape does not match grid dimensions
         """
+        expected_shape = (grid.Ny, grid.Nx // 2 + 1)
+        if field_fourier.shape != expected_shape:
+            raise ValueError(
+                f"Field shape {field_fourier.shape} does not match expected Fourier shape {expected_shape}"
+            )
         instance = cls(grid=grid)
         instance._fourier = field_fourier
         return instance
@@ -192,6 +208,11 @@ class SpectralField2D(BaseModel):
 
         Returns:
             Real-space array (shape: [Ny, Nx])
+
+        Warning:
+            The returned array is cached. While JAX arrays are conceptually immutable,
+            do not modify the returned array as it may lead to inconsistent state.
+            Create a copy if modifications are needed: `field.real.copy()`
         """
         if self._real is None:
             if self._fourier is None:
@@ -206,6 +227,11 @@ class SpectralField2D(BaseModel):
 
         Returns:
             Fourier-space array (shape: [Ny, Nx//2+1])
+
+        Warning:
+            The returned array is cached. While JAX arrays are conceptually immutable,
+            do not modify the returned array as it may lead to inconsistent state.
+            Create a copy if modifications are needed: `field.fourier.copy()`
         """
         if self._fourier is None:
             if self._real is None:
@@ -217,6 +243,7 @@ class SpectralField2D(BaseModel):
 # =============================================================================
 # FFT Operations (JIT-compiled)
 # =============================================================================
+
 
 @jax.jit
 def rfft2_forward(field_real: Array) -> Array:
@@ -251,6 +278,8 @@ def rfft2_inverse(field_fourier: Array, Ny: int, Nx: int) -> Array:
 
     Note:
         Normalization factor 1/(Nx*Ny) is automatically applied by irfft2.
+        Not JIT-compiled because shape arguments cannot be traced.
+        The underlying jnp.fft.irfft2 is already highly optimized.
     """
     return jnp.fft.irfft2(field_fourier, s=(Ny, Nx))
 
@@ -258,6 +287,7 @@ def rfft2_inverse(field_fourier: Array, Ny: int, Nx: int) -> Array:
 # =============================================================================
 # Spectral Derivatives (JIT-compiled)
 # =============================================================================
+
 
 @jax.jit
 def derivative_x(field_fourier: Array, kx: Array) -> Array:
@@ -307,9 +337,46 @@ def derivative_y(field_fourier: Array, ky: Array) -> Array:
     return 1j * ky_2d * field_fourier
 
 
+@jax.jit
+def laplacian(field_fourier: Array, kx: Array, ky: Array) -> Array:
+    """
+    Compute Laplacian ∇²f in Fourier space: ∇²f → -(kx² + ky²)·f̂(k).
+
+    This is a fundamental operation in KRMHD for the Poisson solver and
+    dissipation terms. More efficient than computing ∂²/∂x² and ∂²/∂y² separately.
+
+    Args:
+        field_fourier: Fourier-space field (shape: [Ny, Nx//2+1])
+        kx: Wavenumber array in x (shape: [Nx//2+1])
+        ky: Wavenumber array in y (shape: [Ny])
+
+    Returns:
+        Fourier-space Laplacian ∇²f (shape: [Ny, Nx//2+1])
+
+    Example:
+        >>> # For f(x,y) = sin(kx*x)·sin(ky*y), ∇²f = -(kx² + ky²)·f
+        >>> lap_fourier = laplacian(f_fourier, grid.kx, grid.ky)
+        >>> lap_real = rfft2_inverse(lap_fourier, grid.Ny, grid.Nx)
+
+    Note:
+        This will be essential for the Poisson solver in Step 3:
+        k²φ = ∇²⊥A∥ → φ = ∇²⊥A∥ / k²
+    """
+    # Broadcast wavenumbers to 2D
+    kx_2d = kx[jnp.newaxis, :]  # Shape: [1, Nx//2+1]
+    ky_2d = ky[:, jnp.newaxis]  # Shape: [Ny, 1]
+
+    # Compute k² = kx² + ky²
+    k_squared = kx_2d**2 + ky_2d**2
+
+    # ∇²f = -(kx² + ky²)·f̂(k)
+    return -k_squared * field_fourier
+
+
 # =============================================================================
 # Dealiasing (JIT-compiled)
 # =============================================================================
+
 
 @jax.jit
 def dealias(field_fourier: Array, dealias_mask: Array) -> Array:

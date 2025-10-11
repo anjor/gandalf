@@ -21,6 +21,7 @@ from krmhd.spectral import (
     rfft2_inverse,
     derivative_x,
     derivative_y,
+    laplacian,
     dealias,
 )
 
@@ -260,8 +261,67 @@ class TestDerivatives:
         # Analytical: ∇²f = -(kx² + ky²)·sin(kx*x)·sin(ky*y)
         laplacian_exact = -(kx**2 + ky**2) * field_real
 
-        # Float32 precision with numerical noise at boundaries
+        # Float32 precision with accumulated error from two sequential derivative operations
+        # Looser tolerance (rtol=1e-4, atol=1e-2) accounts for error propagation:
+        # ∇² = ∂²/∂x² + ∂²/∂y² involves 4 FFT operations total (2 forward, 2 inverse)
         assert jnp.allclose(laplacian_real, laplacian_exact, rtol=1e-4, atol=1e-2)
+
+    def test_laplacian_helper(self):
+        """Test dedicated laplacian() function (more efficient than sequential derivatives)."""
+        grid = SpectralGrid2D.create(Nx=128, Ny=128, Lx=2 * jnp.pi, Ly=2 * jnp.pi)
+
+        # Create coordinate arrays
+        x = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        X, Y = jnp.meshgrid(x, y, indexing="ij")
+        X, Y = X.T, Y.T
+
+        kx, ky = 4, 3
+        # f(x,y) = sin(kx*x)·sin(ky*y)
+        field_real = jnp.sin(kx * X) * jnp.sin(ky * Y)
+        field_fourier = rfft2_forward(field_real)
+
+        # Compute Laplacian using helper function
+        lap_fourier = laplacian(field_fourier, grid.kx, grid.ky)
+        lap_real = rfft2_inverse(lap_fourier, 128, 128)
+
+        # Analytical: ∇²f = -(kx² + ky²)·sin(kx*x)·sin(ky*y)
+        lap_exact = -(kx**2 + ky**2) * field_real
+
+        # Should match with similar tolerance to sequential method
+        assert jnp.allclose(lap_real, lap_exact, rtol=1e-4, atol=1e-2)
+
+    def test_derivatives_non_square_grid(self):
+        """Test derivatives on non-square grid (Nx != Ny) to verify broadcasting."""
+        grid = SpectralGrid2D.create(Nx=256, Ny=128, Lx=2 * jnp.pi, Ly=2 * jnp.pi)
+
+        # Create coordinate arrays (non-square)
+        x = jnp.linspace(0, 2 * jnp.pi, 256, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        X, Y = jnp.meshgrid(x, y, indexing="ij")
+        X, Y = X.T, Y.T  # Shape: [Ny=128, Nx=256]
+
+        # Test ∂x on non-square grid
+        n = 3
+        field_real = jnp.sin(n * X)
+        field_fourier = rfft2_forward(field_real)
+
+        dfdx_fourier = derivative_x(field_fourier, grid.kx)
+        dfdx_real = rfft2_inverse(dfdx_fourier, 128, 256)
+        dfdx_exact = n * jnp.cos(n * X)
+
+        # Slightly looser tolerance for non-square grids (different aspect ratio)
+        assert jnp.allclose(dfdx_real, dfdx_exact, atol=1e-4)
+
+        # Test ∂y on non-square grid
+        field_real = jnp.sin(n * Y)
+        field_fourier = rfft2_forward(field_real)
+
+        dfdy_fourier = derivative_y(field_fourier, grid.ky)
+        dfdy_real = rfft2_inverse(dfdy_fourier, 128, 256)
+        dfdy_exact = n * jnp.cos(n * Y)
+
+        assert jnp.allclose(dfdy_real, dfdy_exact, atol=1e-4)
 
 
 class TestDealiasing:
@@ -368,6 +428,28 @@ class TestSpectralField2D:
         field_real_recovered = field.real
 
         assert jnp.allclose(field_real_original, field_real_recovered, atol=1e-12)
+
+    def test_shape_validation_real(self):
+        """Test that from_real validates field shape matches grid."""
+        grid = SpectralGrid2D.create(Nx=64, Ny=64)
+
+        # Wrong shape should raise ValueError
+        wrong_shape_field = jnp.ones((32, 64))  # Should be (64, 64)
+
+        with pytest.raises(ValueError, match="does not match grid shape"):
+            SpectralField2D.from_real(wrong_shape_field, grid)
+
+    def test_shape_validation_fourier(self):
+        """Test that from_fourier validates field shape matches grid."""
+        grid = SpectralGrid2D.create(Nx=64, Ny=64)
+
+        # Wrong shape should raise ValueError
+        wrong_shape_field = jnp.ones(
+            (64, 32), dtype=jnp.complex64
+        )  # Should be (64, 33)
+
+        with pytest.raises(ValueError, match="does not match expected Fourier shape"):
+            SpectralField2D.from_fourier(wrong_shape_field, grid)
 
 
 if __name__ == "__main__":
