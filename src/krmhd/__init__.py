@@ -39,8 +39,19 @@ from krmhd.spectral import (
     dealias,
 )
 
+from krmhd.hermite import (
+    hermite_polynomial,
+    hermite_polynomials_all,
+    hermite_normalization,
+    hermite_basis_function,
+    distribution_to_moments,
+    moments_to_distribution,
+    check_orthogonality,
+)
+
 __all__ = [
     "__version__",
+    # Spectral infrastructure
     "SpectralGrid2D",
     "SpectralGrid3D",
     "SpectralField2D",
@@ -50,4 +61,12 @@ __all__ = [
     "derivative_z",
     "laplacian",
     "dealias",
+    # Hermite basis for kinetic physics
+    "hermite_polynomial",
+    "hermite_polynomials_all",
+    "hermite_normalization",
+    "hermite_basis_function",
+    "distribution_to_moments",
+    "moments_to_distribution",
+    "check_orthogonality",
 ]
