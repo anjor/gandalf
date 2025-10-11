@@ -70,6 +70,8 @@ krmhd/
 5. **Physics transparency**: Variable names match physics notation
 6. **UV for package management**: Use uv for package management and/or running ad hoc
 scripts
+7. **Commit quick**: Commit logical changes quickly and often to ensure there are
+checkpoints to return to.
 
 ## Implementation Guidelines
 
