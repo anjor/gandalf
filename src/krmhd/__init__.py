@@ -26,4 +26,6 @@ __version__ = "0.1.0"
 __author__ = "anjor"
 __email__ = "anjor@umd.edu"
 
-__all__ = ["__version__"]
+from krmhd.spectral import SpectralGrid2D, SpectralField2D
+
+__all__ = ["__version__", "SpectralGrid2D", "SpectralField2D"]
