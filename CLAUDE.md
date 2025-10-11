@@ -68,6 +68,8 @@ krmhd/
 3. **JIT everything**: @jax.jit on all performance-critical functions
 4. **Explicit typing**: Full type hints for clarity
 5. **Physics transparency**: Variable names match physics notation
+6. **UV for package management**: Use uv for package management and/or running ad hoc
+scripts
 
 ## Implementation Guidelines
 
