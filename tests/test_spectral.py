@@ -643,6 +643,8 @@ class TestDerivatives3D:
         dfdx_fourier = derivative_x(field_fourier, grid.kx)
         dfdx_real = rfftn_inverse(dfdx_fourier, 128, 128, 128)
         dfdx_exact = kx * jnp.cos(kx * X) * jnp.cos(ky * Y) * jnp.sin(kz * Z)
+        # Looser tolerance for 3D: 128³ grid → more accumulated rounding error
+        # from 6 FFT operations (3 forward + 3 inverse) compared to 2D (4 ops)
         assert jnp.allclose(dfdx_real, dfdx_exact, rtol=1e-4, atol=1e-4)
 
         # Test ∂y
@@ -682,7 +684,8 @@ class TestDerivatives3D:
         # Analytical: ∇²f = -(kx² + ky² + kz²)·f
         lap_exact = -(kx**2 + ky**2 + kz**2) * field_real
 
-        # Should match with similar tolerance
+        # Looser tolerance for 3D Laplacian: accumulated error from multiple FFT operations
+        # rtol=1e-4 accounts for float32 precision on 128³ grid
         assert jnp.allclose(lap_real, lap_exact, rtol=1e-4, atol=1e-2)
 
     def test_laplacian_3d_perpendicular_only(self):
@@ -709,8 +712,41 @@ class TestDerivatives3D:
         # Analytical: ∇²⊥f = -(kx² + ky²)·f (no kz contribution)
         lap_perp_exact = -(kx**2 + ky**2) * field_real
 
-        # Should match
+        # Perpendicular Laplacian should have similar accuracy to full 3D
         assert jnp.allclose(lap_perp_real, lap_perp_exact, rtol=1e-4, atol=1e-2)
+
+
+class TestNegativeCases:
+    """Test suite for error handling and edge cases."""
+
+    def test_derivative_z_on_2d_field_raises(self):
+        """Test that derivative_z fails gracefully on 2D fields."""
+        grid2d = SpectralGrid2D.create(64, 64)
+        field_2d = jnp.ones((64, 33), dtype=jnp.complex64)
+
+        with pytest.raises(ValueError, match="Unsupported field dimensionality: 2"):
+            derivative_z(field_2d, jnp.ones(64))
+
+    def test_derivative_x_invalid_ndim(self):
+        """Test that derivative_x fails on 1D or 4D fields."""
+        # 1D field should fail
+        field_1d = jnp.ones(64, dtype=jnp.complex64)
+        with pytest.raises(ValueError, match="Unsupported field dimensionality"):
+            derivative_x(field_1d, jnp.ones(33))
+
+        # 4D field should fail
+        field_4d = jnp.ones((32, 32, 32, 17), dtype=jnp.complex64)
+        with pytest.raises(ValueError, match="Unsupported field dimensionality"):
+            derivative_x(field_4d, jnp.ones(33))
+
+    def test_laplacian_3d_without_kz(self):
+        """Test that perpendicular Laplacian works correctly (kz=None on 3D field)."""
+        grid = SpectralGrid3D.create(64, 64, 64)
+        field_fourier = jnp.ones((64, 64, 33), dtype=jnp.complex64)
+
+        # Should work without error (perpendicular Laplacian only)
+        lap_perp = laplacian(field_fourier, grid.kx, grid.ky, kz=None)
+        assert lap_perp.shape == field_fourier.shape
 
 
 class TestSpectralField3D:

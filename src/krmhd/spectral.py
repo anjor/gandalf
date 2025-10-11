@@ -107,8 +107,13 @@ class SpectralGrid2D(BaseModel):
         ky_max = jnp.max(jnp.abs(ky))
 
         # Create 2D mesh for mask computation
+        # meshgrid with indexing="ij" produces [len(kx), len(ky)]
         kx_2d, ky_2d = jnp.meshgrid(kx, ky, indexing="ij")
-        kx_2d = kx_2d.T  # Transpose to [Ny, Nx//2+1]
+
+        # Transpose to match rfft2 output shape [Ny, Nx//2+1]
+        # meshgrid order: [len(kx), len(ky)] = [Nx//2+1, Ny]
+        # After .T: [len(ky), len(kx)] = [Ny, Nx//2+1] ✓
+        kx_2d = kx_2d.T
         ky_2d = ky_2d.T
 
         # Mask: True where mode should be kept, False where it should be zeroed
@@ -237,8 +242,12 @@ class SpectralGrid3D(BaseModel):
         kz_max = jnp.max(jnp.abs(kz))
 
         # Create 3D mesh for mask computation
+        # meshgrid with indexing="ij" produces [len(kx), len(ky), len(kz)]
         kx_3d, ky_3d, kz_3d = jnp.meshgrid(kx, ky, kz, indexing="ij")
-        # Transpose to [Nz, Ny, Nx//2+1] (consistent with rfftn output)
+
+        # Transpose to match rfftn output shape [Nz, Ny, Nx//2+1]
+        # meshgrid order: [len(kx), len(ky), len(kz)] = [Nx//2+1, Ny, Nz]
+        # After transpose(2,1,0): [len(kz), len(ky), len(kx)] = [Nz, Ny, Nx//2+1] ✓
         kx_3d = kx_3d.transpose(2, 1, 0)
         ky_3d = ky_3d.transpose(2, 1, 0)
         kz_3d = kz_3d.transpose(2, 1, 0)
@@ -585,6 +594,56 @@ def rfftn_inverse(field_fourier: Array, Nz: int, Ny: int, Nx: int) -> Array:
 # =============================================================================
 
 
+def _broadcast_wavenumber_x(k: Array, ndim: int) -> Array:
+    """
+    Broadcast 1D wavenumber array for x-direction to match field dimensionality.
+
+    Args:
+        k: 1D wavenumber array
+        ndim: Target dimensionality (2 or 3)
+
+    Returns:
+        Broadcasted array with shape appropriate for element-wise multiplication
+        - 2D: [1, len(k)] for shape [Ny, Nx//2+1]
+        - 3D: [1, 1, len(k)] for shape [Nz, Ny, Nx//2+1]
+
+    Note:
+        Not JIT-compiled to allow Python control flow based on ndim.
+        Parent functions (derivative_x, laplacian) are JIT-compiled.
+    """
+    if ndim == 2:
+        return k[jnp.newaxis, :]  # [1, Nx//2+1]
+    elif ndim == 3:
+        return k[jnp.newaxis, jnp.newaxis, :]  # [1, 1, Nx//2+1]
+    else:
+        raise ValueError(f"Unsupported field dimensionality: {ndim}")
+
+
+def _broadcast_wavenumber_y(k: Array, ndim: int) -> Array:
+    """
+    Broadcast 1D wavenumber array for y-direction to match field dimensionality.
+
+    Args:
+        k: 1D wavenumber array
+        ndim: Target dimensionality (2 or 3)
+
+    Returns:
+        Broadcasted array with shape appropriate for element-wise multiplication
+        - 2D: [len(k), 1] for shape [Ny, Nx//2+1]
+        - 3D: [1, len(k), 1] for shape [Nz, Ny, Nx//2+1]
+
+    Note:
+        Not JIT-compiled to allow Python control flow based on ndim.
+        Parent functions (derivative_y, laplacian) are JIT-compiled.
+    """
+    if ndim == 2:
+        return k[:, jnp.newaxis]  # [Ny, 1]
+    elif ndim == 3:
+        return k[jnp.newaxis, :, jnp.newaxis]  # [1, Ny, 1]
+    else:
+        raise ValueError(f"Unsupported field dimensionality: {ndim}")
+
+
 @jax.jit
 def derivative_x(field_fourier: Array, kx: Array) -> Array:
     """
@@ -604,15 +663,7 @@ def derivative_x(field_fourier: Array, kx: Array) -> Array:
         >>> df_dx_fourier = derivative_x(f_fourier, grid.kx)
         >>> df_dx_real = rfft2_inverse(df_dx_fourier, grid.Ny, grid.Nx)
     """
-    # Broadcast kx appropriately based on input dimensionality
-    if field_fourier.ndim == 2:
-        # 2D case: shape [Ny, Nx//2+1]
-        kx_nd = kx[jnp.newaxis, :]  # Shape: [1, Nx//2+1]
-    elif field_fourier.ndim == 3:
-        # 3D case: shape [Nz, Ny, Nx//2+1]
-        kx_nd = kx[jnp.newaxis, jnp.newaxis, :]  # Shape: [1, 1, Nx//2+1]
-    else:
-        raise ValueError(f"Unsupported field dimensionality: {field_fourier.ndim}")
+    kx_nd = _broadcast_wavenumber_x(kx, field_fourier.ndim)
     return 1j * kx_nd * field_fourier
 
 
@@ -635,15 +686,7 @@ def derivative_y(field_fourier: Array, ky: Array) -> Array:
         >>> df_dy_fourier = derivative_y(f_fourier, grid.ky)
         >>> df_dy_real = rfft2_inverse(df_dy_fourier, grid.Ny, grid.Nx)
     """
-    # Broadcast ky appropriately based on input dimensionality
-    if field_fourier.ndim == 2:
-        # 2D case: shape [Ny, Nx//2+1]
-        ky_nd = ky[:, jnp.newaxis]  # Shape: [Ny, 1]
-    elif field_fourier.ndim == 3:
-        # 3D case: shape [Nz, Ny, Nx//2+1]
-        ky_nd = ky[jnp.newaxis, :, jnp.newaxis]  # Shape: [1, Ny, 1]
-    else:
-        raise ValueError(f"Unsupported field dimensionality: {field_fourier.ndim}")
+    ky_nd = _broadcast_wavenumber_y(ky, field_fourier.ndim)
     return 1j * ky_nd * field_fourier
 
 
@@ -662,18 +705,23 @@ def derivative_z(field_fourier: Array, kz: Array) -> Array:
     Returns:
         Fourier-space derivative ∂f/∂z (shape: [Nz, Ny, Nx//2+1])
 
+    Raises:
+        ValueError: If field_fourier is not 3D
+
     Example:
         >>> # For f(z) = sin(kz), ∂f/∂z = k·cos(kz)
         >>> df_dz_fourier = derivative_z(f_fourier, grid.kz)
         >>> df_dz_real = rfftn_inverse(df_dz_fourier, grid.Nz, grid.Ny, grid.Nx)
     """
+    if field_fourier.ndim != 3:
+        raise ValueError(f"Unsupported field dimensionality: {field_fourier.ndim}")
     # Broadcast kz to shape [Nz, Ny, Nx//2+1]
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
     return 1j * kz_3d * field_fourier
 
 
 @jax.jit
-def laplacian(field_fourier: Array, kx: Array, ky: Array, kz: Array | None = None) -> Array:
+def laplacian(field_fourier: Array, kx: Array, ky: Array, kz: Optional[Array] = None) -> Array:
     """
     Compute Laplacian ∇²f in Fourier space.
 
@@ -704,23 +752,15 @@ def laplacian(field_fourier: Array, kx: Array, ky: Array, kz: Array | None = Non
         For KRMHD Poisson solver: k²φ = ∇²⊥A∥ → φ = ∇²⊥A∥ / k²
         Use kz=None for perpendicular Laplacian ∇²⊥ = ∂²/∂x² + ∂²/∂y²
     """
-    if field_fourier.ndim == 2:
-        # 2D case: shape [Ny, Nx//2+1]
-        kx_nd = kx[jnp.newaxis, :]  # Shape: [1, Nx//2+1]
-        ky_nd = ky[:, jnp.newaxis]  # Shape: [Ny, 1]
-        k_squared = kx_nd**2 + ky_nd**2
-    elif field_fourier.ndim == 3:
-        # 3D case: shape [Nz, Ny, Nx//2+1]
-        kx_nd = kx[jnp.newaxis, jnp.newaxis, :]  # Shape: [1, 1, Nx//2+1]
-        ky_nd = ky[jnp.newaxis, :, jnp.newaxis]  # Shape: [1, Ny, 1]
-        k_squared = kx_nd**2 + ky_nd**2
+    ndim = field_fourier.ndim
+    kx_nd = _broadcast_wavenumber_x(kx, ndim)
+    ky_nd = _broadcast_wavenumber_y(ky, ndim)
+    k_squared = kx_nd**2 + ky_nd**2
 
-        if kz is not None:
-            # Include z-direction for full 3D Laplacian
-            kz_nd = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
-            k_squared = k_squared + kz_nd**2
-    else:
-        raise ValueError(f"Unsupported field dimensionality: {field_fourier.ndim}")
+    # Add z-component for full 3D Laplacian if requested
+    if ndim == 3 and kz is not None:
+        kz_nd = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
+        k_squared = k_squared + kz_nd**2
 
     # ∇²f = -k²·f̂(k)
     return -k_squared * field_fourier
