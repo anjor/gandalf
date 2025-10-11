@@ -43,10 +43,14 @@ where {f,g} = ẑ·(∇f × ∇g) is the Poisson bracket.
 - **matplotlib**: Diagnostics/visualization
 
 ### Numerical Methods
-- **Perpendicular (x,y)**: Fourier spectral with 2/3 dealiasing
+- **Spatial dimensions**: 3D Fourier spectral (x, y, z) with z ∥ B₀
+  - Perpendicular (x,y): Standard 2D FFT with 2/3 dealiasing
+  - Parallel (z): 1D FFT for ∂/∂z operations and field line following
+  - Grid structure: Nz × Ny × (Nx//2+1) in Fourier space (rfft in x)
 - **Parallel velocity**: Hermite polynomials (if fully kinetic) or fluid closure
 - **Time stepping**: RK4 or RK45 adaptive
 - **Poisson solver**: k²φ = ∇²⊥A∥ in Fourier space
+- **Field line following**: Requires full 3D for interpolation across z-planes
 
 ## Code Architecture
 
@@ -78,13 +82,14 @@ checkpoints to return to.
 ### Spectral Operations
 - Maintain reality condition: `f(-k) = f*(k)`
 - Apply dealiasing after EVERY nonlinear operation
-- Use rfft2/irfft2 for real fields to save memory
-- Preserve ∇·B = 0 constraint (automatically satisfied in 2D)
+- Use rfftn/irfftn for 3D real fields to save memory (rfft in x-direction only)
+- Preserve ∇·B = 0 constraint (automatically satisfied with spectral methods)
 
 ### Performance Targets
-- 256² resolution should run in real-time on M1 Pro
-- 512² should be feasible for production runs
-- Memory usage < 8GB for typical resolutions
+- 128³ resolution should run efficiently on M1 Pro (matches original GANDALF)
+- 256³ should be feasible for production runs on M1 Pro
+- 512³ or higher requires HPC/cluster resources
+- Memory estimate: ~270 MB per complex field at 256³ resolution
 
 ### Energy Conservation
 - Total energy E = E_magnetic + E_kinetic + E_compressive
@@ -129,8 +134,16 @@ checkpoints to return to.
 Typical astrophysical parameters:
 - β (plasma beta): 0.01 - 100
 - τ (T_i/T_e): 1 - 10
-- Resolution: 256² to 1024²
+- Resolution: 128³ to 512³ (3D spatial grid)
 - k_max ρ_s << 1 (KRMHD valid only at scales larger than ion gyroradius)
+
+### Note on k∥ Independence
+For straight, uniform B₀ = B₀ẑ, different k∥ modes evolve independently through the
+perpendicular Poisson bracket {f,g} = ẑ·(∇⊥f × ∇⊥g). However, we use full 3D grids for:
+1. **Field line following**: Interpolation across z-planes couples k∥ modes
+2. **Parallel structure**: Track energy distribution in k∥ space
+3. **Initial conditions**: Allow z-dependent structures (wave packets, etc.)
+4. **Landau physics**: Need k∥ distribution for proper kinetic damping
 
 ## Questions for User
 Track any clarifications needed during development
