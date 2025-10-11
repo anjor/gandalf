@@ -38,9 +38,10 @@ where {f,g} = ẑ·(∇f × ∇g) is the Poisson bracket.
 - **JAX**: Primary framework (runs on Apple Metal)
 - **jax.numpy**: Array operations
 - **jax.scipy.fft**: Spectral transforms
-- **Optax**: For any optimization needs
+- **Pydantic**: Data validation and settings management (v2.0+)
 - **h5py**: Data I/O
 - **matplotlib**: Diagnostics/visualization
+- **Optax**: For any optimization needs (optional)
 
 ### Numerical Methods
 - **Spatial dimensions**: 3D Fourier spectral (x, y, z) with z ∥ B₀
@@ -57,14 +58,22 @@ where {f,g} = ẑ·(∇f × ∇g) is the Poisson bracket.
 ### Module Structure
 ```
 krmhd/
-├── spectral.py      # FFT operations, derivatives, dealiasing
-├── physics.py       # KRMHD equations, Poisson brackets
-├── timestepping.py  # RK4/RK45 integrators
-├── hermite.py       # Hermite basis functions (if needed)
-├── diagnostics.py   # Energy, spectra, fluxes
-├── io.py           # HDF5 checkpointing
-└── validation.py    # Linear physics tests
+├── spectral.py      # ✅ COMPLETE: FFT operations, derivatives, dealiasing (2D/3D)
+├── physics.py       # KRMHD equations, Poisson brackets (TODO)
+├── timestepping.py  # RK4/RK45 integrators (TODO)
+├── hermite.py       # Hermite basis functions (TODO, if needed)
+├── diagnostics.py   # Energy, spectra, fluxes (TODO)
+├── io.py           # HDF5 checkpointing (TODO)
+└── validation.py    # Linear physics tests (TODO)
 ```
+
+**spectral.py** includes:
+- SpectralGrid2D/3D: Pydantic models with validation and pre-computed wavenumbers
+- SpectralField2D/3D: Lazy evaluation with caching
+- Derivative operators: derivative_x, derivative_y, derivative_z
+- Laplacian: Full 3D or perpendicular-only
+- Dealiasing: 2/3 rule implementation
+- 50 comprehensive tests validating all functionality
 
 ### Design Principles
 1. **Functional style**: Pure functions, no side effects
@@ -124,8 +133,16 @@ checkpoints to return to.
 5. **Slow mode coupling**: Any back-reaction indicates coding error
 
 ## Current Development Status
-- [ ] Basic spectral infrastructure
+- [x] Basic spectral infrastructure (COMPLETE: 2D/3D with 50 passing tests)
+  - SpectralGrid2D/3D with Pydantic validation
+  - SpectralField2D/3D with lazy evaluation
+  - All derivative operators (x, y, z) and Laplacian
+  - 2/3 dealiasing implementation
+  - Memory-efficient rfft2/rfftn transforms
+- [ ] Poisson solver (Issue #3 - next step)
+- [ ] Poisson bracket implementation (Issue #4)
 - [ ] KRMHD equation implementation
+- [ ] Time integration (RK4/RK45)
 - [ ] Linear validation tests
 - [ ] Nonlinear turbulence runs
 - [ ] Production diagnostics
