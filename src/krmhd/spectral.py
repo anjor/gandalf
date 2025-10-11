@@ -12,6 +12,7 @@ This module provides 2D and 3D spectral operations using FFT methods:
 All performance-critical functions are JIT-compiled with JAX.
 """
 
+from functools import partial
 from typing import Optional
 import jax
 import jax.numpy as jnp
@@ -117,8 +118,10 @@ class SpectralGrid2D(BaseModel):
         ky_2d = ky_2d.T
 
         # Mask: True where mode should be kept, False where it should be zeroed
-        dealias_mask = (jnp.abs(kx_2d) <= 2 / 3 * kx_max) & (
-            jnp.abs(ky_2d) <= 2 / 3 * ky_max
+        # Use explicit float32 for 2/3 threshold to match JAX default precision
+        threshold = jnp.float32(2.0 / 3.0)
+        dealias_mask = (jnp.abs(kx_2d) <= threshold * kx_max) & (
+            jnp.abs(ky_2d) <= threshold * ky_max
         )
 
         return cls(
@@ -253,10 +256,12 @@ class SpectralGrid3D(BaseModel):
         kz_3d = kz_3d.transpose(2, 1, 0)
 
         # Mask: True where mode should be kept, False where it should be zeroed
+        # Use explicit float32 for 2/3 threshold to match JAX default precision
+        threshold = jnp.float32(2.0 / 3.0)
         dealias_mask = (
-            (jnp.abs(kx_3d) <= 2 / 3 * kx_max)
-            & (jnp.abs(ky_3d) <= 2 / 3 * ky_max)
-            & (jnp.abs(kz_3d) <= 2 / 3 * kz_max)
+            (jnp.abs(kx_3d) <= threshold * kx_max)
+            & (jnp.abs(ky_3d) <= threshold * ky_max)
+            & (jnp.abs(kz_3d) <= threshold * kz_max)
         )
 
         return cls(
@@ -594,13 +599,14 @@ def rfftn_inverse(field_fourier: Array, Nz: int, Ny: int, Nx: int) -> Array:
 # =============================================================================
 
 
+@partial(jax.jit, static_argnames=['ndim'])
 def _broadcast_wavenumber_x(k: Array, ndim: int) -> Array:
     """
     Broadcast 1D wavenumber array for x-direction to match field dimensionality.
 
     Args:
         k: 1D wavenumber array
-        ndim: Target dimensionality (2 or 3)
+        ndim: Target dimensionality (2 or 3) - static argument for JIT compilation
 
     Returns:
         Broadcasted array with shape appropriate for element-wise multiplication
@@ -608,8 +614,8 @@ def _broadcast_wavenumber_x(k: Array, ndim: int) -> Array:
         - 3D: [1, 1, len(k)] for shape [Nz, Ny, Nx//2+1]
 
     Note:
-        Not JIT-compiled to allow Python control flow based on ndim.
-        Parent functions (derivative_x, laplacian) are JIT-compiled.
+        JIT-compiled with ndim as a static argument, allowing JAX to specialize
+        the function for each dimensionality without recompilation overhead.
     """
     if ndim == 2:
         return k[jnp.newaxis, :]  # [1, Nx//2+1]
@@ -619,13 +625,14 @@ def _broadcast_wavenumber_x(k: Array, ndim: int) -> Array:
         raise ValueError(f"Unsupported field dimensionality: {ndim}")
 
 
+@partial(jax.jit, static_argnames=['ndim'])
 def _broadcast_wavenumber_y(k: Array, ndim: int) -> Array:
     """
     Broadcast 1D wavenumber array for y-direction to match field dimensionality.
 
     Args:
         k: 1D wavenumber array
-        ndim: Target dimensionality (2 or 3)
+        ndim: Target dimensionality (2 or 3) - static argument for JIT compilation
 
     Returns:
         Broadcasted array with shape appropriate for element-wise multiplication
@@ -633,8 +640,8 @@ def _broadcast_wavenumber_y(k: Array, ndim: int) -> Array:
         - 3D: [1, len(k), 1] for shape [Nz, Ny, Nx//2+1]
 
     Note:
-        Not JIT-compiled to allow Python control flow based on ndim.
-        Parent functions (derivative_y, laplacian) are JIT-compiled.
+        JIT-compiled with ndim as a static argument, allowing JAX to specialize
+        the function for each dimensionality without recompilation overhead.
     """
     if ndim == 2:
         return k[:, jnp.newaxis]  # [Ny, 1]
@@ -749,8 +756,13 @@ def laplacian(field_fourier: Array, kx: Array, ky: Array, kz: Optional[Array] = 
         >>> lap_fourier_3d = laplacian(f_fourier_3d, grid.kx, grid.ky, grid.kz)
 
     Note:
-        For KRMHD Poisson solver: k²φ = ∇²⊥A∥ → φ = ∇²⊥A∥ / k²
-        Use kz=None for perpendicular Laplacian ∇²⊥ = ∂²/∂x² + ∂²/∂y²
+        **When to use kz=None:**
+        - KRMHD Poisson solver: k²φ = ∇²⊥A∥ requires perpendicular Laplacian only
+        - Perpendicular dynamics: Use kz=None for ∇²⊥ = ∂²/∂x² + ∂²/∂y²
+        - Dissipation in 3D: Use kz=grid.kz for full 3D Laplacian ∇² = ∇²⊥ + ∂²/∂z²
+
+        For 3D fields, kz=None computes perpendicular Laplacian at each z-plane,
+        which is the standard form for KRMHD turbulent cascade operators.
     """
     ndim = field_fourier.ndim
     kx_nd = _broadcast_wavenumber_x(kx, ndim)
