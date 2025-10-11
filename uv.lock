@@ -536,10 +536,16 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "h5py" },
-    { name = "jax-metal" },
+    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "jax", version = "0.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "matplotlib" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
+[package.optional-dependencies]
+metal = [
+    { name = "jax-metal" },
 ]
 
 [package.dev-dependencies]
@@ -552,10 +558,12 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "h5py", specifier = ">=3.11.0" },
-    { name = "jax-metal", specifier = ">=0.0.4" },
-    { name = "matplotlib", specifier = ">=3.7.5" },
-    { name = "numpy", specifier = ">=1.24.4" },
+    { name = "jax", specifier = ">=0.4.20" },
+    { name = "jax-metal", marker = "extra == 'metal'", specifier = ">=0.0.4" },
+    { name = "matplotlib", specifier = ">=3.7.0" },
+    { name = "numpy", specifier = ">=1.24.0" },
 ]
+provides-extras = ["metal"]
 
 [package.metadata.requires-dev]
 dev = [

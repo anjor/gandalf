@@ -30,8 +30,8 @@ Key physical processes include:
 
 ### Prerequisites
 - Python 3.10 or higher
-- macOS with Apple Silicon (M1/M2/M3) for Metal GPU acceleration
 - [uv](https://github.com/astral-sh/uv) package manager (recommended)
+- **Optional**: GPU acceleration (Metal/CUDA) for better performance
 
 ### Using uv (Recommended)
 
@@ -40,37 +40,81 @@ Key physical processes include:
 git clone https://github.com/anjor/gandalf.git
 cd gandalf
 
-# Install dependencies
+# Install core dependencies
 uv sync
 
 # Activate the virtual environment
 source .venv/bin/activate
 
-# Verify JAX Metal installation
+# Verify JAX installation
 python -c 'import jax; print(jax.devices())'
 ```
 
-You should see output indicating a Metal device:
-```
-[METAL(id=0)]
+## Platform Support
+
+KRMHD supports multiple compute backends through JAX. Choose the appropriate installation method for your hardware:
+
+### macOS with Apple Silicon (Metal)
+
+For M1/M2/M3 Macs with GPU acceleration:
+
+```bash
+# Install with Metal GPU support
+uv sync --extra metal
+
+# Verify Metal device
+python -c 'import jax; print(jax.devices())'
+# Should show: [METAL(id=0)]
 ```
 
+**Notes:**
+- `jax-metal` is experimental but functional
+- GPU operations are transparent (no code changes needed)
+- For compatibility issues, set: `export ENABLE_PJRT_COMPATIBILITY=1`
+- See [Apple's JAX documentation](https://developer.apple.com/metal/jax/)
+
+### Linux with NVIDIA GPU (CUDA)
+
+For CUDA-enabled systems (HPC clusters, workstations):
+
+```bash
+# Install JAX with CUDA support
+uv pip install --upgrade "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+# Verify CUDA device
+python -c 'import jax; print(jax.devices())'
+# Should show: [cuda:0]
+```
+
+**Note:** Replace `cuda12` with your CUDA version (11.8, 12.0, etc.). See [JAX installation guide](https://jax.readthedocs.io/en/latest/installation.html) for details.
+
+### CPU-only (All platforms)
+
+For development or testing without GPU:
+
+```bash
+# Standard installation (uses CPU)
+uv sync
+
+# JAX will use CPU backend automatically
+python -c 'import jax; print(jax.devices())'
+# Should show: [CpuDevice(id=0)]
+```
+
+**Performance note:** CPU mode works but is significantly slower (~10-50x) than GPU-accelerated runs. Suitable for 128² resolution or smaller.
+
 ### Manual Installation
+
+For systems without uv:
 
 ```bash
 python -m venv venv
 source venv/bin/activate
 pip install -e .
+
+# For Metal GPU support on macOS:
+pip install -e ".[metal]"
 ```
-
-## Metal Backend Notes
-
-JAX uses Apple's Metal plugin for GPU acceleration on Apple Silicon. This is experimental but functional. Key points:
-
-- The `jax-metal` package is installed automatically
-- GPU operations are transparent (no code changes needed)
-- For compatibility issues, set: `export ENABLE_PJRT_COMPATIBILITY=1`
-- See [Apple's JAX documentation](https://developer.apple.com/metal/jax/) for details
 
 ## Project Structure
 
