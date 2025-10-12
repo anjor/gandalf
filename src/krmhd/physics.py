@@ -26,6 +26,8 @@ from krmhd.spectral import (
     SpectralGrid3D,
     derivative_x,
     derivative_y,
+    derivative_z,
+    laplacian,
     rfft2_forward,
     rfft2_inverse,
     rfftn_forward,
@@ -36,11 +38,11 @@ from krmhd.spectral import (
 
 class KRMHDState(BaseModel):
     """
-    Complete KRMHD state with fluid and kinetic fields.
+    Complete KRMHD state with Elsasser variables and kinetic fields.
 
     This dataclass represents the full state of the Kinetic Reduced MHD system,
-    including both the Alfvénic (active) fields and the kinetic (Hermite moment)
-    representation of the electron distribution function.
+    using Elsasser variables (z⁺, z⁻) for the Alfvénic sector and Hermite moments
+    for the kinetic electron distribution function.
 
     All field arrays are stored in Fourier space for efficient spectral operations.
     The fields satisfy:
@@ -48,10 +50,10 @@ class KRMHDState(BaseModel):
     - Divergence-free magnetic field: ∇·B = 0 (automatically satisfied)
 
     Attributes:
-        phi: Stream function φ in Fourier space (shape: [Nz, Ny, Nx//2+1])
-            Generates perpendicular velocity: v⊥ = ẑ × ∇φ
-        A_parallel: Parallel vector potential A∥ in Fourier space (shape: [Nz, Ny, Nx//2+1])
-            Generates perpendicular magnetic field: B⊥ = ẑ × ∇A∥
+        z_plus: Elsasser z⁺ = φ + A∥ in Fourier space (shape: [Nz, Ny, Nx//2+1])
+            Co-propagating Alfvén wave packet along +B₀
+        z_minus: Elsasser z⁻ = φ - A∥ in Fourier space (shape: [Nz, Ny, Nx//2+1])
+            Counter-propagating Alfvén wave packet along -B₀
         B_parallel: Parallel magnetic field δB∥ (passive) in Fourier space (shape: [Nz, Ny, Nx//2+1])
         g: Hermite moments of electron distribution (shape: [Nz, Ny, Nx//2+1, M+1])
             Expansion: g(v∥) = Σ_m g_m · ψ_m(v∥/v_th)
@@ -62,11 +64,17 @@ class KRMHDState(BaseModel):
         time: Simulation time
         grid: Reference to SpectralGrid3D for spatial dimensions
 
+    Properties (computed on demand):
+        phi: Stream function φ = (z⁺ + z⁻)/2
+            Generates perpendicular velocity: v⊥ = ẑ × ∇φ
+        A_parallel: Parallel vector potential A∥ = (z⁺ - z⁻)/2
+            Generates perpendicular magnetic field: B⊥ = ẑ × ∇A∥
+
     Example:
         >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
         >>> state = KRMHDState(
-        ...     phi=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
-        ...     A_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
+        ...     z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
+        ...     z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
         ...     B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
         ...     g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, 21), dtype=complex),
         ...     M=20,
@@ -78,16 +86,24 @@ class KRMHDState(BaseModel):
         ... )
 
     Physics context:
-        The KRMHD equations evolve these fields self-consistently:
-        - Active (Alfvénic) sector: φ and A∥ couple through Poisson bracket
-        - Passive sector: B∥ is advected by φ without back-reaction
+        The KRMHD equations in Elsasser form:
+        - ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∇∥z⁻ + dissipation
+        - ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∇∥z⁺ + dissipation
+        - Passive sector: B∥ is advected by φ = (z⁺ + z⁻)/2
         - Kinetic sector: g moments evolve with Landau damping and collisions
+
+        The Elsasser formulation simplifies the Alfvén wave dynamics compared
+        to the coupled (φ, A∥) formulation used in earlier versions.
+
+    Reference:
+        - Elsasser (1950) Phys. Rev. 79:183 - Original Elsasser variables
+        - Boldyrev (2006) PRL 96:115002 - RMHD turbulence
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    phi: Array = Field(description="Stream function in Fourier space")
-    A_parallel: Array = Field(description="Parallel vector potential in Fourier space")
+    z_plus: Array = Field(description="Elsasser z+ (co-propagating wave) in Fourier space")
+    z_minus: Array = Field(description="Elsasser z- (counter-propagating wave) in Fourier space")
     B_parallel: Array = Field(description="Parallel magnetic field in Fourier space")
     g: Array = Field(description="Hermite moments of electron distribution")
     M: int = Field(gt=0, description="Number of Hermite moments")
@@ -97,7 +113,7 @@ class KRMHDState(BaseModel):
     time: float = Field(ge=0.0, description="Simulation time")
     grid: SpectralGrid3D = Field(description="Spectral grid specification")
 
-    @field_validator("phi", "A_parallel", "B_parallel")
+    @field_validator("z_plus", "z_minus", "B_parallel")
     @classmethod
     def validate_field_shape(cls, v: Array, info) -> Array:
         """Validate that fields have correct 3D Fourier space shape."""
@@ -114,6 +130,59 @@ class KRMHDState(BaseModel):
         if not jnp.iscomplexobj(v):
             raise ValueError("Hermite moments must be complex-valued in Fourier space")
         return v
+
+    @property
+    def phi(self) -> Array:
+        """
+        Stream function φ = (z⁺ + z⁻) / 2.
+
+        Generates perpendicular velocity: v⊥ = ẑ × ∇φ
+
+        This is a computed property for backward compatibility and diagnostics.
+        The actual stored variables are z_plus and z_minus.
+
+        Returns:
+            Stream function in Fourier space (shape: [Nz, Ny, Nx//2+1])
+        """
+        return (self.z_plus + self.z_minus) / 2.0
+
+    @property
+    def A_parallel(self) -> Array:
+        """
+        Parallel vector potential A∥ = (z⁺ - z⁻) / 2.
+
+        Generates perpendicular magnetic field: B⊥ = ẑ × ∇A∥
+
+        This is a computed property for backward compatibility and diagnostics.
+        The actual stored variables are z_plus and z_minus.
+
+        Returns:
+            Parallel vector potential in Fourier space (shape: [Nz, Ny, Nx//2+1])
+        """
+        return (self.z_plus - self.z_minus) / 2.0
+
+    def __repr__(self) -> str:
+        """
+        Compact string representation for debugging.
+
+        Shows key simulation parameters and state information without
+        printing large arrays.
+
+        Returns:
+            String with time, grid size, and energies
+        """
+        # Import energy calculation (defined later in this file)
+        from krmhd.physics import energy
+
+        E_mag, E_kin, E_comp = energy(self)
+        E_tot = E_mag + E_kin + E_comp
+
+        return (
+            f"KRMHDState(t={self.time:.3f}, "
+            f"grid={self.grid.Nx}×{self.grid.Ny}×{self.grid.Nz}, "
+            f"E_tot={E_tot:.3e}, E_mag={E_mag:.3e}, E_kin={E_kin:.3e}, "
+            f"M={self.M}, β_i={self.beta_i:.2f})"
+        )
 
 
 @partial(jax.jit, static_argnums=(4, 5))
@@ -295,6 +364,355 @@ def poisson_bracket_3d(
 
 
 # =============================================================================
+# Elsasser Variable Conversions
+# =============================================================================
+
+
+@jax.jit
+def physical_to_elsasser(phi: Array, A_parallel: Array) -> tuple[Array, Array]:
+    """
+    Convert from physical variables (φ, A∥) to Elsasser variables (z⁺, z⁻).
+
+    The Elsasser variables represent counter-propagating Alfvén wave packets:
+    - z⁺ = φ + A∥  (co-propagating wave along +B₀)
+    - z⁻ = φ - A∥  (counter-propagating wave along -B₀)
+
+    This transformation diagonalizes the linear Alfvén wave dynamics and
+    simplifies the nonlinear evolution equations in RMHD.
+
+    Args:
+        phi: Stream function φ in Fourier space (shape: [..., Ny, Nx//2+1])
+            Generates perpendicular velocity: v⊥ = ẑ × ∇φ
+        A_parallel: Parallel vector potential A∥ in Fourier space (same shape as phi)
+            Generates perpendicular magnetic field: B⊥ = ẑ × ∇A∥
+
+    Returns:
+        Tuple of (z_plus, z_minus) in Fourier space with same shape as inputs
+
+    Properties:
+        - Linearity: The transformation is linear
+        - Invertibility: Can recover (φ, A∥) via elsasser_to_physical()
+        - Wave interpretation: z⁺ and z⁻ represent independent wave modes
+        - Energy: E_total = (1/4)∫(|∇z⁺|² + |∇z⁻|²)dx
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        >>> phi = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        >>> A_parallel = jnp.zeros_like(phi)
+        >>> z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
+        >>> # z_plus and z_minus now contain the Elsasser fields
+
+    Physics context:
+        In the Elsasser formulation, the RMHD equations become:
+        - ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∇∥z⁻ + dissipation
+        - ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∇∥z⁺ + dissipation
+
+        Notice that z⁺ is advected by z⁻ (and vice versa), representing
+        wave packet interactions. This is more natural than the coupled
+        (φ, A∥) formulation.
+
+    Reference:
+        - Elsasser (1950) Phys. Rev. 79:183 - Original Elsasser variables
+        - Boldyrev (2006) PRL 96:115002 - Application to RMHD turbulence
+    """
+    # Defensive check: ensure shapes match
+    assert phi.shape == A_parallel.shape, \
+        f"Shape mismatch: phi {phi.shape} != A_parallel {A_parallel.shape}"
+
+    z_plus = phi + A_parallel
+    z_minus = phi - A_parallel
+    return z_plus, z_minus
+
+
+@jax.jit
+def elsasser_to_physical(z_plus: Array, z_minus: Array) -> tuple[Array, Array]:
+    """
+    Convert from Elsasser variables (z⁺, z⁻) to physical variables (φ, A∥).
+
+    This is the inverse transformation of physical_to_elsasser(), recovering
+    the stream function φ and parallel vector potential A∥ from the Elsasser
+    wave variables.
+
+    Args:
+        z_plus: Elsasser z⁺ variable in Fourier space (shape: [..., Ny, Nx//2+1])
+            Represents co-propagating Alfvén wave packet along +B₀
+        z_minus: Elsasser z⁻ variable in Fourier space (same shape as z_plus)
+            Represents counter-propagating wave packet along -B₀
+
+    Returns:
+        Tuple of (phi, A_parallel) in Fourier space with same shape as inputs
+
+    Relationships:
+        - φ = (z⁺ + z⁻) / 2    (stream function, generates v⊥)
+        - A∥ = (z⁺ - z⁻) / 2   (parallel vector potential, generates B⊥)
+
+    Properties:
+        - Linearity: The transformation is linear
+        - Invertibility: Round-trip via physical_to_elsasser() is exact
+        - Perpendicular fields:
+          - v⊥ = ẑ × ∇φ = ẑ × ∇[(z⁺ + z⁻)/2]
+          - B⊥ = ẑ × ∇A∥ = ẑ × ∇[(z⁺ - z⁻)/2]
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        >>> z_plus = jnp.ones((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        >>> z_minus = jnp.zeros_like(z_plus)
+        >>> phi, A_parallel = elsasser_to_physical(z_plus, z_minus)
+        >>> # phi = 0.5, A_parallel = 0.5 (single Elsasser mode → equal φ and A∥)
+
+    Round-trip example:
+        >>> phi_orig = jnp.ones((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        >>> A_orig = jnp.zeros_like(phi_orig)
+        >>> z_p, z_m = physical_to_elsasser(phi_orig, A_orig)
+        >>> phi_back, A_back = elsasser_to_physical(z_p, z_m)
+        >>> assert jnp.allclose(phi_orig, phi_back)
+        >>> assert jnp.allclose(A_orig, A_back)
+
+    Use cases:
+        - Convert Elsasser state back to physical fields for diagnostics
+        - Initialize fields in physical space, then convert to Elsasser
+        - Compute derived quantities (energy, spectra) that use φ and A∥
+    """
+    # Defensive check: ensure shapes match
+    assert z_plus.shape == z_minus.shape, \
+        f"Shape mismatch: z_plus {z_plus.shape} != z_minus {z_minus.shape}"
+
+    phi = (z_plus + z_minus) / 2.0
+    A_parallel = (z_plus - z_minus) / 2.0
+    return phi, A_parallel
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+
+@jax.jit
+def zero_k0_mode(field: Array) -> Array:
+    """
+    Zero out the k=0 mode (mean field) in Fourier space.
+
+    The k=0 mode represents the spatial mean of a field. In RMHD, we typically
+    want to suppress mean field evolution to focus on fluctuations. This is
+    especially important for numerical stability over long integrations.
+
+    Args:
+        field: Field in Fourier space (shape: [..., Nz, Ny, Nx//2+1])
+            The k=0 mode is at index [0, 0, 0]
+
+    Returns:
+        Field with k=0 mode set to exactly zero
+
+    Note:
+        This operation is defensive - initialization should already ensure k=0
+        is zero, but numerical round-off could cause drift over time.
+    """
+    return field.at[0, 0, 0].set(0.0 + 0.0j)
+
+
+# =============================================================================
+# Elsasser RHS Functions (Time Evolution)
+# =============================================================================
+
+
+@partial(jax.jit, static_argnums=(7, 8, 9))
+def z_plus_rhs(
+    z_plus: Array,
+    z_minus: Array,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    eta: float,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+) -> Array:
+    """
+    Compute RHS for z⁺ evolution: ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∇∥z⁻ + η∇²z⁺.
+
+    This implements the Elsasser formulation of RMHD for the co-propagating
+    wave packet z⁺ = φ + A∥. The equation shows that z⁺ is:
+    - Advected by z⁻ through the perpendicular Poisson bracket
+    - Coupled to z⁻ through the parallel gradient ∇∥z⁻
+    - Dissipated by resistivity η
+
+    **Why ∇²⊥ appears in the Poisson bracket:**
+    In RMHD, we evolve vorticity ω = ∇²⊥φ, not φ itself. The vorticity
+    equation is: ∂ω/∂t + {φ, ω} = .... Substituting ω = ∇²⊥φ gives
+    ∂(∇²⊥φ)/∂t + {φ, ∇²⊥φ} = ..., which becomes ∂z⁺/∂t = ...∇²⊥{z⁻, z⁺}...
+    in Elsasser variables. This is why the Laplacian appears inside the
+    Poisson bracket - it represents advection of vorticity, not of φ itself.
+
+    Args:
+        z_plus: Elsasser z⁺ in Fourier space (shape: [Nz, Ny, Nx//2+1])
+        z_minus: Elsasser z⁻ in Fourier space (shape: [Nz, Ny, Nx//2+1])
+        kx: Wavenumber array in x direction
+        ky: Wavenumber array in y direction
+        kz: Wavenumber array in z direction
+        dealias_mask: 2/3 dealiasing mask
+        eta: Resistivity coefficient
+        Nz: Number of grid points in z direction (static)
+        Ny: Number of grid points in y direction (static)
+        Nx: Number of grid points in x direction (static)
+
+    Returns:
+        Time derivative ∂z⁺/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
+
+    Physics:
+        The Elsasser equation for z⁺ in RMHD is:
+        ∂z⁺/∂t + (z⁻·∇)z⁺ + ∇P = η∇²z⁺
+
+        In the reduced MHD approximation with strong guide field B₀ẑ,
+        the perpendicular advection (z⁻·∇)z⁺ splits into:
+        - Perpendicular part: ∇²⊥{z⁻, z⁺} (vorticity advection)
+        - Parallel part: ∂∥z⁻ (couples to opposite Elsasser variable)
+
+        This gives:
+        ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∂∥z⁻ + η∇²z⁺
+
+        where ∂∥ = ∂/∂z is the parallel derivative. Note that z⁺ is coupled
+        to the parallel gradient of z⁻, not its own gradient.
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        >>> z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        >>> z_minus = jnp.zeros_like(z_plus)
+        >>> dz_plus_dt = z_plus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+        ...                         grid.dealias_mask, 0.01, grid.Nz, grid.Ny, grid.Nx)
+
+    Reference:
+        - Boldyrev (2006) PRL 96:115002 - Elsasser formulation for RMHD
+        - Maron & Goldreich (2001) ApJ 554:1175 - Reduced MHD equations
+    """
+    # Compute perpendicular Laplacian of z_plus: ∇²⊥z⁺
+    lap_perp_z_plus = laplacian(z_plus, kx, ky, kz=None)
+
+    # Compute Poisson bracket: {z⁻, ∇²⊥z⁺}
+    # This represents the nonlinear advection of vorticity by the perpendicular flow
+    bracket = poisson_bracket_3d(
+        z_minus, lap_perp_z_plus,
+        kx, ky,
+        Nz, Ny, Nx,
+        dealias_mask
+    )
+
+    # Compute parallel derivative: ∇∥z⁻ = ∂z⁻/∂z
+    parallel_grad_z_minus = derivative_z(z_minus, kz)
+
+    # Assemble RHS: -∇²⊥{z⁻, z⁺} - ∇∥z⁻
+    rhs = -bracket - parallel_grad_z_minus
+
+    # Add dissipation: η∇²z⁺ (always compute, multiply by eta)
+    lap_z_plus = laplacian(z_plus, kx, ky, kz)
+    rhs = rhs + eta * lap_z_plus
+
+    # Zero out k=0 mode (mean field should not evolve)
+    rhs = zero_k0_mode(rhs)
+
+    return rhs
+
+
+@partial(jax.jit, static_argnums=(7, 8, 9))
+def z_minus_rhs(
+    z_plus: Array,
+    z_minus: Array,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    eta: float,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+) -> Array:
+    """
+    Compute RHS for z⁻ evolution: ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∇∥z⁺ + η∇²z⁻.
+
+    This implements the Elsasser formulation of RMHD for the counter-propagating
+    wave packet z⁻ = φ - A∥. The equation shows that z⁻ is:
+    - Advected by z⁺ through the perpendicular Poisson bracket
+    - Coupled to z⁺ through the parallel gradient ∇∥z⁺ (opposite sign from z⁺)
+    - Dissipated by resistivity η
+
+    The key difference from z_plus_rhs is the sign of the parallel gradient term
+    (+∂∥z⁺ vs -∂∥z⁻), reflecting the opposite propagation direction along B₀.
+
+    **Vorticity formulation:** See z_plus_rhs docstring for explanation of why
+    ∇²⊥ appears inside the Poisson bracket.
+
+    Args:
+        z_plus: Elsasser z⁺ in Fourier space (shape: [Nz, Ny, Nx//2+1])
+        z_minus: Elsasser z⁻ in Fourier space (shape: [Nz, Ny, Nx//2+1])
+        kx: Wavenumber array in x direction
+        ky: Wavenumber array in y direction
+        kz: Wavenumber array in z direction
+        dealias_mask: 2/3 dealiasing mask
+        eta: Resistivity coefficient
+        Nz: Number of grid points in z direction (static)
+        Ny: Number of grid points in y direction (static)
+        Nx: Number of grid points in x direction (static)
+
+    Returns:
+        Time derivative ∂z⁻/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
+
+    Physics:
+        The Elsasser equation for z⁻ in RMHD is:
+        ∂z⁻/∂t + (z⁺·∇)z⁻ + ∇P = η∇²z⁻
+
+        In the reduced MHD approximation with strong guide field B₀ẑ,
+        the perpendicular advection (z⁺·∇)z⁻ splits into:
+        - Perpendicular part: ∇²⊥{z⁺, z⁻} (vorticity advection)
+        - Parallel part: -∂∥z⁺ (couples to opposite Elsasser variable)
+
+        This gives:
+        ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∂∥z⁺ + η∇²z⁻
+
+        Note the OPPOSITE sign on the parallel gradient compared to z⁺
+        (∂∥z⁺ vs -∂∥z⁻), reflecting counter-propagation. Both equations
+        couple to the gradient of the OPPOSITE Elsasser variable.
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        >>> z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        >>> z_minus = jnp.zeros_like(z_plus)
+        >>> dz_minus_dt = z_minus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+        ...                           grid.dealias_mask, 0.01, grid.Nz, grid.Ny, grid.Nx)
+
+    Reference:
+        - Boldyrev (2006) PRL 96:115002 - Elsasser formulation for RMHD
+        - Maron & Goldreich (2001) ApJ 554:1175 - Reduced MHD equations
+    """
+    # Compute perpendicular Laplacian of z_minus: ∇²⊥z⁻
+    lap_perp_z_minus = laplacian(z_minus, kx, ky, kz=None)
+
+    # Compute Poisson bracket: {z⁺, ∇²⊥z⁻}
+    # This represents the nonlinear advection of vorticity by the perpendicular flow
+    bracket = poisson_bracket_3d(
+        z_plus, lap_perp_z_minus,
+        kx, ky,
+        Nz, Ny, Nx,
+        dealias_mask
+    )
+
+    # Compute parallel derivative: ∇∥z⁺ = ∂z⁺/∂z
+    parallel_grad_z_plus = derivative_z(z_plus, kz)
+
+    # Assemble RHS: -∇²⊥{z⁺, z⁻} + ∇∥z⁺
+    # NOTE: Opposite sign on parallel gradient compared to z_plus_rhs
+    rhs = -bracket + parallel_grad_z_plus
+
+    # Add dissipation: η∇²z⁻ (always compute, multiply by eta)
+    lap_z_minus = laplacian(z_minus, kx, ky, kz)
+    rhs = rhs + eta * lap_z_minus
+
+    # Zero out k=0 mode (mean field should not evolve)
+    rhs = zero_k0_mode(rhs)
+
+    return rhs
+
+
+# =============================================================================
 # State Initialization Functions
 # =============================================================================
 
@@ -439,12 +857,15 @@ def initialize_alfven_wave(
     phi = phi.at[ikz, iky, ikx].set(amplitude * 1.0j)
     A_parallel = A_parallel.at[ikz, iky, ikx].set(amplitude * 1.0)
 
+    # Convert to Elsasser variables
+    z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
+
     # Initialize Hermite moments (equilibrium + small kinetic response)
     g = initialize_hermite_moments(grid, M, v_th, perturbation_amplitude=0.01 * amplitude)
 
     return KRMHDState(
-        phi=phi,
-        A_parallel=A_parallel,
+        z_plus=z_plus,
+        z_minus=z_minus,
         B_parallel=B_parallel,
         g=g,
         M=M,
@@ -620,6 +1041,9 @@ def initialize_random_spectrum(
     phi = phi.at[0, 0, 0].set(0.0)
     A_parallel = A_parallel.at[0, 0, 0].set(0.0)
 
+    # Convert to Elsasser variables
+    z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
+
     # Passive scalar B_parallel (initially zero, will be excited by cascade)
     B_parallel = jnp.zeros_like(phi)
 
@@ -627,8 +1051,8 @@ def initialize_random_spectrum(
     g = initialize_hermite_moments(grid, M, v_th, perturbation_amplitude=0.0)
 
     return KRMHDState(
-        phi=phi,
-        A_parallel=A_parallel,
+        z_plus=z_plus,
+        z_minus=z_minus,
         B_parallel=B_parallel,
         g=g,
         M=M,
