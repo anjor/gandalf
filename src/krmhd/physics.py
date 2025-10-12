@@ -478,8 +478,12 @@ def z_plus_rhs(
     - Coupled to z⁻ through the parallel gradient ∇∥z⁻
     - Dissipated by resistivity η
 
-    The ∇²⊥ operator in the Poisson bracket term comes from the vorticity
-    formulation: ∇²⊥φ = ω, so {φ, ω} = ∇²⊥{φ, φ} in the original variables.
+    **Why ∇²⊥ appears in the Poisson bracket:**
+    In RMHD, we evolve vorticity ω = ∇²⊥φ, not φ itself. The vorticity
+    equation is: ∂ω/∂t + {φ, ω} = .... Substituting ω = ∇²⊥φ gives
+    ∂(∇²⊥φ)/∂t + {φ, ∇²⊥φ} = ..., which becomes ∂z⁺/∂t = ...∇²⊥{z⁻, z⁺}...
+    in Elsasser variables. This is why the Laplacian appears inside the
+    Poisson bracket - it represents advection of vorticity, not of φ itself.
 
     Args:
         z_plus: Elsasser z⁺ in Fourier space (shape: [Nz, Ny, Nx//2+1])
@@ -569,8 +573,11 @@ def z_minus_rhs(
     - Coupled to z⁺ through the parallel gradient ∇∥z⁺ (opposite sign from z⁺)
     - Dissipated by resistivity η
 
-    The key difference from z_plus_rhs is the sign of the parallel gradient term,
-    reflecting the opposite propagation direction along the magnetic field.
+    The key difference from z_plus_rhs is the sign of the parallel gradient term
+    (+∂∥z⁺ vs -∂∥z⁻), reflecting the opposite propagation direction along B₀.
+
+    **Vorticity formulation:** See z_plus_rhs docstring for explanation of why
+    ∇²⊥ appears inside the Poisson bracket.
 
     Args:
         z_plus: Elsasser z⁺ in Fourier space (shape: [Nz, Ny, Nx//2+1])
