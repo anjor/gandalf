@@ -161,6 +161,29 @@ class KRMHDState(BaseModel):
         """
         return (self.z_plus - self.z_minus) / 2.0
 
+    def __repr__(self) -> str:
+        """
+        Compact string representation for debugging.
+
+        Shows key simulation parameters and state information without
+        printing large arrays.
+
+        Returns:
+            String with time, grid size, and energies
+        """
+        # Import energy calculation (defined later in this file)
+        from krmhd.physics import energy
+
+        E_mag, E_kin, E_comp = energy(self)
+        E_tot = E_mag + E_kin + E_comp
+
+        return (
+            f"KRMHDState(t={self.time:.3f}, "
+            f"grid={self.grid.Nx}×{self.grid.Ny}×{self.grid.Nz}, "
+            f"E_tot={E_tot:.3e}, E_mag={E_mag:.3e}, E_kin={E_kin:.3e}, "
+            f"M={self.M}, β_i={self.beta_i:.2f})"
+        )
+
 
 @partial(jax.jit, static_argnums=(4, 5))
 def poisson_bracket_2d(
@@ -392,6 +415,10 @@ def physical_to_elsasser(phi: Array, A_parallel: Array) -> tuple[Array, Array]:
         - Elsasser (1950) Phys. Rev. 79:183 - Original Elsasser variables
         - Boldyrev (2006) PRL 96:115002 - Application to RMHD turbulence
     """
+    # Defensive check: ensure shapes match
+    assert phi.shape == A_parallel.shape, \
+        f"Shape mismatch: phi {phi.shape} != A_parallel {A_parallel.shape}"
+
     z_plus = phi + A_parallel
     z_minus = phi - A_parallel
     return z_plus, z_minus
@@ -446,9 +473,41 @@ def elsasser_to_physical(z_plus: Array, z_minus: Array) -> tuple[Array, Array]:
         - Initialize fields in physical space, then convert to Elsasser
         - Compute derived quantities (energy, spectra) that use φ and A∥
     """
+    # Defensive check: ensure shapes match
+    assert z_plus.shape == z_minus.shape, \
+        f"Shape mismatch: z_plus {z_plus.shape} != z_minus {z_minus.shape}"
+
     phi = (z_plus + z_minus) / 2.0
     A_parallel = (z_plus - z_minus) / 2.0
     return phi, A_parallel
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+
+@jax.jit
+def zero_k0_mode(field: Array) -> Array:
+    """
+    Zero out the k=0 mode (mean field) in Fourier space.
+
+    The k=0 mode represents the spatial mean of a field. In RMHD, we typically
+    want to suppress mean field evolution to focus on fluctuations. This is
+    especially important for numerical stability over long integrations.
+
+    Args:
+        field: Field in Fourier space (shape: [..., Nz, Ny, Nx//2+1])
+            The k=0 mode is at index [0, 0, 0]
+
+    Returns:
+        Field with k=0 mode set to exactly zero
+
+    Note:
+        This operation is defensive - initialization should already ensure k=0
+        is zero, but numerical round-off could cause drift over time.
+    """
+    return field.at[0, 0, 0].set(0.0 + 0.0j)
 
 
 # =============================================================================
@@ -549,9 +608,7 @@ def z_plus_rhs(
     rhs = rhs + eta * lap_z_plus
 
     # Zero out k=0 mode (mean field should not evolve)
-    # This is defensive: initialization should already ensure k=0 is zero,
-    # but numerical round-off could cause drift over long integrations
-    rhs = rhs.at[0, 0, 0].set(0.0 + 0.0j)
+    rhs = zero_k0_mode(rhs)
 
     return rhs
 
@@ -650,9 +707,7 @@ def z_minus_rhs(
     rhs = rhs + eta * lap_z_minus
 
     # Zero out k=0 mode (mean field should not evolve)
-    # This is defensive: initialization should already ensure k=0 is zero,
-    # but numerical round-off could cause drift over long integrations
-    rhs = rhs.at[0, 0, 0].set(0.0 + 0.0j)
+    rhs = zero_k0_mode(rhs)
 
     return rhs
 
