@@ -121,14 +121,17 @@ pip install -e ".[metal]"
 ```
 krmhd/
 ├── src/krmhd/          # Main package
-│   ├── spectral.py     # FFT operations, derivatives, dealiasing
-│   ├── physics.py      # KRMHD equations, Poisson brackets
-│   ├── timestepping.py # RK4/RK45 integrators
-│   ├── hermite.py      # Hermite basis (kinetic closures)
-│   ├── diagnostics.py  # Energy spectra, fluxes
-│   ├── io.py          # HDF5 checkpointing
-│   └── validation.py   # Linear physics tests
-├── tests/             # Test suite
+│   ├── spectral.py     # ✅ FFT operations, derivatives, dealiasing (2D/3D)
+│   ├── poisson.py      # ✅ Poisson solver for stream function
+│   ├── hermite.py      # ✅ Hermite basis (kinetic closures)
+│   ├── physics.py      # KRMHD equations, Poisson brackets (TODO)
+│   ├── timestepping.py # RK4/RK45 integrators (TODO)
+│   ├── collisions.py   # Collision operators (TODO)
+│   ├── forcing.py      # Turbulence forcing (TODO)
+│   ├── diagnostics.py  # Energy spectra, fluxes (TODO)
+│   ├── io.py          # HDF5 checkpointing (TODO)
+│   └── validation.py   # Linear physics tests (TODO)
+├── tests/             # Test suite (50+ tests)
 ├── examples/          # Example scripts
 └── pyproject.toml     # Project metadata
 ```
@@ -160,7 +163,7 @@ Reference values for astrophysical plasmas:
 
 - **Plasma beta**: 0.01 - 100 (ratio of thermal to magnetic pressure)
 - **Temperature ratio tau**: 1 - 10 (T_i/T_e)
-- **Resolution**: 256^2 to 1024^2 grid points
+- **Resolution**: 128³ to 512³ grid points (3D spectral)
 - **Scale range**: k_max rho_s << 1 (KRMHD valid only at scales larger than ion gyroradius)
 
 ## Validation Tests
@@ -175,13 +178,31 @@ The code includes validation against:
 
 ## Current Status
 
-- [x] Project structure and dependencies
-- [ ] Core spectral infrastructure
-- [ ] KRMHD equation implementation
-- [ ] Time integration
-- [ ] Linear validation suite
-- [ ] Nonlinear turbulence benchmarks
-- [ ] Production diagnostics
+### Completed ✅
+- **Project infrastructure** (Issue #1): UV package management, dependencies, testing framework
+- **Spectral methods** (Issues #2, #19): Full 2D/3D spectral grids with FFT operations
+  - Real-space ↔ Fourier-space transforms (rfftn for memory efficiency)
+  - Spatial derivatives (∂/∂x, ∂/∂y, ∂/∂z) and Laplacian operators
+  - 2/3 dealiasing for nonlinear terms
+  - Lazy evaluation with caching via SpectralField2D/3D
+- **Poisson solver** (Issue #3): Spectral solver for ∇²φ = ω
+  - 2D and 3D implementations with perpendicular/full options
+  - Proper k=0 mode handling
+- **Hermite basis** (Issue #21): Infrastructure for kinetic physics
+  - Orthonormal Hermite functions (quantum harmonic oscillator eigenstates)
+  - Moment projection and distribution reconstruction
+  - Foundation for Landau closures
+
+### In Progress 🚧
+- **Poisson brackets** (Issue #4): Next milestone for nonlinear advection
+- **KRMHD equations** (Issues #5-7): Alfvén dynamics and passive scalars
+- **Time integration** (Issue #8): RK4 timestepper
+
+### Planned 📋
+- **Kinetic physics** (Issues #22-24): Hermite moment hierarchy, collision operators
+- **Diagnostics** (Issues #9, #25-26): Energy spectra, field line following
+- **Validation suite** (Issues #10-12, #27): Linear physics, Orszag-Tang, turbulence
+- **Production features** (Issues #13-15, #28-30): HDF5 I/O, forcing, hyper-dissipation
 
 ## References
 
