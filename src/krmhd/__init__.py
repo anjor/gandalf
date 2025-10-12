@@ -49,6 +49,17 @@ from krmhd.hermite import (
     check_orthogonality,
 )
 
+from krmhd.physics import (
+    KRMHDState,
+    poisson_bracket_2d,
+    poisson_bracket_3d,
+    initialize_hermite_moments,
+    initialize_alfven_wave,
+    initialize_kinetic_alfven_wave,
+    initialize_random_spectrum,
+    energy,
+)
+
 __all__ = [
     "__version__",
     # Spectral infrastructure
@@ -69,4 +80,13 @@ __all__ = [
     "distribution_to_moments",
     "moments_to_distribution",
     "check_orthogonality",
+    # Physics and state
+    "KRMHDState",
+    "poisson_bracket_2d",
+    "poisson_bracket_3d",
+    "initialize_hermite_moments",
+    "initialize_alfven_wave",
+    "initialize_kinetic_alfven_wave",
+    "initialize_random_spectrum",
+    "energy",
 ]
