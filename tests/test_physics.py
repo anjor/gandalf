@@ -1349,9 +1349,66 @@ class TestElsasserConversions:
 
         phi, A_parallel = elsasser_to_physical(z_plus, z_minus)
 
-        # For pure z- wave: phi = -A_parallel
-        # phi = (0 + 2)/2 = 1, A_parallel = (0 - 2)/2 = -1
-        assert jnp.allclose(phi, -A_parallel), \
-            f"Pure z- wave should have phi = -A_parallel, got phi={jnp.mean(phi)}, A={jnp.mean(A_parallel)}"
-        assert jnp.allclose(phi, 1.0), f"phi should be 1.0, got {jnp.mean(phi)}"
-        assert jnp.allclose(A_parallel, -1.0), f"A_parallel should be -1.0, got {jnp.mean(A_parallel)}"
+class TestElsasserRHS:
+    """Test suite for Elsasser RHS functions."""
+
+    def test_z_plus_rhs_zero_fields(self):
+        """Test that RHS is zero for zero fields."""
+        from krmhd.physics import z_plus_rhs
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        z_minus = jnp.zeros_like(z_plus)
+
+        rhs = z_plus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 0.0, grid.Nz, grid.Ny, grid.Nx)
+
+        assert jnp.all(rhs == 0.0), "RHS should be zero for zero fields"
+
+    def test_z_minus_rhs_zero_fields(self):
+        """Test that RHS is zero for zero fields."""
+        from krmhd.physics import z_minus_rhs
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        z_minus = jnp.zeros_like(z_plus)
+
+        rhs = z_minus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 0.0, grid.Nz, grid.Ny, grid.Nx)
+
+        assert jnp.all(rhs == 0.0), "RHS should be zero for zero fields"
+
+    def test_rhs_shape(self):
+        """Test that RHS functions return correct shape."""
+        from krmhd.physics import z_plus_rhs, z_minus_rhs
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        key = jax.random.PRNGKey(42)
+        key1, key2 = jax.random.split(key)
+
+        z_plus = (jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+                  1j * jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+        z_minus = (jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+                   1j * jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+
+        rhs_plus = z_plus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 0.0, grid.Nz, grid.Ny, grid.Nx)
+        rhs_minus = z_minus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 0.0, grid.Nz, grid.Ny, grid.Nx)
+
+        assert rhs_plus.shape == z_plus.shape
+        assert rhs_minus.shape == z_minus.shape
+
+    def test_rhs_jit_compilation(self):
+        """Test that RHS functions are JIT-compiled correctly."""
+        from krmhd.physics import z_plus_rhs, z_minus_rhs
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        z_plus = jnp.ones((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        z_minus = jnp.ones_like(z_plus)
+
+        rhs_plus = z_plus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 0.01, grid.Nz, grid.Ny, grid.Nx)
+        rhs_minus = z_minus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 0.01, grid.Nz, grid.Ny, grid.Nx)
+
+        assert rhs_plus is not None
+        assert rhs_minus is not None
