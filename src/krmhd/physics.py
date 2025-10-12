@@ -32,7 +32,6 @@ from krmhd.spectral import (
     rfftn_inverse,
     dealias,
 )
-from krmhd.hermite import hermite_basis_function
 
 
 class KRMHDState(BaseModel):
@@ -315,7 +314,10 @@ def initialize_hermite_moments(
     - g_m>0 = small perturbations (for kinetic instability studies)
 
     The equilibrium Maxwellian corresponds to g_0 = constant and g_m>0 = 0.
-    The zeroth moment g_0 represents the density perturbation.
+    In Fourier space, equilibrium means ALL g modes = 0 (no spatial variation).
+
+    Note: g_0 represents density perturbation δn/n, g_1 represents parallel
+    velocity perturbation u∥, and higher moments capture kinetic corrections.
 
     Args:
         grid: SpectralGrid3D defining spatial dimensions
@@ -509,10 +511,18 @@ def initialize_kinetic_alfven_wave(
         grid, M, kx_mode, ky_mode, kz_mode, amplitude, v_th, beta_i, nu
     )
 
-    # TODO: Add proper kinetic response to Hermite moments
-    # This requires solving the linearized kinetic equation for the wave
-    # For now, we use the fluid initialization with small moment perturbations
-    # Future: Implement analytic kinetic Alfvén wave solution from linear theory
+    # TODO(Issue #TBD): Implement proper kinetic Alfvén wave solution
+    # Currently uses fluid initialization. Need to add:
+    # 1. Solve linearized kinetic equation for wave mode
+    # 2. Set g moments from analytic solution: g_m(k) ∝ Z(ω/k∥v_th)
+    # 3. Include FLR corrections: dispersion ω² = k∥²v_A²(1 + k⊥²ρ_s²)
+    # 4. Validate Landau damping rate against linear theory
+    #
+    # References:
+    # - Howes et al. (2006) ApJ 651:590 - KRMHD linear theory
+    # - Schekochihin et al. (2009) ApJS 182:310 - Kinetic cascades
+    #
+    # For now, this returns fluid wave + small moment perturbations as placeholder.
 
     return state
 
