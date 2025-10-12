@@ -1451,3 +1451,32 @@ class TestElsasserRHS:
         rhs_minus = z_minus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 0.01, grid.Nz, grid.Ny, grid.Nx)
 
         assert rhs_plus is not None
+
+    def test_rhs_k0_mode_zero(self):
+        """Test that k=0 mode in RHS is always zero (no mean field drift)."""
+        from krmhd.physics import z_plus_rhs, z_minus_rhs
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create random fields with non-zero k=0 mode
+        key = jax.random.PRNGKey(555)
+        key1, key2 = jax.random.split(key)
+
+        z_plus = (jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+                  1j * jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+        z_minus = (jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+                   1j * jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+
+        # Intentionally set k=0 mode to non-zero (should be zeroed by RHS)
+        z_plus = z_plus.at[0, 0, 0].set(5.0 + 3.0j)
+        z_minus = z_minus.at[0, 0, 0].set(-2.0 + 1.0j)
+
+        # Compute RHS
+        rhs_plus = z_plus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 0.01, grid.Nz, grid.Ny, grid.Nx)
+        rhs_minus = z_minus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 0.01, grid.Nz, grid.Ny, grid.Nx)
+
+        # k=0 mode should be exactly zero (mean field should not evolve)
+        assert rhs_plus[0, 0, 0] == 0.0 + 0.0j, \
+            f"k=0 mode in z_plus RHS should be zero, got {rhs_plus[0, 0, 0]}"
+        assert rhs_minus[0, 0, 0] == 0.0 + 0.0j, \
+            f"k=0 mode in z_minus RHS should be zero, got {rhs_minus[0, 0, 0]}"

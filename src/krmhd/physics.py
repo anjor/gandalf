@@ -548,6 +548,11 @@ def z_plus_rhs(
     lap_z_plus = laplacian(z_plus, kx, ky, kz)
     rhs = rhs + eta * lap_z_plus
 
+    # Zero out k=0 mode (mean field should not evolve)
+    # This is defensive: initialization should already ensure k=0 is zero,
+    # but numerical round-off could cause drift over long integrations
+    rhs = rhs.at[0, 0, 0].set(0.0 + 0.0j)
+
     return rhs
 
 
@@ -643,6 +648,11 @@ def z_minus_rhs(
     # Add dissipation: η∇²z⁻ (always compute, multiply by eta)
     lap_z_minus = laplacian(z_minus, kx, ky, kz)
     rhs = rhs + eta * lap_z_minus
+
+    # Zero out k=0 mode (mean field should not evolve)
+    # This is defensive: initialization should already ensure k=0 is zero,
+    # but numerical round-off could cause drift over long integrations
+    rhs = rhs.at[0, 0, 0].set(0.0 + 0.0j)
 
     return rhs
 
