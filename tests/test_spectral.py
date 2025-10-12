@@ -918,6 +918,16 @@ class TestPoissonSolver2D:
         # Note: Using atol=1e-6 for float32 precision
         assert jnp.allclose(phi_original_zero_mean, phi_recovered_zero_mean, atol=1e-6)
 
+    def test_invalid_dimensionality(self):
+        """Test that 3D field raises error."""
+        grid = SpectralGrid2D.create(Nx=64, Ny=64)
+
+        # Try to pass 3D field to 2D solver
+        omega_fourier_3d = jnp.ones((64, 64, 64 // 2 + 1), dtype=jnp.complex64)
+
+        with pytest.raises(ValueError, match="Expected 2D field"):
+            poisson_solve_2d(omega_fourier_3d, grid.kx, grid.ky)
+
 
 class TestPoissonSolver3D:
     """Test suite for 3D Poisson solver."""

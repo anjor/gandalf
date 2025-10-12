@@ -823,7 +823,7 @@ def poisson_solve_2d(omega_fourier: Array, kx: Array, ky: Array) -> Array:
 
     In Fourier space, using the convention that laplacian() returns -k²·φ̂:
         F{∇²φ} = -k²·φ̂ = F{ω}
-        Therefore: φ̂ = F{ω}/k² = ω̂/k²
+        Therefore: φ̂ = -ω̂/k²
 
     The k=0 mode (constant component) is set to zero since the Poisson
     equation only determines φ up to an additive constant.
@@ -835,6 +835,9 @@ def poisson_solve_2d(omega_fourier: Array, kx: Array, ky: Array) -> Array:
 
     Returns:
         Fourier-space solution φ̂ (shape: [Ny, Nx//2+1])
+
+    Raises:
+        ValueError: If omega_fourier is not 2D
 
     Physics context:
         In KRMHD, this solves for the stream function φ from vorticity:
@@ -855,6 +858,11 @@ def poisson_solve_2d(omega_fourier: Array, kx: Array, ky: Array) -> Array:
         - Division by zero at k=0 is handled via jnp.where
         - This is spectrally accurate (no truncation error)
     """
+    # Validate input dimensions
+    if omega_fourier.ndim != 2:
+        raise ValueError(
+            f"Expected 2D field, got {omega_fourier.ndim}D with shape {omega_fourier.shape}"
+        )
     # Broadcast wavenumbers to match field shape
     kx_2d = _broadcast_wavenumber_x(kx, ndim=2)
     ky_2d = _broadcast_wavenumber_y(ky, ndim=2)
@@ -889,8 +897,8 @@ def poisson_solve_3d(
     - Full 3D Laplacian (kz provided): ∇²φ = ω  where ∇² = ∂²/∂x² + ∂²/∂y² + ∂²/∂z²
 
     In Fourier space, using the convention that laplacian() returns -k²·φ̂:
-        F{∇²⊥φ} = -(kx² + ky²)·φ̂ = F{ω}  →  φ̂ = ω̂/(kx² + ky²)
-        F{∇²φ} = -(kx² + ky² + kz²)·φ̂ = F{ω}  →  φ̂ = ω̂/k²
+        F{∇²⊥φ} = -(kx² + ky²)·φ̂ = F{ω}  →  φ̂ = -ω̂/(kx² + ky²)
+        F{∇²φ} = -(kx² + ky² + kz²)·φ̂ = F{ω}  →  φ̂ = -ω̂/k²
 
     The k=0 mode is set to zero for each case.
 
