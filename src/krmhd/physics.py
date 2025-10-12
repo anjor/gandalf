@@ -295,6 +295,117 @@ def poisson_bracket_3d(
 
 
 # =============================================================================
+# Elsasser Variable Conversions
+# =============================================================================
+
+
+@jax.jit
+def physical_to_elsasser(phi: Array, A_parallel: Array) -> tuple[Array, Array]:
+    """
+    Convert from physical variables (φ, A∥) to Elsasser variables (z⁺, z⁻).
+
+    The Elsasser variables represent counter-propagating Alfvén wave packets:
+    - z⁺ = φ + A∥  (co-propagating wave along +B₀)
+    - z⁻ = φ - A∥  (counter-propagating wave along -B₀)
+
+    This transformation diagonalizes the linear Alfvén wave dynamics and
+    simplifies the nonlinear evolution equations in RMHD.
+
+    Args:
+        phi: Stream function φ in Fourier space (shape: [..., Ny, Nx//2+1])
+            Generates perpendicular velocity: v⊥ = ẑ × ∇φ
+        A_parallel: Parallel vector potential A∥ in Fourier space (same shape as phi)
+            Generates perpendicular magnetic field: B⊥ = ẑ × ∇A∥
+
+    Returns:
+        Tuple of (z_plus, z_minus) in Fourier space with same shape as inputs
+
+    Properties:
+        - Linearity: The transformation is linear
+        - Invertibility: Can recover (φ, A∥) via elsasser_to_physical()
+        - Wave interpretation: z⁺ and z⁻ represent independent wave modes
+        - Energy: E_total = (1/4)∫(|∇z⁺|² + |∇z⁻|²)dx
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        >>> phi = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        >>> A_parallel = jnp.zeros_like(phi)
+        >>> z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
+        >>> # z_plus and z_minus now contain the Elsasser fields
+
+    Physics context:
+        In the Elsasser formulation, the RMHD equations become:
+        - ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∇∥z⁻ + dissipation
+        - ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∇∥z⁺ + dissipation
+
+        Notice that z⁺ is advected by z⁻ (and vice versa), representing
+        wave packet interactions. This is more natural than the coupled
+        (φ, A∥) formulation.
+
+    Reference:
+        - Elsasser (1950) Phys. Rev. 79:183 - Original Elsasser variables
+        - Boldyrev (2006) PRL 96:115002 - Application to RMHD turbulence
+    """
+    z_plus = phi + A_parallel
+    z_minus = phi - A_parallel
+    return z_plus, z_minus
+
+
+@jax.jit
+def elsasser_to_physical(z_plus: Array, z_minus: Array) -> tuple[Array, Array]:
+    """
+    Convert from Elsasser variables (z⁺, z⁻) to physical variables (φ, A∥).
+
+    This is the inverse transformation of physical_to_elsasser(), recovering
+    the stream function φ and parallel vector potential A∥ from the Elsasser
+    wave variables.
+
+    Args:
+        z_plus: Elsasser z⁺ variable in Fourier space (shape: [..., Ny, Nx//2+1])
+            Represents co-propagating Alfvén wave packet along +B₀
+        z_minus: Elsasser z⁻ variable in Fourier space (same shape as z_plus)
+            Represents counter-propagating wave packet along -B₀
+
+    Returns:
+        Tuple of (phi, A_parallel) in Fourier space with same shape as inputs
+
+    Relationships:
+        - φ = (z⁺ + z⁻) / 2    (stream function, generates v⊥)
+        - A∥ = (z⁺ - z⁻) / 2   (parallel vector potential, generates B⊥)
+
+    Properties:
+        - Linearity: The transformation is linear
+        - Invertibility: Round-trip via physical_to_elsasser() is exact
+        - Perpendicular fields:
+          - v⊥ = ẑ × ∇φ = ẑ × ∇[(z⁺ + z⁻)/2]
+          - B⊥ = ẑ × ∇A∥ = ẑ × ∇[(z⁺ - z⁻)/2]
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        >>> z_plus = jnp.ones((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        >>> z_minus = jnp.zeros_like(z_plus)
+        >>> phi, A_parallel = elsasser_to_physical(z_plus, z_minus)
+        >>> # phi = 0.5, A_parallel = 0.5 (single Elsasser mode → equal φ and A∥)
+
+    Round-trip example:
+        >>> phi_orig = jnp.ones((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        >>> A_orig = jnp.zeros_like(phi_orig)
+        >>> z_p, z_m = physical_to_elsasser(phi_orig, A_orig)
+        >>> phi_back, A_back = elsasser_to_physical(z_p, z_m)
+        >>> assert jnp.allclose(phi_orig, phi_back)
+        >>> assert jnp.allclose(A_orig, A_back)
+
+    Use cases:
+        - Convert Elsasser state back to physical fields for diagnostics
+        - Initialize fields in physical space, then convert to Elsasser
+        - Compute derived quantities (energy, spectra) that use φ and A∥
+    """
+    phi = (z_plus + z_minus) / 2.0
+    A_parallel = (z_plus - z_minus) / 2.0
+    return phi, A_parallel
+
+
+# =============================================================================
 # State Initialization Functions
 # =============================================================================
 

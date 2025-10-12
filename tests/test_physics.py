@@ -1089,3 +1089,263 @@ class TestKRMHDState:
         max_imag = jnp.max(jnp.abs(jnp.imag(g1_real)))
         assert max_imag < 1e-6, \
             f"Hermite moment g_1 should be real in real space, max imag = {max_imag}"
+
+
+class TestElsasserConversions:
+    """Test suite for Elsasser variable conversions."""
+
+    def test_physical_to_elsasser_basic(self):
+        """Test basic conversion from physical to Elsasser variables."""
+        from krmhd.physics import physical_to_elsasser
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Simple test case: phi = 1, A_parallel = 0
+        phi = jnp.ones((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        A_parallel = jnp.zeros_like(phi)
+
+        z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
+
+        # Expected: z_plus = 1, z_minus = 1
+        assert jnp.allclose(z_plus, 1.0), f"z_plus should be 1.0, got {jnp.mean(z_plus)}"
+        assert jnp.allclose(z_minus, 1.0), f"z_minus should be 1.0, got {jnp.mean(z_minus)}"
+
+    def test_elsasser_to_physical_basic(self):
+        """Test basic conversion from Elsasser to physical variables."""
+        from krmhd.physics import elsasser_to_physical
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Simple test case: z_plus = 2, z_minus = 0
+        z_plus = 2.0 * jnp.ones((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        z_minus = jnp.zeros_like(z_plus)
+
+        phi, A_parallel = elsasser_to_physical(z_plus, z_minus)
+
+        # Expected: phi = (2 + 0)/2 = 1, A_parallel = (2 - 0)/2 = 1
+        assert jnp.allclose(phi, 1.0), f"phi should be 1.0, got {jnp.mean(phi)}"
+        assert jnp.allclose(A_parallel, 1.0), f"A_parallel should be 1.0, got {jnp.mean(A_parallel)}"
+
+    def test_round_trip_physical_elsasser_physical(self):
+        """Test round-trip conversion: physical → Elsasser → physical."""
+        from krmhd.physics import physical_to_elsasser, elsasser_to_physical
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create random physical fields
+        key = jax.random.PRNGKey(100)
+        key1, key2 = jax.random.split(key)
+
+        phi_orig = jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) + \
+                   1j * jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)
+        A_orig = jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) + \
+                 1j * jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)
+
+        # Convert to Elsasser and back
+        z_plus, z_minus = physical_to_elsasser(phi_orig, A_orig)
+        phi_back, A_back = elsasser_to_physical(z_plus, z_minus)
+
+        # Should match exactly (linear transformation)
+        # float32 precision: allow small round-off errors
+        assert jnp.allclose(phi_orig, phi_back, rtol=1e-5, atol=1e-6), \
+            f"Round-trip failed for phi: max error = {jnp.max(jnp.abs(phi_orig - phi_back))}"
+        assert jnp.allclose(A_orig, A_back, rtol=1e-5, atol=1e-6), \
+            f"Round-trip failed for A_parallel: max error = {jnp.max(jnp.abs(A_orig - A_back))}"
+
+    def test_round_trip_elsasser_physical_elsasser(self):
+        """Test round-trip conversion: Elsasser → physical → Elsasser."""
+        from krmhd.physics import physical_to_elsasser, elsasser_to_physical
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create random Elsasser fields
+        key = jax.random.PRNGKey(101)
+        key1, key2 = jax.random.split(key)
+
+        z_plus_orig = jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) + \
+                     1j * jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)
+        z_minus_orig = jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) + \
+                      1j * jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)
+
+        # Convert to physical and back
+        phi, A_parallel = elsasser_to_physical(z_plus_orig, z_minus_orig)
+        z_plus_back, z_minus_back = physical_to_elsasser(phi, A_parallel)
+
+        # Should match exactly (float32 precision: allow small round-off)
+        assert jnp.allclose(z_plus_orig, z_plus_back, rtol=1e-5, atol=1e-6), \
+            f"Round-trip failed for z_plus: max error = {jnp.max(jnp.abs(z_plus_orig - z_plus_back))}"
+        assert jnp.allclose(z_minus_orig, z_minus_back, rtol=1e-5, atol=1e-6), \
+            f"Round-trip failed for z_minus: max error = {jnp.max(jnp.abs(z_minus_orig - z_minus_back))}"
+
+    def test_mathematical_relationships(self):
+        """Test the mathematical relationships between physical and Elsasser variables."""
+        from krmhd.physics import physical_to_elsasser, elsasser_to_physical
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create test fields with known values
+        phi = 3.0 * jnp.ones((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        A_parallel = 1.0 * jnp.ones((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+
+        # Convert to Elsasser
+        z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
+
+        # Check mathematical relationships
+        # z_plus = phi + A_parallel = 3 + 1 = 4
+        # z_minus = phi - A_parallel = 3 - 1 = 2
+        assert jnp.allclose(z_plus, 4.0), f"z_plus should be 4.0, got {jnp.mean(z_plus)}"
+        assert jnp.allclose(z_minus, 2.0), f"z_minus should be 2.0, got {jnp.mean(z_minus)}"
+
+        # Convert back
+        phi_back, A_back = elsasser_to_physical(z_plus, z_minus)
+
+        # Check relationships
+        # phi = (z_plus + z_minus)/2 = (4 + 2)/2 = 3
+        # A_parallel = (z_plus - z_minus)/2 = (4 - 2)/2 = 1
+        assert jnp.allclose(phi_back, 3.0), f"phi should be 3.0, got {jnp.mean(phi_back)}"
+        assert jnp.allclose(A_back, 1.0), f"A_parallel should be 1.0, got {jnp.mean(A_back)}"
+
+    def test_linearity_physical_to_elsasser(self):
+        """Test linearity of physical_to_elsasser transformation."""
+        from krmhd.physics import physical_to_elsasser
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create random complex fields
+        key = jax.random.PRNGKey(102)
+        keys = jax.random.split(key, 8)
+
+        phi1 = (jax.random.normal(keys[0], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+                1j * jax.random.normal(keys[1], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+        A1 = (jax.random.normal(keys[2], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+              1j * jax.random.normal(keys[3], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+        phi2 = (jax.random.normal(keys[4], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+                1j * jax.random.normal(keys[5], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+        A2 = (jax.random.normal(keys[6], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+              1j * jax.random.normal(keys[7], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+
+        # Scalars
+        a = 2.5
+        b = -1.3
+
+        # Test linearity: T(a*x1 + b*x2) = a*T(x1) + b*T(x2)
+        z_p_sum, z_m_sum = physical_to_elsasser(a * phi1 + b * phi2, a * A1 + b * A2)
+
+        z_p_1, z_m_1 = physical_to_elsasser(phi1, A1)
+        z_p_2, z_m_2 = physical_to_elsasser(phi2, A2)
+        z_p_linear = a * z_p_1 + b * z_p_2
+        z_m_linear = a * z_m_1 + b * z_m_2
+
+        assert jnp.allclose(z_p_sum, z_p_linear, rtol=1e-5), "Linearity violated for z_plus"
+        assert jnp.allclose(z_m_sum, z_m_linear, rtol=1e-5), "Linearity violated for z_minus"
+
+    def test_linearity_elsasser_to_physical(self):
+        """Test linearity of elsasser_to_physical transformation."""
+        from krmhd.physics import elsasser_to_physical
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create random complex Elsasser fields
+        key = jax.random.PRNGKey(103)
+        keys = jax.random.split(key, 8)
+
+        z_p1 = (jax.random.normal(keys[0], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+                1j * jax.random.normal(keys[1], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+        z_m1 = (jax.random.normal(keys[2], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+                1j * jax.random.normal(keys[3], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+        z_p2 = (jax.random.normal(keys[4], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+                1j * jax.random.normal(keys[5], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+        z_m2 = (jax.random.normal(keys[6], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32) +
+                1j * jax.random.normal(keys[7], (grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.float32)).astype(jnp.complex64)
+
+        # Scalars
+        a = 1.5
+        b = -0.8
+
+        # Test linearity
+        phi_sum, A_sum = elsasser_to_physical(a * z_p1 + b * z_p2, a * z_m1 + b * z_m2)
+
+        phi1, A1 = elsasser_to_physical(z_p1, z_m1)
+        phi2, A2 = elsasser_to_physical(z_p2, z_m2)
+        phi_linear = a * phi1 + b * phi2
+        A_linear = a * A1 + b * A2
+
+        assert jnp.allclose(phi_sum, phi_linear, rtol=1e-5), "Linearity violated for phi"
+        assert jnp.allclose(A_sum, A_linear, rtol=1e-5), "Linearity violated for A_parallel"
+
+    def test_jit_compilation(self):
+        """Test that conversion functions are JIT-compiled correctly."""
+        from krmhd.physics import physical_to_elsasser, elsasser_to_physical
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        phi = jnp.ones((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        A_parallel = jnp.zeros_like(phi)
+
+        # Should run without error (already JIT-compiled)
+        z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
+        phi_back, A_back = elsasser_to_physical(z_plus, z_minus)
+
+        assert jnp.allclose(phi, phi_back)
+        assert jnp.allclose(A_parallel, A_back)
+
+    def test_zero_fields(self):
+        """Test conversion with zero fields."""
+        from krmhd.physics import physical_to_elsasser, elsasser_to_physical
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Zero physical fields
+        phi = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        A_parallel = jnp.zeros_like(phi)
+
+        z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
+
+        assert jnp.all(z_plus == 0.0), "z_plus should be zero"
+        assert jnp.all(z_minus == 0.0), "z_minus should be zero"
+
+        # Zero Elsasser fields
+        z_plus_zero = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        z_minus_zero = jnp.zeros_like(z_plus_zero)
+
+        phi_back, A_back = elsasser_to_physical(z_plus_zero, z_minus_zero)
+
+        assert jnp.all(phi_back == 0.0), "phi should be zero"
+        assert jnp.all(A_back == 0.0), "A_parallel should be zero"
+
+    def test_pure_plus_wave(self):
+        """Test conversion for pure z+ wave (z- = 0)."""
+        from krmhd.physics import elsasser_to_physical, physical_to_elsasser
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Pure z+ wave: z_plus = 2, z_minus = 0
+        z_plus = 2.0 * jnp.ones((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        z_minus = jnp.zeros_like(z_plus)
+
+        phi, A_parallel = elsasser_to_physical(z_plus, z_minus)
+
+        # For pure z+ wave: phi = A_parallel (equipartition)
+        # phi = (2 + 0)/2 = 1, A_parallel = (2 - 0)/2 = 1
+        assert jnp.allclose(phi, A_parallel), \
+            f"Pure z+ wave should have phi = A_parallel, got phi={jnp.mean(phi)}, A={jnp.mean(A_parallel)}"
+        assert jnp.allclose(phi, 1.0), f"phi should be 1.0, got {jnp.mean(phi)}"
+
+    def test_pure_minus_wave(self):
+        """Test conversion for pure z- wave (z+ = 0)."""
+        from krmhd.physics import elsasser_to_physical
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Pure z- wave: z_plus = 0, z_minus = 2
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        z_minus = 2.0 * jnp.ones_like(z_plus)
+
+        phi, A_parallel = elsasser_to_physical(z_plus, z_minus)
+
+        # For pure z- wave: phi = -A_parallel
+        # phi = (0 + 2)/2 = 1, A_parallel = (0 - 2)/2 = -1
+        assert jnp.allclose(phi, -A_parallel), \
+            f"Pure z- wave should have phi = -A_parallel, got phi={jnp.mean(phi)}, A={jnp.mean(A_parallel)}"
+        assert jnp.allclose(phi, 1.0), f"phi should be 1.0, got {jnp.mean(phi)}"
+        assert jnp.allclose(A_parallel, -1.0), f"A_parallel should be -1.0, got {jnp.mean(A_parallel)}"
