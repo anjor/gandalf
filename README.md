@@ -122,16 +122,15 @@ pip install -e ".[metal]"
 krmhd/
 ├── src/krmhd/          # Main package
 │   ├── spectral.py     # ✅ FFT operations, derivatives, dealiasing (2D/3D)
-│   ├── poisson.py      # ✅ Poisson solver for stream function
 │   ├── hermite.py      # ✅ Hermite basis (kinetic closures)
-│   ├── physics.py      # KRMHD equations, Poisson brackets (TODO)
+│   ├── physics.py      # ✅ KRMHD state, Poisson brackets, initialization, energy
 │   ├── timestepping.py # RK4/RK45 integrators (TODO)
 │   ├── collisions.py   # Collision operators (TODO)
 │   ├── forcing.py      # Turbulence forcing (TODO)
 │   ├── diagnostics.py  # Energy spectra, fluxes (TODO)
 │   ├── io.py          # HDF5 checkpointing (TODO)
 │   └── validation.py   # Linear physics tests (TODO)
-├── tests/             # Test suite (50+ tests)
+├── tests/             # Test suite (70+ tests)
 ├── examples/          # Example scripts
 └── pyproject.toml     # Project metadata
 ```

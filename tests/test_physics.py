@@ -587,3 +587,325 @@ class TestPoissonBracket3D:
 
         # Should be zero (tolerance accounts for dealiasing and FFT round-off)
         assert k0_mode < 1e-4, f"k=0 mode should be zero in 3D, got {k0_mode}"
+
+
+class TestKRMHDState:
+    """Test suite for KRMHD state and initialization functions."""
+
+    def test_state_creation(self):
+        """Test basic KRMHDState creation and validation."""
+        from krmhd.physics import KRMHDState
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        # Create state with correct shapes
+        state = KRMHDState(
+            phi=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            A_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64),
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+            time=0.0,
+            grid=grid,
+        )
+
+        # Check shapes
+        assert state.phi.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        assert state.A_parallel.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        assert state.B_parallel.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        assert state.g.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1)
+        assert state.M == M
+        assert state.beta_i == 1.0
+        assert state.v_th == 1.0
+        assert state.nu == 0.01
+        assert state.time == 0.0
+        assert state.grid == grid
+
+    def test_state_validation_wrong_dims(self):
+        """Test that state creation fails with wrong field dimensions."""
+        from krmhd.physics import KRMHDState
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Should fail with 2D field
+        with pytest.raises(ValueError, match="must be 3D"):
+            KRMHDState(
+                phi=jnp.zeros((grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),  # 2D instead of 3D
+                A_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+                B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+                g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
+                M=10,
+                beta_i=1.0,
+                v_th=1.0,
+                nu=0.01,
+                time=0.0,
+                grid=grid,
+            )
+
+    def test_initialize_hermite_moments(self):
+        """Test Hermite moment initialization."""
+        from krmhd.physics import initialize_hermite_moments
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        # Test equilibrium (zero perturbation)
+        g = initialize_hermite_moments(grid, M, v_th=1.0, perturbation_amplitude=0.0)
+
+        assert g.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1)
+        assert jnp.all(g == 0.0), "Equilibrium should be all zeros in Fourier space"
+
+        # Test with perturbation
+        g_pert = initialize_hermite_moments(grid, M, v_th=1.0, perturbation_amplitude=0.1)
+
+        assert g_pert.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1)
+        # Zeroth moment should still be zero
+        assert jnp.all(g_pert[:, :, :, 0] == 0.0), "g_0 should be zero"
+        # First moment should be non-zero (velocity perturbation)
+        assert jnp.any(g_pert[:, :, :, 1] != 0.0), "g_1 should have perturbation"
+
+    def test_initialize_alfven_wave(self):
+        """Test Alfvén wave initialization."""
+        from krmhd.physics import initialize_alfven_wave
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        state = initialize_alfven_wave(
+            grid,
+            M,
+            kx_mode=1.0,
+            ky_mode=0.0,
+            kz_mode=1.0,
+            amplitude=0.1,
+            v_th=1.0,
+            beta_i=1.0,
+            nu=0.01,
+        )
+
+        # Check state type
+        from krmhd.physics import KRMHDState
+        assert isinstance(state, KRMHDState)
+
+        # Check initialization
+        assert state.time == 0.0
+        assert state.M == M
+
+        # Check that phi and A_parallel are non-zero (single mode)
+        assert jnp.any(state.phi != 0.0), "phi should have wave mode"
+        assert jnp.any(state.A_parallel != 0.0), "A_parallel should have wave mode"
+
+        # Check B_parallel is zero (pure Alfvén wave)
+        assert jnp.all(state.B_parallel == 0.0), "B_parallel should be zero for Alfvén wave"
+
+        # Check that only one mode is excited (approximately)
+        n_nonzero_phi = jnp.sum(jnp.abs(state.phi) > 1e-10)
+        n_nonzero_A = jnp.sum(jnp.abs(state.A_parallel) > 1e-10)
+        assert n_nonzero_phi == 1, f"Should have 1 mode in phi, got {n_nonzero_phi}"
+        assert n_nonzero_A == 1, f"Should have 1 mode in A_parallel, got {n_nonzero_A}"
+
+    def test_initialize_kinetic_alfven_wave(self):
+        """Test kinetic Alfvén wave initialization."""
+        from krmhd.physics import initialize_kinetic_alfven_wave
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        state = initialize_kinetic_alfven_wave(
+            grid,
+            M,
+            kx_mode=1.0,
+            kz_mode=1.0,
+            amplitude=0.1,
+            v_th=1.0,
+            beta_i=1.0,
+        )
+
+        # Check state type
+        from krmhd.physics import KRMHDState
+        assert isinstance(state, KRMHDState)
+
+        # Should be similar to regular Alfvén wave for now (TODO: add kinetic response)
+        assert jnp.any(state.phi != 0.0)
+        assert jnp.any(state.A_parallel != 0.0)
+        assert jnp.all(state.B_parallel == 0.0)
+
+    def test_initialize_random_spectrum(self):
+        """Test random turbulent spectrum initialization."""
+        from krmhd.physics import initialize_random_spectrum
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        state = initialize_random_spectrum(
+            grid,
+            M,
+            alpha=5.0 / 3.0,
+            amplitude=1.0,
+            k_min=1.0,
+            k_max=5.0,
+            v_th=1.0,
+            beta_i=1.0,
+            nu=0.01,
+            seed=42,
+        )
+
+        # Check state type
+        from krmhd.physics import KRMHDState
+        assert isinstance(state, KRMHDState)
+
+        # Check that fields are initialized with random spectrum
+        assert jnp.any(state.phi != 0.0), "phi should have random modes"
+        assert jnp.any(state.A_parallel != 0.0), "A_parallel should have random modes"
+
+        # Check k=0 mode is zero
+        assert state.phi[0, 0, 0] == 0.0, "k=0 mode should be zero"
+        assert state.A_parallel[0, 0, 0] == 0.0, "k=0 mode should be zero"
+
+        # Check B_parallel is initially zero
+        assert jnp.all(state.B_parallel == 0.0), "B_parallel should start at zero"
+
+        # Check Hermite moments are equilibrium
+        assert jnp.all(state.g == 0.0), "Hermite moments should be equilibrium"
+
+        # Check reproducibility with same seed
+        state2 = initialize_random_spectrum(
+            grid,
+            M,
+            alpha=5.0 / 3.0,
+            amplitude=1.0,
+            k_min=1.0,
+            k_max=5.0,
+            seed=42,
+        )
+        assert jnp.allclose(state.phi, state2.phi), "Same seed should give same result"
+
+    def test_energy_alfven_wave(self):
+        """Test energy calculation for Alfvén wave."""
+        from krmhd.physics import initialize_alfven_wave, energy
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        state = initialize_alfven_wave(
+            grid,
+            M,
+            kx_mode=2.0,
+            kz_mode=1.0,
+            amplitude=0.1,
+        )
+
+        E = energy(state)
+
+        # Check structure
+        assert "magnetic" in E
+        assert "kinetic" in E
+        assert "compressive" in E
+        assert "total" in E
+
+        # Check all positive
+        assert E["magnetic"] >= 0.0
+        assert E["kinetic"] >= 0.0
+        assert E["compressive"] >= 0.0
+        assert E["total"] >= 0.0
+
+        # Check total = sum
+        assert jnp.isclose(
+            E["total"], E["magnetic"] + E["kinetic"] + E["compressive"]
+        ), "Total energy should equal sum of components"
+
+        # For Alfvén wave, expect equipartition E_mag ≈ E_kin
+        ratio = E["magnetic"] / (E["kinetic"] + 1e-20)
+        assert 0.8 < ratio < 1.2, f"Alfvén wave should have E_mag ≈ E_kin, got ratio {ratio}"
+
+        # Compressive energy should be zero (no B_parallel)
+        assert E["compressive"] == 0.0, "Alfvén wave should have zero compressive energy"
+
+    def test_energy_random_spectrum(self):
+        """Test energy calculation for random spectrum."""
+        from krmhd.physics import initialize_random_spectrum, energy
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        state = initialize_random_spectrum(
+            grid,
+            M,
+            alpha=5.0 / 3.0,
+            amplitude=1.0,
+            k_min=2.0,
+            k_max=5.0,
+        )
+
+        E = energy(state)
+
+        # Check all positive
+        assert E["magnetic"] > 0.0, "Random spectrum should have magnetic energy"
+        assert E["kinetic"] > 0.0, "Random spectrum should have kinetic energy"
+        assert E["total"] > 0.0, "Random spectrum should have total energy"
+
+        # Check total = sum
+        assert jnp.isclose(
+            E["total"], E["magnetic"] + E["kinetic"] + E["compressive"]
+        ), "Total energy should equal sum of components"
+
+        # For random initialization, energies should be of similar order
+        # (exact ratio depends on random phases)
+        assert E["magnetic"] > 0.01 * E["total"], "Magnetic energy should be significant"
+        assert E["kinetic"] > 0.01 * E["total"], "Kinetic energy should be significant"
+
+    def test_energy_conservation_scaling(self):
+        """Test that energy scales correctly with amplitude."""
+        from krmhd.physics import initialize_alfven_wave, energy
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        # Initialize with amplitude A
+        state1 = initialize_alfven_wave(grid, M, amplitude=0.1)
+        E1 = energy(state1)
+
+        # Initialize with amplitude 2A
+        state2 = initialize_alfven_wave(grid, M, amplitude=0.2)
+        E2 = energy(state2)
+
+        # Energy should scale as amplitude squared: E ∝ A²
+        # So E2/E1 should be ≈ (0.2/0.1)² = 4
+        ratio = E2["total"] / E1["total"]
+        expected_ratio = (0.2 / 0.1) ** 2
+
+        assert jnp.isclose(
+            ratio, expected_ratio, rtol=0.01
+        ), f"Energy should scale as amplitude², got ratio {ratio}, expected {expected_ratio}"
+
+    def test_energy_zero_for_zero_fields(self):
+        """Test that energy is zero for zero fields."""
+        from krmhd.physics import KRMHDState, energy
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        # Create state with all zeros
+        state = KRMHDState(
+            phi=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            A_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64),
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+            time=0.0,
+            grid=grid,
+        )
+
+        E = energy(state)
+
+        assert E["magnetic"] == 0.0
+        assert E["kinetic"] == 0.0
+        assert E["compressive"] == 0.0
+        assert E["total"] == 0.0

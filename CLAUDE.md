@@ -162,8 +162,15 @@ checkpoints to return to.
   - Computes {f,g} = ẑ·(∇f × ∇g) with spectral derivatives
   - 2/3 dealiasing applied, JIT-compiled with static args
   - 12 comprehensive tests: analytical solutions, symmetry, linearity
-- [ ] KRMHD state and initialization (Issue #5 - next step)
-- [ ] Alfvén dynamics (Issue #6)
+- [x] KRMHD state and initialization (Issue #5) ✅
+  - KRMHDState dataclass with fluid + kinetic fields (phi, A∥, B∥, g moments)
+  - initialize_hermite_moments() for velocity-space distribution
+  - initialize_alfven_wave() for linear wave tests
+  - initialize_kinetic_alfven_wave() for kinetic response
+  - initialize_random_spectrum() for turbulent IC with k^-α power law
+  - energy() function for diagnostics (E_magnetic, E_kinetic, E_compressive)
+  - 10 comprehensive tests: state validation, initialization, energy calculation
+- [ ] Alfvén dynamics (Issue #6 - next step)
 - [ ] Passive scalar evolution (Issue #7)
 - [ ] Time integration RK4 (Issue #8)
 
