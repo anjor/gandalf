@@ -61,7 +61,7 @@ where {f,g} = ẑ·(∇f × ∇g) is the Poisson bracket.
 ```
 krmhd/
 ├── spectral.py      # ✅ COMPLETE: FFT operations, derivatives, dealiasing (2D/3D)
-├── physics.py       # KRMHD equations, Poisson brackets (TODO)
+├── physics.py       # ✅ Poisson bracket complete, RHS functions (TODO)
 ├── timestepping.py  # RK4/RK45 integrators (TODO)
 ├── hermite.py       # ⚠️ REQUIRED: Hermite basis for kinetic physics (Issues #21-24)
 ├── collisions.py    # Lenard-Bernstein collision operators (Issue #23)
@@ -157,8 +157,12 @@ checkpoints to return to.
   - Orthogonality verification utilities
 
 ### Fluid RMHD Core (Issues #4-8)
-- [ ] Poisson bracket implementation (Issue #4 - next step)
-- [ ] KRMHD state and initialization (Issue #5)
+- [x] Poisson bracket implementation (Issue #4) ✅
+  - poisson_bracket_2d() and poisson_bracket_3d() in physics.py
+  - Computes {f,g} = ẑ·(∇f × ∇g) with spectral derivatives
+  - 2/3 dealiasing applied, JIT-compiled with static args
+  - 12 comprehensive tests: analytical solutions, symmetry, linearity
+- [ ] KRMHD state and initialization (Issue #5 - next step)
 - [ ] Alfvén dynamics (Issue #6)
 - [ ] Passive scalar evolution (Issue #7)
 - [ ] Time integration RK4 (Issue #8)
