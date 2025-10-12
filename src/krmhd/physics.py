@@ -31,7 +31,6 @@ from krmhd.spectral import (
     rfftn_forward,
     rfftn_inverse,
     dealias,
-    laplacian,
 )
 from krmhd.hermite import hermite_basis_function
 
@@ -110,9 +109,11 @@ class KRMHDState(BaseModel):
     @field_validator("g")
     @classmethod
     def validate_hermite_shape(cls, v: Array) -> Array:
-        """Validate that Hermite moments have correct 4D shape."""
+        """Validate that Hermite moments have correct 4D shape and dtype."""
         if v.ndim != 4:
             raise ValueError(f"Hermite moments must be 4D [Nz, Ny, Nx//2+1, M+1], got shape {v.shape}")
+        if not jnp.iscomplexobj(v):
+            raise ValueError("Hermite moments must be complex-valued in Fourier space")
         return v
 
 
@@ -304,6 +305,7 @@ def initialize_hermite_moments(
     M: int,
     v_th: float = 1.0,
     perturbation_amplitude: float = 0.0,
+    seed: int = 42,
 ) -> Array:
     """
     Initialize Hermite moments for electron distribution function.
@@ -320,6 +322,7 @@ def initialize_hermite_moments(
         M: Number of Hermite moments (g_0, g_1, ..., g_M)
         v_th: Electron thermal velocity (default: 1.0)
         perturbation_amplitude: Amplitude of higher moment perturbations (default: 0.0)
+        seed: Random seed for perturbations (default: 42, for reproducibility)
 
     Returns:
         Hermite moment array g (shape: [Nz, Ny, Nx//2+1, M+1])
@@ -335,6 +338,7 @@ def initialize_hermite_moments(
         For pure Maxwellian initial condition, set perturbation_amplitude=0.0.
         For kinetic instability studies (e.g., Landau damping tests), use small
         non-zero perturbation_amplitude to seed higher moments.
+        Seed parameter ensures reproducible perturbations for testing.
     """
     shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1)
 
@@ -347,7 +351,7 @@ def initialize_hermite_moments(
     # Real perturbations would be added based on physics (e.g., for Landau damping test)
     if perturbation_amplitude > 0:
         # Add small random perturbations to g_1 mode (velocity perturbation)
-        key = jax.random.PRNGKey(42)
+        key = jax.random.PRNGKey(seed)
         # Only perturb low-k modes to avoid aliasing issues
         perturbation = perturbation_amplitude * jax.random.normal(
             key, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64
@@ -663,23 +667,48 @@ def energy(state: KRMHDState) -> Dict[str, float]:
     """
     grid = state.grid
 
-    # Compute perpendicular Laplacian for each field to get |∇|² in Fourier space
-    # Recall: laplacian returns -k²·f̂, so we need to take abs and divide by k²
-    # Actually, easier to compute k² directly
+    # Parseval's theorem for rfft: ∫ |f(x)|² dx = (1/N) Σ_k |f̂(k)|²
+    # where N = Nx * Ny * Nz is the total number of grid points
+    #
+    # For rfft2/rfftn, we only store positive kx frequencies, so we need to:
+    # 1. Double-count all modes except kx=0 (accounts for negative kx)
+    # 2. Normalize by 1/N to match real-space integral
+    #
+    # The physical volume (Lx * Ly * Lz) cancels out because:
+    # - Real space: ∫ |f|² dx has units [f²·volume]
+    # - Fourier space: Σ |f̂|² has units [f²·volume/N]
+    # - Factor of N makes them match
+
+    Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
+    N_total = Nx * Ny * Nz
+    norm_factor = 1.0 / N_total
+
+    # Create mask for kx=0 plane (don't double-count)
+    kx_zero_mask = (grid.kx[jnp.newaxis, jnp.newaxis, :] == 0.0)
+
+    # Compute k² for gradient energy
     kx_3d = grid.kx[jnp.newaxis, jnp.newaxis, :]
     ky_3d = grid.ky[jnp.newaxis, :, jnp.newaxis]
     k_perp_squared = kx_3d**2 + ky_3d**2
 
-    # Magnetic energy: E_mag = (1/2) ∫ |∇⊥A∥|² dx = (1/2) Σ_k k²⊥ |Â∥|²
-    # Factor of 2 accounts for reality condition (negative frequencies)
-    # But rfft already accounts for this - no factor of 2 needed
-    E_magnetic = 0.5 * jnp.sum(k_perp_squared * jnp.abs(state.A_parallel) ** 2).real
+    # Magnetic energy: E_mag = (1/2) ∫ |∇⊥A∥|² dx
+    # = (1/2N) Σ_k k²⊥ |Â∥|² with factor 2 for kx>0, factor 1 for kx=0
+    A_mag_squared = k_perp_squared * jnp.abs(state.A_parallel) ** 2
+    E_magnetic = 0.5 * norm_factor * (
+        jnp.sum(jnp.where(kx_zero_mask, A_mag_squared, 2.0 * A_mag_squared))
+    ).real
 
-    # Kinetic energy: E_kin = (1/2) ∫ |∇⊥φ|² dx = (1/2) Σ_k k²⊥ |φ̂|²
-    E_kinetic = 0.5 * jnp.sum(k_perp_squared * jnp.abs(state.phi) ** 2).real
+    # Kinetic energy: E_kin = (1/2) ∫ |∇⊥φ|² dx
+    phi_mag_squared = k_perp_squared * jnp.abs(state.phi) ** 2
+    E_kinetic = 0.5 * norm_factor * (
+        jnp.sum(jnp.where(kx_zero_mask, phi_mag_squared, 2.0 * phi_mag_squared))
+    ).real
 
-    # Compressive energy: E_comp = (1/2) ∫ |δB∥|² dx = (1/2) Σ_k |δB̂∥|²
-    E_compressive = 0.5 * jnp.sum(jnp.abs(state.B_parallel) ** 2).real
+    # Compressive energy: E_comp = (1/2) ∫ |δB∥|² dx
+    B_mag_squared = jnp.abs(state.B_parallel) ** 2
+    E_compressive = 0.5 * norm_factor * (
+        jnp.sum(jnp.where(kx_zero_mask, B_mag_squared, 2.0 * B_mag_squared))
+    ).real
 
     # Total energy
     E_total = E_magnetic + E_kinetic + E_compressive

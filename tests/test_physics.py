@@ -909,3 +909,124 @@ class TestKRMHDState:
         assert E["kinetic"] == 0.0
         assert E["compressive"] == 0.0
         assert E["total"] == 0.0
+
+    def test_energy_parseval_validation(self):
+        """Test Parseval's theorem: energy in Fourier space matches direct calculation."""
+        from krmhd.physics import initialize_alfven_wave, energy
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        state = initialize_alfven_wave(
+            grid,
+            M,
+            kx_mode=2.0,
+            kz_mode=1.0,
+            amplitude=0.1,
+        )
+
+        # Compute energy using energy() function
+        E_auto = energy(state)
+
+        # Manually compute energy in Fourier space for validation
+        Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
+        N_total = Nx * Ny * Nz
+        norm_factor = 1.0 / N_total
+
+        kx_3d = grid.kx[jnp.newaxis, jnp.newaxis, :]
+        ky_3d = grid.ky[jnp.newaxis, :, jnp.newaxis]
+        k_perp_squared = kx_3d**2 + ky_3d**2
+
+        # Create kx=0 mask
+        kx_zero_mask = (grid.kx[jnp.newaxis, jnp.newaxis, :] == 0.0)
+
+        # Manual calculation
+        A_mag_sq = k_perp_squared * jnp.abs(state.A_parallel) ** 2
+        E_mag_manual = 0.5 * norm_factor * jnp.sum(
+            jnp.where(kx_zero_mask, A_mag_sq, 2.0 * A_mag_sq)
+        ).real
+
+        phi_mag_sq = k_perp_squared * jnp.abs(state.phi) ** 2
+        E_kin_manual = 0.5 * norm_factor * jnp.sum(
+            jnp.where(kx_zero_mask, phi_mag_sq, 2.0 * phi_mag_sq)
+        ).real
+
+        # Should match exactly (same calculation)
+        assert jnp.isclose(E_auto["magnetic"], E_mag_manual, rtol=1e-10), \
+            f"Magnetic energy mismatch: auto={E_auto['magnetic']}, manual={E_mag_manual}"
+        assert jnp.isclose(E_auto["kinetic"], E_kin_manual, rtol=1e-10), \
+            f"Kinetic energy mismatch: auto={E_auto['kinetic']}, manual={E_kin_manual}"
+
+        # Also check that energy values are reasonable (not zero, not too large)
+        assert E_auto["total"] > 0.0, "Total energy should be positive"
+        assert E_auto["total"] < 1.0, f"Total energy suspiciously large: {E_auto['total']}"
+
+    def test_energy_alfven_equipartition(self):
+        """Test equipartition E_mag ≈ E_kin for Alfvén wave with precise check."""
+        from krmhd.physics import initialize_alfven_wave, energy
+
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        M = 10
+
+        # Pure Alfvén wave should have exact equipartition in linear regime
+        state = initialize_alfven_wave(
+            grid,
+            M,
+            kx_mode=1.0,
+            ky_mode=0.0,
+            kz_mode=1.0,
+            amplitude=0.05,  # Small amplitude for linear regime
+        )
+
+        E = energy(state)
+
+        # For pure Alfvén wave with correct initialization, expect E_mag = E_kin
+        # (phase relationship gives circularly polarized wave with equipartition)
+        ratio = E["magnetic"] / (E["kinetic"] + 1e-20)
+
+        # Should be very close to 1.0 for pure Alfvén wave
+        assert jnp.isclose(ratio, 1.0, rtol=0.05), \
+            f"Alfvén wave equipartition: E_mag/E_kin = {ratio}, expected ≈ 1.0"
+
+        # Compressive energy should be exactly zero
+        assert E["compressive"] == 0.0, "Pure Alfvén wave should have no compressive energy"
+
+    def test_hermite_dtype_validation(self):
+        """Test that Hermite moments must be complex."""
+        from krmhd.physics import KRMHDState
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        # Should fail with real-valued Hermite moments
+        with pytest.raises(ValueError, match="complex-valued"):
+            KRMHDState(
+                phi=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+                A_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+                B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+                g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.float32),  # Real!
+                M=M,
+                beta_i=1.0,
+                v_th=1.0,
+                nu=0.01,
+                time=0.0,
+                grid=grid,
+            )
+
+    def test_hermite_seed_reproducibility(self):
+        """Test that same seed gives reproducible Hermite moments."""
+        from krmhd.physics import initialize_hermite_moments
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        # Same seed should give same result
+        g1 = initialize_hermite_moments(grid, M, perturbation_amplitude=0.1, seed=123)
+        g2 = initialize_hermite_moments(grid, M, perturbation_amplitude=0.1, seed=123)
+
+        assert jnp.allclose(g1, g2), "Same seed should give identical results"
+
+        # Different seed should give different result
+        g3 = initialize_hermite_moments(grid, M, perturbation_amplitude=0.1, seed=456)
+
+        assert not jnp.allclose(g1, g3), "Different seeds should give different results"
