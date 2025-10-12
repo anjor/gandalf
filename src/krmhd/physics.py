@@ -351,13 +351,20 @@ def initialize_hermite_moments(
     # Real perturbations would be added based on physics (e.g., for Landau damping test)
     if perturbation_amplitude > 0:
         # Add small random perturbations to g_1 mode (velocity perturbation)
+        # Must satisfy reality condition: f(-k) = f*(k) for real fields
         key = jax.random.PRNGKey(seed)
-        # Only perturb low-k modes to avoid aliasing issues
-        perturbation = perturbation_amplitude * jax.random.normal(
-            key, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64
+
+        # Generate random real-space field, then FFT to ensure reality condition
+        key_real, key_imag = jax.random.split(key)
+        perturbation_real = perturbation_amplitude * jax.random.normal(
+            key_real, shape=(grid.Nz, grid.Ny, grid.Nx), dtype=jnp.float32
         )
+
+        # Transform to Fourier space - rfftn automatically enforces reality condition
+        perturbation_fourier = rfftn_forward(perturbation_real)
+
         # Apply perturbation to first moment (velocity perturbation)
-        g = g.at[:, :, :, 1].set(perturbation)
+        g = g.at[:, :, :, 1].set(perturbation_fourier)
 
     return g
 
@@ -596,8 +603,8 @@ def initialize_random_spectrum(
     phase_A = 2.0 * jnp.pi * jax.random.uniform(subkey2, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1))
 
     # Create fields with random phases and power-law spectrum
-    phi = spectrum * jnp.exp(1.0j * phase_A).astype(jnp.complex64)
-    A_parallel = spectrum * jnp.exp(1.0j * phase_phi).astype(jnp.complex64)
+    phi = spectrum * jnp.exp(1.0j * phase_phi).astype(jnp.complex64)
+    A_parallel = spectrum * jnp.exp(1.0j * phase_A).astype(jnp.complex64)
 
     # Zero out k=0 mode (no DC component)
     phi = phi.at[0, 0, 0].set(0.0)
@@ -683,31 +690,39 @@ def energy(state: KRMHDState) -> Dict[str, float]:
     N_total = Nx * Ny * Nz
     norm_factor = 1.0 / N_total
 
-    # Create mask for kx=0 plane (don't double-count)
-    kx_zero_mask = (grid.kx[jnp.newaxis, jnp.newaxis, :] == 0.0)
-
-    # Compute k² for gradient energy
+    # For rfft, we need to handle three cases:
+    # - kx = 0: No negative counterpart, factor = 1
+    # - 0 < kx < Nx/2: Has negative counterpart, factor = 2
+    # - kx = Nx/2 (Nyquist, only if Nx even): Real-valued, factor = 1
+    #
+    # Create masks for each case
     kx_3d = grid.kx[jnp.newaxis, jnp.newaxis, :]
     ky_3d = grid.ky[jnp.newaxis, :, jnp.newaxis]
+
+    kx_zero = (kx_3d == 0.0)
+    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_middle = ~(kx_zero | kx_nyquist)  # All other positive kx values
+
+    # Compute k² for gradient energy
     k_perp_squared = kx_3d**2 + ky_3d**2
 
     # Magnetic energy: E_mag = (1/2) ∫ |∇⊥A∥|² dx
-    # = (1/2N) Σ_k k²⊥ |Â∥|² with factor 2 for kx>0, factor 1 for kx=0
+    # Apply correct factors: 1 for kx=0 and Nyquist, 2 for middle modes
     A_mag_squared = k_perp_squared * jnp.abs(state.A_parallel) ** 2
     E_magnetic = 0.5 * norm_factor * (
-        jnp.sum(jnp.where(kx_zero_mask, A_mag_squared, 2.0 * A_mag_squared))
+        jnp.sum(jnp.where(kx_middle, 2.0 * A_mag_squared, A_mag_squared))
     ).real
 
     # Kinetic energy: E_kin = (1/2) ∫ |∇⊥φ|² dx
     phi_mag_squared = k_perp_squared * jnp.abs(state.phi) ** 2
     E_kinetic = 0.5 * norm_factor * (
-        jnp.sum(jnp.where(kx_zero_mask, phi_mag_squared, 2.0 * phi_mag_squared))
+        jnp.sum(jnp.where(kx_middle, 2.0 * phi_mag_squared, phi_mag_squared))
     ).real
 
     # Compressive energy: E_comp = (1/2) ∫ |δB∥|² dx
     B_mag_squared = jnp.abs(state.B_parallel) ** 2
     E_compressive = 0.5 * norm_factor * (
-        jnp.sum(jnp.where(kx_zero_mask, B_mag_squared, 2.0 * B_mag_squared))
+        jnp.sum(jnp.where(kx_middle, 2.0 * B_mag_squared, B_mag_squared))
     ).real
 
     # Total energy

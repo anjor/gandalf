@@ -1030,3 +1030,62 @@ class TestKRMHDState:
         g3 = initialize_hermite_moments(grid, M, perturbation_amplitude=0.1, seed=456)
 
         assert not jnp.allclose(g1, g3), "Different seeds should give different results"
+
+    def test_reality_condition_alfven_wave(self):
+        """Test that Alfvén wave initialization satisfies reality condition."""
+        from krmhd.physics import initialize_alfven_wave
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        state = initialize_alfven_wave(grid, M, kx_mode=2.0, kz_mode=1.0, amplitude=0.1)
+
+        # Check reality condition for phi: transform to real space and back
+        phi_real = rfftn_inverse(state.phi, grid.Nz, grid.Ny, grid.Nx)
+        assert jnp.all(jnp.isreal(phi_real)), "Phi in real space should be real-valued"
+
+        # Same for A_parallel
+        A_real = rfftn_inverse(state.A_parallel, grid.Nz, grid.Ny, grid.Nx)
+        assert jnp.all(jnp.isreal(A_real)), "A_parallel in real space should be real-valued"
+
+        # Same for B_parallel
+        B_real = rfftn_inverse(state.B_parallel, grid.Nz, grid.Ny, grid.Nx)
+        assert jnp.all(jnp.isreal(B_real)), "B_parallel in real space should be real-valued"
+
+    def test_reality_condition_random_spectrum(self):
+        """Test that random spectrum initialization satisfies reality condition."""
+        from krmhd.physics import initialize_random_spectrum
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        state = initialize_random_spectrum(grid, M, alpha=5/3, amplitude=1.0, k_min=2.0, k_max=8.0, seed=42)
+
+        # Check reality condition: fields in real space should be real-valued
+        phi_real = rfftn_inverse(state.phi, grid.Nz, grid.Ny, grid.Nx)
+        A_real = rfftn_inverse(state.A_parallel, grid.Nz, grid.Ny, grid.Nx)
+
+        # Check that imaginary parts are negligible (within FFT round-off)
+        assert jnp.max(jnp.abs(jnp.imag(phi_real))) < 1e-6, \
+            f"Phi should be real, max imag = {jnp.max(jnp.abs(jnp.imag(phi_real)))}"
+        assert jnp.max(jnp.abs(jnp.imag(A_real))) < 1e-6, \
+            f"A_parallel should be real, max imag = {jnp.max(jnp.abs(jnp.imag(A_real)))}"
+
+    def test_reality_condition_hermite_perturbation(self):
+        """Test that Hermite moment perturbations satisfy reality condition."""
+        from krmhd.physics import initialize_hermite_moments
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        M = 10
+
+        # Initialize with perturbations
+        g = initialize_hermite_moments(grid, M, perturbation_amplitude=0.1, seed=123)
+
+        # Check that perturbed moment (g[:,:,:,1]) satisfies reality condition
+        # Transform to real space
+        g1_real = rfftn_inverse(g[:, :, :, 1], grid.Nz, grid.Ny, grid.Nx)
+
+        # Should be real-valued (within numerical precision)
+        max_imag = jnp.max(jnp.abs(jnp.imag(g1_real)))
+        assert max_imag < 1e-6, \
+            f"Hermite moment g_1 should be real in real space, max imag = {max_imag}"
