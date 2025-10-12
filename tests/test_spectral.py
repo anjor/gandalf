@@ -7,6 +7,7 @@ Validates:
 - Dealiasing (2/3 rule)
 - Pydantic model validation
 - Laplacian operator composition
+- Poisson solver (∇²φ = ω)
 """
 
 import pytest
@@ -28,6 +29,8 @@ from krmhd.spectral import (
     derivative_z,
     laplacian,
     dealias,
+    poisson_solve_2d,
+    poisson_solve_3d,
 )
 
 
@@ -799,6 +802,286 @@ class TestSpectralField3D:
         field_real_recovered = field.real
 
         assert jnp.allclose(field_real_original, field_real_recovered, atol=1e-12)
+
+
+class TestPoissonSolver2D:
+    """Test suite for 2D Poisson solver."""
+
+    def test_manufactured_solution_sin_cos(self):
+        """Test 2D Poisson solver with manufactured solution φ = sin(x)·cos(y)."""
+        grid = SpectralGrid2D.create(Nx=128, Ny=128, Lx=2 * jnp.pi, Ly=2 * jnp.pi)
+
+        # Create coordinate arrays
+        x = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        X, Y = jnp.meshgrid(x, y, indexing="ij")
+        X, Y = X.T, Y.T  # Match [Ny, Nx] convention
+
+        # Manufactured solution: φ = sin(x)·cos(y)
+        phi_exact = jnp.sin(X) * jnp.cos(Y)
+
+        # Compute exact vorticity: ω = ∇²φ = -2·sin(x)·cos(y)
+        omega_exact = -2.0 * jnp.sin(X) * jnp.cos(Y)
+
+        # Transform to Fourier space
+        omega_fourier = rfft2_forward(omega_exact)
+
+        # Solve Poisson equation
+        phi_fourier = poisson_solve_2d(omega_fourier, grid.kx, grid.ky)
+
+        # Transform back to real space
+        phi_recovered = rfft2_inverse(phi_fourier, grid.Ny, grid.Nx)
+
+        # Remove mean from both (k=0 mode is arbitrary)
+        phi_exact_zero_mean = phi_exact - jnp.mean(phi_exact)
+        phi_recovered_zero_mean = phi_recovered - jnp.mean(phi_recovered)
+
+        # Check that recovered solution matches exact solution (up to constant)
+        # Note: Using atol=1e-6 for float32 precision
+        assert jnp.allclose(phi_recovered_zero_mean, phi_exact_zero_mean, atol=1e-6)
+
+    def test_manufactured_solution_complex_trig(self):
+        """Test 2D Poisson solver with more complex trigonometric solution."""
+        grid = SpectralGrid2D.create(Nx=128, Ny=128, Lx=2 * jnp.pi, Ly=2 * jnp.pi)
+
+        x = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        X, Y = jnp.meshgrid(x, y, indexing="ij")
+        X, Y = X.T, Y.T
+
+        # More complex solution: φ = sin(3x)·cos(2y) + cos(x)·sin(4y)
+        phi_exact = jnp.sin(3 * X) * jnp.cos(2 * Y) + jnp.cos(X) * jnp.sin(4 * Y)
+
+        # Compute Laplacian in Fourier space
+        phi_fourier_exact = rfft2_forward(phi_exact)
+        omega_fourier = laplacian(phi_fourier_exact, grid.kx, grid.ky)
+
+        # Solve Poisson equation
+        phi_fourier_recovered = poisson_solve_2d(omega_fourier, grid.kx, grid.ky)
+
+        # Transform back
+        phi_recovered = rfft2_inverse(phi_fourier_recovered, grid.Ny, grid.Nx)
+
+        # Remove means
+        phi_exact_zero_mean = phi_exact - jnp.mean(phi_exact)
+        phi_recovered_zero_mean = phi_recovered - jnp.mean(phi_recovered)
+
+        # Note: Using atol=1e-6 for float32 precision
+        assert jnp.allclose(phi_recovered_zero_mean, phi_exact_zero_mean, atol=1e-6)
+
+    def test_k0_mode_handling(self):
+        """Test that k=0 mode is properly set to zero."""
+        grid = SpectralGrid2D.create(Nx=64, Ny=64)
+
+        # Create omega with non-zero mean (k=0 mode)
+        omega_fourier = jnp.ones((64, 64 // 2 + 1), dtype=jnp.complex64)
+        omega_fourier = omega_fourier.at[0, 0].set(100.0 + 0.0j)  # Large k=0 mode
+
+        # Solve Poisson equation
+        phi_fourier = poisson_solve_2d(omega_fourier, grid.kx, grid.ky)
+
+        # k=0 mode should be zero
+        assert jnp.isclose(phi_fourier[0, 0], 0.0 + 0.0j, atol=1e-12)
+
+    def test_output_shape_2d(self):
+        """Test that output shape matches input shape."""
+        grid = SpectralGrid2D.create(Nx=128, Ny=256)
+        omega_fourier = jnp.ones((256, 128 // 2 + 1), dtype=jnp.complex64)
+
+        phi_fourier = poisson_solve_2d(omega_fourier, grid.kx, grid.ky)
+
+        assert phi_fourier.shape == omega_fourier.shape
+
+    def test_laplacian_roundtrip_2d(self):
+        """Test that Laplacian -> Poisson solver gives identity (up to k=0)."""
+        grid = SpectralGrid2D.create(Nx=128, Ny=128)
+
+        # Create arbitrary field (with zero mean)
+        x = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 128, endpoint=False)
+        X, Y = jnp.meshgrid(x, y, indexing="ij")
+        X, Y = X.T, Y.T
+        phi_original = jnp.sin(2 * X) * jnp.cos(3 * Y)
+
+        # Laplacian
+        phi_fourier = rfft2_forward(phi_original)
+        omega_fourier = laplacian(phi_fourier, grid.kx, grid.ky)
+
+        # Poisson solve
+        phi_fourier_recovered = poisson_solve_2d(omega_fourier, grid.kx, grid.ky)
+        phi_recovered = rfft2_inverse(phi_fourier_recovered, grid.Ny, grid.Nx)
+
+        # Remove means
+        phi_original_zero_mean = phi_original - jnp.mean(phi_original)
+        phi_recovered_zero_mean = phi_recovered - jnp.mean(phi_recovered)
+
+        # Note: Using atol=1e-6 for float32 precision
+        assert jnp.allclose(phi_original_zero_mean, phi_recovered_zero_mean, atol=1e-6)
+
+    def test_invalid_dimensionality(self):
+        """Test that 3D field raises error."""
+        grid = SpectralGrid2D.create(Nx=64, Ny=64)
+
+        # Try to pass 3D field to 2D solver
+        omega_fourier_3d = jnp.ones((64, 64, 64 // 2 + 1), dtype=jnp.complex64)
+
+        with pytest.raises(ValueError, match="Expected 2D field"):
+            poisson_solve_2d(omega_fourier_3d, grid.kx, grid.ky)
+
+
+class TestPoissonSolver3D:
+    """Test suite for 3D Poisson solver."""
+
+    def test_manufactured_solution_perpendicular_3d(self):
+        """Test 3D perpendicular Poisson solver (kz=None) with manufactured solution."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+
+        # Create coordinate arrays
+        x = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        z = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
+        X, Y, Z = X.transpose(2, 1, 0), Y.transpose(2, 1, 0), Z.transpose(2, 1, 0)
+
+        # Solution with z-dependence: φ = sin(x)·cos(y)·cos(2z)
+        phi_exact = jnp.sin(X) * jnp.cos(Y) * jnp.cos(2 * Z)
+
+        # Perpendicular Laplacian: ∇²⊥φ = -2·sin(x)·cos(y)·cos(2z)
+        omega_exact = -2.0 * jnp.sin(X) * jnp.cos(Y) * jnp.cos(2 * Z)
+
+        # Transform to Fourier space
+        omega_fourier = rfftn_forward(omega_exact)
+
+        # Solve perpendicular Poisson equation (kz=None)
+        phi_fourier = poisson_solve_3d(omega_fourier, grid.kx, grid.ky, kz=None)
+
+        # Transform back
+        phi_recovered = rfftn_inverse(phi_fourier, grid.Nz, grid.Ny, grid.Nx)
+
+        # Remove means
+        phi_exact_zero_mean = phi_exact - jnp.mean(phi_exact)
+        phi_recovered_zero_mean = phi_recovered - jnp.mean(phi_recovered)
+
+        # Note: Using atol=1e-6 for float32 precision
+        assert jnp.allclose(phi_recovered_zero_mean, phi_exact_zero_mean, atol=1e-6)
+
+    def test_manufactured_solution_full_3d(self):
+        """Test 3D full Poisson solver with kz included."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+
+        x = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        z = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
+        X, Y, Z = X.transpose(2, 1, 0), Y.transpose(2, 1, 0), Z.transpose(2, 1, 0)
+
+        # Solution: φ = sin(x)·cos(y)·sin(z)
+        phi_exact = jnp.sin(X) * jnp.cos(Y) * jnp.sin(Z)
+
+        # Full 3D Laplacian: ∇²φ = -3·sin(x)·cos(y)·sin(z)
+        omega_exact = -3.0 * jnp.sin(X) * jnp.cos(Y) * jnp.sin(Z)
+
+        # Transform to Fourier space
+        omega_fourier = rfftn_forward(omega_exact)
+
+        # Solve full 3D Poisson equation
+        phi_fourier = poisson_solve_3d(omega_fourier, grid.kx, grid.ky, kz=grid.kz)
+
+        # Transform back
+        phi_recovered = rfftn_inverse(phi_fourier, grid.Nz, grid.Ny, grid.Nx)
+
+        # Remove means
+        phi_exact_zero_mean = phi_exact - jnp.mean(phi_exact)
+        phi_recovered_zero_mean = phi_recovered - jnp.mean(phi_recovered)
+
+        # Note: Using atol=1e-6 for float32 precision
+        assert jnp.allclose(phi_recovered_zero_mean, phi_exact_zero_mean, atol=1e-6)
+
+    def test_k0_mode_handling_3d(self):
+        """Test that k=0 mode is properly handled in 3D."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+
+        omega_fourier = jnp.ones((64, 64, 64 // 2 + 1), dtype=jnp.complex64)
+        omega_fourier = omega_fourier.at[0, 0, 0].set(1000.0 + 0.0j)
+
+        # Solve with perpendicular Laplacian
+        phi_fourier = poisson_solve_3d(omega_fourier, grid.kx, grid.ky, kz=None)
+
+        # k=0 mode should be zero
+        assert jnp.isclose(phi_fourier[0, 0, 0], 0.0 + 0.0j, atol=1e-12)
+
+    def test_output_shape_3d(self):
+        """Test that output shape matches input shape."""
+        grid = SpectralGrid3D.create(Nx=128, Ny=64, Nz=32)
+        omega_fourier = jnp.ones((32, 64, 128 // 2 + 1), dtype=jnp.complex64)
+
+        phi_fourier = poisson_solve_3d(omega_fourier, grid.kx, grid.ky, kz=None)
+
+        assert phi_fourier.shape == omega_fourier.shape
+
+    def test_perpendicular_vs_full_laplacian(self):
+        """Test difference between perpendicular and full 3D Laplacian solves."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+
+        x = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        z = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
+        X, Y, Z = X.transpose(2, 1, 0), Y.transpose(2, 1, 0), Z.transpose(2, 1, 0)
+
+        # Create field with z-dependence
+        phi = jnp.sin(X) * jnp.cos(Y) * jnp.sin(2 * Z)
+        phi_fourier = rfftn_forward(phi)
+
+        # Perpendicular Laplacian
+        omega_perp_fourier = laplacian(phi_fourier, grid.kx, grid.ky, kz=None)
+
+        # Full 3D Laplacian
+        omega_full_fourier = laplacian(phi_fourier, grid.kx, grid.ky, kz=grid.kz)
+
+        # These should be different
+        omega_perp = rfftn_inverse(omega_perp_fourier, grid.Nz, grid.Ny, grid.Nx)
+        omega_full = rfftn_inverse(omega_full_fourier, grid.Nz, grid.Ny, grid.Nx)
+
+        # They should differ by the z-derivative term
+        assert not jnp.allclose(omega_perp, omega_full)
+
+    def test_laplacian_roundtrip_3d(self):
+        """Test that Laplacian -> Poisson solver gives identity (up to k=0)."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+
+        x = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        y = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        z = jnp.linspace(0, 2 * jnp.pi, 64, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
+        X, Y, Z = X.transpose(2, 1, 0), Y.transpose(2, 1, 0), Z.transpose(2, 1, 0)
+
+        phi_original = jnp.sin(2 * X) * jnp.cos(3 * Y) * jnp.sin(Z)
+
+        # Perpendicular Laplacian
+        phi_fourier = rfftn_forward(phi_original)
+        omega_fourier = laplacian(phi_fourier, grid.kx, grid.ky, kz=None)
+
+        # Poisson solve
+        phi_fourier_recovered = poisson_solve_3d(omega_fourier, grid.kx, grid.ky, kz=None)
+        phi_recovered = rfftn_inverse(phi_fourier_recovered, grid.Nz, grid.Ny, grid.Nx)
+
+        # Remove means
+        phi_original_zero_mean = phi_original - jnp.mean(phi_original)
+        phi_recovered_zero_mean = phi_recovered - jnp.mean(phi_recovered)
+
+        # Note: Using atol=1e-6 for float32 precision
+        assert jnp.allclose(phi_original_zero_mean, phi_recovered_zero_mean, atol=1e-6)
+
+    def test_invalid_dimensionality(self):
+        """Test that 2D field raises error."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+
+        # Try to pass 2D field to 3D solver
+        omega_fourier_2d = jnp.ones((64, 64 // 2 + 1), dtype=jnp.complex64)
+
+        with pytest.raises(ValueError, match="Expected 3D field"):
+            poisson_solve_3d(omega_fourier_2d, grid.kx, grid.ky)
 
 
 if __name__ == "__main__":

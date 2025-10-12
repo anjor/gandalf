@@ -7,6 +7,8 @@ This module provides 2D and 3D spectral operations using FFT methods:
 - SpectralField2D/3D: Manages real-space and Fourier-space representations
 - FFT operations using rfft2/rfftn for real-to-complex transforms
 - Spectral derivatives (∂x, ∂y, ∂z) computed as multiplication in Fourier space
+- Laplacian operators (∇², ∇²⊥) for 2D and 3D fields
+- Poisson solvers for ∇²φ = ω and ∇²⊥φ = ω
 - Dealiasing using the 2/3 rule to prevent aliasing errors
 
 All performance-critical functions are JIT-compiled with JAX.
@@ -807,3 +809,155 @@ def dealias(field_fourier: Array, dealias_mask: Array) -> Array:
         >>> fg_fourier = dealias(fg_fourier, grid.dealias_mask)  # MUST dealias!
     """
     return field_fourier * dealias_mask
+
+
+# =============================================================================
+# Poisson Solver (JIT-compiled)
+# =============================================================================
+
+
+@jax.jit
+def poisson_solve_2d(omega_fourier: Array, kx: Array, ky: Array) -> Array:
+    """
+    Solve 2D Poisson equation ∇²φ = ω in Fourier space.
+
+    In Fourier space, using the convention that laplacian() returns -k²·φ̂:
+        F{∇²φ} = -k²·φ̂ = F{ω}
+        Therefore: φ̂ = -ω̂/k²
+
+    The k=0 mode (constant component) is set to zero since the Poisson
+    equation only determines φ up to an additive constant.
+
+    Args:
+        omega_fourier: Fourier-space vorticity field (shape: [Ny, Nx//2+1])
+        kx: Wavenumber array in x (shape: [Nx//2+1])
+        ky: Wavenumber array in y (shape: [Ny])
+
+    Returns:
+        Fourier-space solution φ̂ (shape: [Ny, Nx//2+1])
+
+    Raises:
+        ValueError: If omega_fourier is not 2D
+
+    Physics context:
+        In KRMHD, this solves for the stream function φ from vorticity:
+            ω = ∇²φ  (in 2D incompressible flow)
+        The stream function generates velocity via: v = ẑ × ∇φ
+
+    Example:
+        >>> # Manufactured solution: φ = sin(x)·cos(y)
+        >>> # Then: ω = ∇²φ = -2·sin(x)·cos(y)
+        >>> omega_real = -2 * jnp.sin(x) * jnp.cos(y)
+        >>> omega_fourier = rfft2_forward(omega_real)
+        >>> phi_fourier = poisson_solve_2d(omega_fourier, grid.kx, grid.ky)
+        >>> phi_real = rfft2_inverse(phi_fourier, grid.Ny, grid.Nx)
+
+    Note:
+        - k=0 mode is fixed at zero (arbitrary constant choice)
+        - No boundary conditions needed (periodic domain)
+        - Division by zero at k=0 is handled via jnp.where
+        - This is spectrally accurate (no truncation error)
+    """
+    # Validate input dimensions
+    if omega_fourier.ndim != 2:
+        raise ValueError(
+            f"Expected 2D field, got {omega_fourier.ndim}D with shape {omega_fourier.shape}"
+        )
+    # Broadcast wavenumbers to match field shape
+    kx_2d = _broadcast_wavenumber_x(kx, ndim=2)
+    ky_2d = _broadcast_wavenumber_y(ky, ndim=2)
+
+    # Compute k² = kx² + ky²
+    k_squared = kx_2d**2 + ky_2d**2
+
+    # Solve: φ̂ = -ω̂/k²
+    # Since laplacian() returns F{∇²φ} = -k²·φ̂, we have -k²·φ̂ = ω̂, thus φ̂ = -ω̂/k²
+    # Use jnp.where to handle k=0 mode (set to zero)
+    phi_fourier = jnp.where(
+        k_squared > 0.0,
+        -omega_fourier / k_squared,
+        0.0 + 0.0j  # k=0 mode set to zero
+    )
+
+    return phi_fourier
+
+
+@jax.jit
+def poisson_solve_3d(
+    omega_fourier: Array,
+    kx: Array,
+    ky: Array,
+    kz: Optional[Array] = None
+) -> Array:
+    """
+    Solve 3D Poisson equation in Fourier space.
+
+    Solves either:
+    - Perpendicular Laplacian (kz=None): ∇²⊥φ = ω  where ∇²⊥ = ∂²/∂x² + ∂²/∂y²
+    - Full 3D Laplacian (kz provided): ∇²φ = ω  where ∇² = ∂²/∂x² + ∂²/∂y² + ∂²/∂z²
+
+    In Fourier space, using the convention that laplacian() returns -k²·φ̂:
+        F{∇²⊥φ} = -(kx² + ky²)·φ̂ = F{ω}  →  φ̂ = -ω̂/(kx² + ky²)
+        F{∇²φ} = -(kx² + ky² + kz²)·φ̂ = F{ω}  →  φ̂ = -ω̂/k²
+
+    The k=0 mode is set to zero for each case.
+
+    Args:
+        omega_fourier: Fourier-space source field (shape: [Nz, Ny, Nx//2+1])
+        kx: Wavenumber array in x (shape: [Nx//2+1])
+        ky: Wavenumber array in y (shape: [Ny])
+        kz: Wavenumber array in z (shape: [Nz], optional)
+            If None: solve ∇²⊥φ = ω (perpendicular Laplacian)
+            If provided: solve ∇²φ = ω (full 3D Laplacian)
+
+    Returns:
+        Fourier-space solution φ̂ (shape: [Nz, Ny, Nx//2+1])
+
+    Physics context:
+        In KRMHD with B₀ = B₀ẑ, the Poisson bracket formulation requires
+        solving the perpendicular Poisson equation:
+            ∇²⊥φ = ∇²⊥A∥
+        This determines φ at each z-plane independently when kz=None.
+
+        For problems requiring full 3D coupling, use kz=grid.kz.
+
+    Example:
+        >>> # KRMHD: Solve ∇²⊥φ = ∇²⊥A∥ (perpendicular only)
+        >>> omega_fourier = laplacian(A_parallel_fourier, grid.kx, grid.ky, kz=None)
+        >>> phi_fourier = poisson_solve_3d(omega_fourier, grid.kx, grid.ky, kz=None)
+
+        >>> # Alternative: Full 3D Poisson equation
+        >>> phi_fourier_3d = poisson_solve_3d(omega_fourier, grid.kx, grid.ky, grid.kz)
+
+    Note:
+        - Default (kz=None) uses perpendicular Laplacian for KRMHD
+        - k=0 mode is fixed at zero for each k∥ mode
+        - Spectrally accurate (no truncation error)
+    """
+    if omega_fourier.ndim != 3:
+        raise ValueError(
+            f"Expected 3D field, got {omega_fourier.ndim}D with shape {omega_fourier.shape}"
+        )
+
+    # Broadcast wavenumbers to match 3D field shape
+    kx_3d = _broadcast_wavenumber_x(kx, ndim=3)
+    ky_3d = _broadcast_wavenumber_y(ky, ndim=3)
+
+    # Compute perpendicular k²⊥ = kx² + ky²
+    k_squared = kx_3d**2 + ky_3d**2
+
+    # Add parallel component if requested
+    if kz is not None:
+        kz_3d = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
+        k_squared = k_squared + kz_3d**2
+
+    # Solve: φ̂ = -ω̂/k²
+    # Since laplacian() returns F{∇²φ} = -k²·φ̂, we have -k²·φ̂ = ω̂, thus φ̂ = -ω̂/k²
+    # Use jnp.where to handle k=0 mode (set to zero)
+    phi_fourier = jnp.where(
+        k_squared > 0.0,
+        -omega_fourier / k_squared,
+        0.0 + 0.0j  # k=0 mode set to zero
+    )
+
+    return phi_fourier
