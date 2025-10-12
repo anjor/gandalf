@@ -1349,6 +1349,10 @@ class TestElsasserConversions:
 
         phi, A_parallel = elsasser_to_physical(z_plus, z_minus)
 
+        # For pure z- wave: phi = (0 + 2)/2 = 1.0, A_parallel = (0 - 2)/2 = -1.0
+        assert jnp.allclose(phi, 1.0)
+        assert jnp.allclose(A_parallel, -1.0)
+
     def test_reality_condition_preserved(self):
         """Test that Elsasser conversion preserves reality condition."""
         from krmhd.physics import physical_to_elsasser, elsasser_to_physical
