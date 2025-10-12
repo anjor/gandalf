@@ -109,6 +109,8 @@ checkpoints to return to.
 - Should conserve to ~1e-10 relative error for inviscid runs
 - Monitor energy injection/dissipation balance
 
+**⚠️ KNOWN ISSUE (Issue #44):** Current vorticity formulation does not conserve energy in inviscid limit (η=0). Shows ~13% relative energy change rate. Linear dispersion tests PASS (ω = k∥v_A correct), but nonlinear energy conservation FAILS. Investigation needed before production runs. See Issue #44 for details.
+
 ## Validation Suite
 
 ### Linear Physics Tests
@@ -170,8 +172,17 @@ checkpoints to return to.
   - initialize_random_spectrum() for turbulent IC with k^-α power law
   - energy() function for diagnostics (E_magnetic, E_kinetic, E_compressive)
   - 10 comprehensive tests: state validation, initialization, energy calculation
-- [ ] Alfvén dynamics (Issue #6 - next step)
-- [ ] Passive scalar evolution (Issue #7)
+- [x] Alfvén dynamics (Issue #6, PR #40) ✅
+  - Elsasser variable formulation: z± = φ ± A∥
+  - physical_to_elsasser() and elsasser_to_physical() conversions
+  - z_plus_rhs() and z_minus_rhs() for time evolution
+  - Vorticity formulation: ∂z±/∂t = -∇²⊥{z∓, z±} ∓ ∂∥z∓ + η∇²z±
+  - 20+ comprehensive tests including:
+    * Elsasser conversion (roundtrip, pure waves, reality condition)
+    * Linear Alfvén wave dispersion (validates ω = k∥v_A)
+    * Energy dissipation (validates η > 0 removes energy)
+  - ⚠️ Known limitation: Energy conservation in inviscid limit (Issue #44)
+- [ ] Passive scalar evolution (Issue #7 - next step)
 - [ ] Time integration RK4 (Issue #8)
 
 ### Kinetic Physics (Issues #22-24) - REQUIRED
