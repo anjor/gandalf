@@ -243,6 +243,51 @@ class TestPoissonBracket2D:
             # float32 precision: expect errors ~1e-5 with multiple FFTs
             assert rel_error < 1e-4, f"Resolution {N}: relative error {rel_error} exceeds tolerance"
 
+    def test_l2_norm_conservation(self):
+        """
+        Test that ∫ f · {g, f} dx = 0 (advection conserves L2 norm).
+
+        This is the fundamental property ensuring energy conservation in KRMHD.
+        When ∂A∥/∂t = {φ, A∥}, the magnetic energy ∫ A∥² dx must be conserved.
+
+        We compute the integral in real space directly for accuracy.
+        """
+        grid = SpectralGrid2D.create(Nx=128, Ny=128, Lx=2*jnp.pi, Ly=2*jnp.pi)
+
+        # Create random smooth real fields
+        key = jax.random.PRNGKey(100)
+        key1, key2 = jax.random.split(key)
+
+        # Create smooth random fields in real space
+        f = jax.random.normal(key1, (grid.Ny, grid.Nx))
+        g = jax.random.normal(key2, (grid.Ny, grid.Nx))
+
+        # Apply simple smoothing (low-pass filter)
+        f_k = rfft2_forward(f)
+        g_k = rfft2_forward(g)
+        f_k = f_k * grid.dealias_mask
+        g_k = g_k * grid.dealias_mask
+        f = rfft2_inverse(f_k, grid.Ny, grid.Nx)
+        g = rfft2_inverse(g_k, grid.Ny, grid.Nx)
+
+        # Re-transform to Fourier space
+        f_k = rfft2_forward(f)
+        g_k = rfft2_forward(g)
+
+        # Compute {g, f} (advection of f by g)
+        bracket_k = poisson_bracket_2d(g_k, f_k, grid.kx, grid.ky, grid.Ny, grid.Nx, grid.dealias_mask)
+        bracket = rfft2_inverse(bracket_k, grid.Ny, grid.Nx)
+
+        # Compute ∫ f · {g, f} dx in real space
+        dx = grid.Lx / grid.Nx
+        dy = grid.Ly / grid.Ny
+        integral = jnp.sum(f * bracket) * dx * dy
+
+        # The integral should be zero (advection conserves L2 norm)
+        # Float32 precision with multiple FFTs: expect errors ~1e-4 to 1e-3
+        assert jnp.abs(integral) < 1e-2, \
+            f"L2 norm conservation violated: ∫ f·{{g,f}} dx = {integral}"
+
 
 class TestPoissonBracket3D:
     """Test suite for 3D Poisson bracket implementation."""
@@ -384,3 +429,46 @@ class TestPoissonBracket3D:
         max_high_k = jnp.max(jnp.abs(bracket_high_k))
 
         assert max_high_k < 1e-14, f"High-k modes not zeroed: max = {max_high_k}"
+
+    def test_l2_norm_conservation_3d(self):
+        """
+        Test that ∫ f · {g, f} dx = 0 in 3D (advection conserves L2 norm).
+
+        Same fundamental property as 2D, ensuring energy conservation in KRMHD.
+        The Poisson bracket is perpendicular-only, so conservation holds at all z.
+        """
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+
+        # Create random smooth real fields
+        key = jax.random.PRNGKey(101)
+        key1, key2 = jax.random.split(key)
+
+        # Create smooth random fields in real space
+        f = jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx))
+        g = jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx))
+
+        # Apply smoothing (low-pass filter)
+        f_k = rfftn_forward(f)
+        g_k = rfftn_forward(g)
+        f_k = f_k * grid.dealias_mask
+        g_k = g_k * grid.dealias_mask
+        f = rfftn_inverse(f_k, grid.Nz, grid.Ny, grid.Nx)
+        g = rfftn_inverse(g_k, grid.Nz, grid.Ny, grid.Nx)
+
+        # Re-transform to Fourier space
+        f_k = rfftn_forward(f)
+        g_k = rfftn_forward(g)
+
+        # Compute {g, f}
+        bracket_k = poisson_bracket_3d(g_k, f_k, grid.kx, grid.ky, grid.Nz, grid.Ny, grid.Nx, grid.dealias_mask)
+        bracket = rfftn_inverse(bracket_k, grid.Nz, grid.Ny, grid.Nx)
+
+        # Compute ∫ f · {g, f} dx in real space
+        dx = grid.Lx / grid.Nx
+        dy = grid.Ly / grid.Ny
+        dz = grid.Lz / grid.Nz
+        integral = jnp.sum(f * bracket) * dx * dy * dz
+
+        # Should be zero (L2 norm conservation)
+        assert jnp.abs(integral) < 1e-2, \
+            f"L2 norm conservation violated in 3D: ∫ f·{{g,f}} dx = {integral}"
