@@ -500,10 +500,16 @@ def z_plus_rhs(
         The Elsasser equation for z⁺ in RMHD is:
         ∂z⁺/∂t + (z⁻·∇)z⁺ + ∇P = η∇²z⁺
 
-        In the reduced MHD approximation with strong guide field B₀ẑ, this becomes:
-        ∂z⁺/∂t = -z⁻∂∥z⁺ - ∇²⊥{z⁻, z⁺} + η∇²z⁺
+        In the reduced MHD approximation with strong guide field B₀ẑ,
+        the perpendicular advection (z⁻·∇)z⁺ splits into:
+        - Perpendicular part: ∇²⊥{z⁻, z⁺} (vorticity advection)
+        - Parallel part: ∂∥z⁻ (couples to opposite Elsasser variable)
 
-        where ∂∥ = ∂/∂z is the parallel derivative.
+        This gives:
+        ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∂∥z⁻ + η∇²z⁺
+
+        where ∂∥ = ∂/∂z is the parallel derivative. Note that z⁺ is coupled
+        to the parallel gradient of z⁻, not its own gradient.
 
     Example:
         >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
@@ -585,11 +591,17 @@ def z_minus_rhs(
         The Elsasser equation for z⁻ in RMHD is:
         ∂z⁻/∂t + (z⁺·∇)z⁻ + ∇P = η∇²z⁻
 
-        In the reduced MHD approximation:
-        ∂z⁻/∂t = z⁺∂∥z⁻ - ∇²⊥{z⁺, z⁻} + η∇²z⁻
+        In the reduced MHD approximation with strong guide field B₀ẑ,
+        the perpendicular advection (z⁺·∇)z⁻ splits into:
+        - Perpendicular part: ∇²⊥{z⁺, z⁻} (vorticity advection)
+        - Parallel part: -∂∥z⁺ (couples to opposite Elsasser variable)
 
-        Note the OPPOSITE sign on the parallel gradient compared to z⁺,
-        reflecting counter-propagation.
+        This gives:
+        ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∂∥z⁺ + η∇²z⁻
+
+        Note the OPPOSITE sign on the parallel gradient compared to z⁺
+        (∂∥z⁺ vs -∂∥z⁻), reflecting counter-propagation. Both equations
+        couple to the gradient of the OPPOSITE Elsasser variable.
 
     Example:
         >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)

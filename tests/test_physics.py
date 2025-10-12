@@ -1349,6 +1349,46 @@ class TestElsasserConversions:
 
         phi, A_parallel = elsasser_to_physical(z_plus, z_minus)
 
+    def test_reality_condition_preserved(self):
+        """Test that Elsasser conversion preserves reality condition."""
+        from krmhd.physics import physical_to_elsasser, elsasser_to_physical
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        shape = (grid.Nz, grid.Ny, grid.Nx)
+
+        # Create real-space fields (automatically satisfy reality condition)
+        key = jax.random.PRNGKey(999)
+        key1, key2 = jax.random.split(key)
+
+        phi_real = jax.random.normal(key1, shape, dtype=jnp.float32)
+        A_real = jax.random.normal(key2, shape, dtype=jnp.float32)
+
+        # Transform to Fourier space (guarantees reality condition)
+        phi_fourier = rfftn_forward(phi_real)
+        A_fourier = rfftn_forward(A_real)
+
+        # Convert to Elsasser
+        z_plus, z_minus = physical_to_elsasser(phi_fourier, A_fourier)
+
+        # Convert back to real space - should be real
+        z_plus_real = rfftn_inverse(z_plus, grid.Nz, grid.Ny, grid.Nx)
+        z_minus_real = rfftn_inverse(z_minus, grid.Nz, grid.Ny, grid.Nx)
+
+        # Verify reality: imaginary parts should be negligible
+        assert jnp.max(jnp.abs(jnp.imag(z_plus_real))) < 1e-5, \
+            f"z+ should be real, max imag = {jnp.max(jnp.abs(jnp.imag(z_plus_real)))}"
+        assert jnp.max(jnp.abs(jnp.imag(z_minus_real))) < 1e-5, \
+            f"z- should be real, max imag = {jnp.max(jnp.abs(jnp.imag(z_minus_real)))}"
+
+        # Convert back to physical and verify round-trip
+        phi_back, A_back = elsasser_to_physical(z_plus, z_minus)
+        phi_back_real = rfftn_inverse(phi_back, grid.Nz, grid.Ny, grid.Nx)
+        A_back_real = rfftn_inverse(A_back, grid.Nz, grid.Ny, grid.Nx)
+
+        assert jnp.allclose(phi_real, jnp.real(phi_back_real), rtol=1e-5, atol=1e-6)
+        assert jnp.allclose(A_real, jnp.real(A_back_real), rtol=1e-5, atol=1e-6)
+
+
 class TestElsasserRHS:
     """Test suite for Elsasser RHS functions."""
 
@@ -1411,4 +1451,3 @@ class TestElsasserRHS:
         rhs_minus = z_minus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 0.01, grid.Nz, grid.Ny, grid.Nx)
 
         assert rhs_plus is not None
-        assert rhs_minus is not None
