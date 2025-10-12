@@ -36,11 +36,11 @@ from krmhd.spectral import (
 
 class KRMHDState(BaseModel):
     """
-    Complete KRMHD state with fluid and kinetic fields.
+    Complete KRMHD state with Elsasser variables and kinetic fields.
 
     This dataclass represents the full state of the Kinetic Reduced MHD system,
-    including both the Alfvénic (active) fields and the kinetic (Hermite moment)
-    representation of the electron distribution function.
+    using Elsasser variables (z⁺, z⁻) for the Alfvénic sector and Hermite moments
+    for the kinetic electron distribution function.
 
     All field arrays are stored in Fourier space for efficient spectral operations.
     The fields satisfy:
@@ -48,10 +48,10 @@ class KRMHDState(BaseModel):
     - Divergence-free magnetic field: ∇·B = 0 (automatically satisfied)
 
     Attributes:
-        phi: Stream function φ in Fourier space (shape: [Nz, Ny, Nx//2+1])
-            Generates perpendicular velocity: v⊥ = ẑ × ∇φ
-        A_parallel: Parallel vector potential A∥ in Fourier space (shape: [Nz, Ny, Nx//2+1])
-            Generates perpendicular magnetic field: B⊥ = ẑ × ∇A∥
+        z_plus: Elsasser z⁺ = φ + A∥ in Fourier space (shape: [Nz, Ny, Nx//2+1])
+            Co-propagating Alfvén wave packet along +B₀
+        z_minus: Elsasser z⁻ = φ - A∥ in Fourier space (shape: [Nz, Ny, Nx//2+1])
+            Counter-propagating Alfvén wave packet along -B₀
         B_parallel: Parallel magnetic field δB∥ (passive) in Fourier space (shape: [Nz, Ny, Nx//2+1])
         g: Hermite moments of electron distribution (shape: [Nz, Ny, Nx//2+1, M+1])
             Expansion: g(v∥) = Σ_m g_m · ψ_m(v∥/v_th)
@@ -62,11 +62,17 @@ class KRMHDState(BaseModel):
         time: Simulation time
         grid: Reference to SpectralGrid3D for spatial dimensions
 
+    Properties (computed on demand):
+        phi: Stream function φ = (z⁺ + z⁻)/2
+            Generates perpendicular velocity: v⊥ = ẑ × ∇φ
+        A_parallel: Parallel vector potential A∥ = (z⁺ - z⁻)/2
+            Generates perpendicular magnetic field: B⊥ = ẑ × ∇A∥
+
     Example:
         >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
         >>> state = KRMHDState(
-        ...     phi=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
-        ...     A_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
+        ...     z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
+        ...     z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
         ...     B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
         ...     g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, 21), dtype=complex),
         ...     M=20,
@@ -78,16 +84,24 @@ class KRMHDState(BaseModel):
         ... )
 
     Physics context:
-        The KRMHD equations evolve these fields self-consistently:
-        - Active (Alfvénic) sector: φ and A∥ couple through Poisson bracket
-        - Passive sector: B∥ is advected by φ without back-reaction
+        The KRMHD equations in Elsasser form:
+        - ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∇∥z⁻ + dissipation
+        - ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∇∥z⁺ + dissipation
+        - Passive sector: B∥ is advected by φ = (z⁺ + z⁻)/2
         - Kinetic sector: g moments evolve with Landau damping and collisions
+
+        The Elsasser formulation simplifies the Alfvén wave dynamics compared
+        to the coupled (φ, A∥) formulation used in earlier versions.
+
+    Reference:
+        - Elsasser (1950) Phys. Rev. 79:183 - Original Elsasser variables
+        - Boldyrev (2006) PRL 96:115002 - RMHD turbulence
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    phi: Array = Field(description="Stream function in Fourier space")
-    A_parallel: Array = Field(description="Parallel vector potential in Fourier space")
+    z_plus: Array = Field(description="Elsasser z+ (co-propagating wave) in Fourier space")
+    z_minus: Array = Field(description="Elsasser z- (counter-propagating wave) in Fourier space")
     B_parallel: Array = Field(description="Parallel magnetic field in Fourier space")
     g: Array = Field(description="Hermite moments of electron distribution")
     M: int = Field(gt=0, description="Number of Hermite moments")
@@ -97,7 +111,7 @@ class KRMHDState(BaseModel):
     time: float = Field(ge=0.0, description="Simulation time")
     grid: SpectralGrid3D = Field(description="Spectral grid specification")
 
-    @field_validator("phi", "A_parallel", "B_parallel")
+    @field_validator("z_plus", "z_minus", "B_parallel")
     @classmethod
     def validate_field_shape(cls, v: Array, info) -> Array:
         """Validate that fields have correct 3D Fourier space shape."""
@@ -114,6 +128,36 @@ class KRMHDState(BaseModel):
         if not jnp.iscomplexobj(v):
             raise ValueError("Hermite moments must be complex-valued in Fourier space")
         return v
+
+    @property
+    def phi(self) -> Array:
+        """
+        Stream function φ = (z⁺ + z⁻) / 2.
+
+        Generates perpendicular velocity: v⊥ = ẑ × ∇φ
+
+        This is a computed property for backward compatibility and diagnostics.
+        The actual stored variables are z_plus and z_minus.
+
+        Returns:
+            Stream function in Fourier space (shape: [Nz, Ny, Nx//2+1])
+        """
+        return (self.z_plus + self.z_minus) / 2.0
+
+    @property
+    def A_parallel(self) -> Array:
+        """
+        Parallel vector potential A∥ = (z⁺ - z⁻) / 2.
+
+        Generates perpendicular magnetic field: B⊥ = ẑ × ∇A∥
+
+        This is a computed property for backward compatibility and diagnostics.
+        The actual stored variables are z_plus and z_minus.
+
+        Returns:
+            Parallel vector potential in Fourier space (shape: [Nz, Ny, Nx//2+1])
+        """
+        return (self.z_plus - self.z_minus) / 2.0
 
 
 @partial(jax.jit, static_argnums=(4, 5))
@@ -550,12 +594,15 @@ def initialize_alfven_wave(
     phi = phi.at[ikz, iky, ikx].set(amplitude * 1.0j)
     A_parallel = A_parallel.at[ikz, iky, ikx].set(amplitude * 1.0)
 
+    # Convert to Elsasser variables
+    z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
+
     # Initialize Hermite moments (equilibrium + small kinetic response)
     g = initialize_hermite_moments(grid, M, v_th, perturbation_amplitude=0.01 * amplitude)
 
     return KRMHDState(
-        phi=phi,
-        A_parallel=A_parallel,
+        z_plus=z_plus,
+        z_minus=z_minus,
         B_parallel=B_parallel,
         g=g,
         M=M,
@@ -731,6 +778,9 @@ def initialize_random_spectrum(
     phi = phi.at[0, 0, 0].set(0.0)
     A_parallel = A_parallel.at[0, 0, 0].set(0.0)
 
+    # Convert to Elsasser variables
+    z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
+
     # Passive scalar B_parallel (initially zero, will be excited by cascade)
     B_parallel = jnp.zeros_like(phi)
 
@@ -738,8 +788,8 @@ def initialize_random_spectrum(
     g = initialize_hermite_moments(grid, M, v_th, perturbation_amplitude=0.0)
 
     return KRMHDState(
-        phi=phi,
-        A_parallel=A_parallel,
+        z_plus=z_plus,
+        z_minus=z_minus,
         B_parallel=B_parallel,
         g=g,
         M=M,

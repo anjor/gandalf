@@ -599,10 +599,10 @@ class TestKRMHDState:
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         M = 10
 
-        # Create state with correct shapes
+        # Create state with Elsasser variables (correct shapes)
         state = KRMHDState(
-            phi=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            A_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64),
             M=M,
@@ -613,11 +613,17 @@ class TestKRMHDState:
             grid=grid,
         )
 
-        # Check shapes
-        assert state.phi.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
-        assert state.A_parallel.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        # Check stored Elsasser variable shapes
+        assert state.z_plus.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        assert state.z_minus.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
         assert state.B_parallel.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
         assert state.g.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1)
+
+        # Check computed property shapes (phi, A_parallel derived from Elsasser)
+        assert state.phi.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        assert state.A_parallel.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+
+        # Check other attributes
         assert state.M == M
         assert state.beta_i == 1.0
         assert state.v_th == 1.0
@@ -631,11 +637,11 @@ class TestKRMHDState:
 
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
 
-        # Should fail with 2D field
+        # Should fail with 2D Elsasser field (z_plus)
         with pytest.raises(ValueError, match="must be 3D"):
             KRMHDState(
-                phi=jnp.zeros((grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),  # 2D instead of 3D
-                A_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+                z_plus=jnp.zeros((grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),  # 2D instead of 3D
+                z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
                 B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
                 g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
                 M=10,
@@ -889,10 +895,10 @@ class TestKRMHDState:
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         M = 10
 
-        # Create state with all zeros
+        # Create state with all zeros (using Elsasser variables)
         state = KRMHDState(
-            phi=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            A_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64),
             M=M,
