@@ -138,24 +138,32 @@ checkpoints to return to.
 
 ## Current Development Status
 
-### Completed (Issues #1-2)
-- [x] Basic spectral infrastructure (2D/3D with 50 passing tests)
+### Completed (Issues #1-3, #21)
+- [x] Basic spectral infrastructure (2D/3D, Issue #2)
   - SpectralGrid2D/3D with Pydantic validation
   - SpectralField2D/3D with lazy evaluation
   - All derivative operators (x, y, z) and Laplacian
   - 2/3 dealiasing implementation
   - Memory-efficient rfft2/rfftn transforms
+- [x] Poisson solver (Issue #3)
+  - 2D solver: poisson_solve_2d() for ∇²φ = ω
+  - 3D solver: poisson_solve_3d() with perpendicular/full options
+  - Handles k=0 mode correctly (set to zero)
+  - 12 comprehensive tests with manufactured solutions
+- [x] Hermite basis infrastructure (Issue #21)
+  - Orthonormal Hermite functions (quantum harmonic oscillator eigenfunctions)
+  - Moment projection: distribution_to_moments()
+  - Distribution reconstruction: moments_to_distribution()
+  - Orthogonality verification utilities
 
-### Fluid RMHD Core (Issues #3-8)
-- [ ] Poisson solver (Issue #3 - next step)
-- [ ] Poisson bracket implementation (Issue #4)
+### Fluid RMHD Core (Issues #4-8)
+- [ ] Poisson bracket implementation (Issue #4 - next step)
 - [ ] KRMHD state and initialization (Issue #5)
 - [ ] Alfvén dynamics (Issue #6)
 - [ ] Passive scalar evolution (Issue #7)
 - [ ] Time integration RK4 (Issue #8)
 
-### Kinetic Physics (Issues #21-24) - REQUIRED
-- [ ] Hermite basis infrastructure (Issue #21)
+### Kinetic Physics (Issues #22-24) - REQUIRED
 - [ ] Hermite moment hierarchy (Issue #22)
 - [ ] Collision operators (Issue #23)
 - [ ] Hermite closures (Issue #24)
