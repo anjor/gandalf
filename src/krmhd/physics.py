@@ -14,14 +14,11 @@ All functions use JAX for GPU acceleration and are JIT-compiled for performance.
 """
 
 from functools import partial
-from typing import Union
 import jax
 import jax.numpy as jnp
 from jax import Array
 
 from krmhd.spectral import (
-    SpectralGrid2D,
-    SpectralGrid3D,
     derivative_x,
     derivative_y,
     rfft2_forward,

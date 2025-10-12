@@ -29,36 +29,12 @@ class TestPoissonBracket2D:
 
     def test_analytical_sin_cos(self):
         """
-        Test analytical case from Issue #4: f=sin(x), g=cos(y) → {f,g}=sin(x)sin(y).
+        Test analytical solution: f=sin(x), g=cos(y).
 
-        For f = sin(x), g = cos(y):
-        ∂f/∂x = cos(x), ∂f/∂y = 0
-        ∂g/∂x = 0, ∂g/∂y = -sin(y)
-        {f,g} = cos(x)·(-sin(y)) - 0·0 = -cos(x)sin(y)
-
-        Wait, let me recalculate:
+        Expected result:
         {f,g} = ∂f/∂x · ∂g/∂y - ∂f/∂y · ∂g/∂x
               = cos(x) · (-sin(y)) - 0 · 0
               = -cos(x)sin(y)
-
-        Hmm, the issue says sin(x)sin(y). Let me check with g=sin(y) instead:
-        For f = sin(x), g = sin(y):
-        ∂f/∂x = cos(x), ∂f/∂y = 0
-        ∂g/∂x = 0, ∂g/∂y = cos(y)
-        {f,g} = cos(x)·cos(y) - 0·0 = cos(x)cos(y)
-
-        Still not matching. Let me try g=cos(y):
-        Actually, I think the issue might have meant the magnitude.
-        Let me test with a specific case and verify numerically.
-
-        For f = sin(x), g = cos(y):
-        {f,g} = ∂f/∂x · ∂g/∂y - ∂f/∂y · ∂g/∂x
-              = cos(x) · (-sin(y)) - 0 · 0
-              = -cos(x)sin(y)
-
-        Actually, looking at the issue again: "f=sin(x), g=cos(y) - should give sin(x)sin(y)"
-        This seems like it might be approximate or there's a typo. Let me just verify
-        the implementation is correct by computing it exactly.
         """
         grid = SpectralGrid2D.create(Nx=128, Ny=128, Lx=2*jnp.pi, Ly=2*jnp.pi)
 
