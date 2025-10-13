@@ -64,6 +64,12 @@ from krmhd.physics import (
     energy,
 )
 
+from krmhd.timestepping import (
+    krmhd_rhs,
+    rk4_step,
+    compute_cfl_timestep,
+)
+
 __all__ = [
     "__version__",
     # Spectral infrastructure
@@ -97,4 +103,8 @@ __all__ = [
     "initialize_kinetic_alfven_wave",
     "initialize_random_spectrum",
     "energy",
+    # Time integration
+    "krmhd_rhs",
+    "rk4_step",
+    "compute_cfl_timestep",
 ]
