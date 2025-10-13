@@ -5,6 +5,9 @@ You are implementing a **full Kinetic Reduced MHD (KRMHD)** solver using spectra
 
 **Scope:** This is a **kinetic** implementation using Hermite moment expansion in parallel velocity space (v∥). This captures Landau damping, phase mixing, and collisional effects. We are NOT implementing a simplified fluid closure.
 
+The equations, normalization conventions and the algorithm is outlined in
+@gandalf_chapter.pdf
+
 The user is an expert plasma physicist familiar with gyrokinetics, Landau damping, and turbulence theory. No basic explanations needed.
 
 ## Physics Model
