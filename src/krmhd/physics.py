@@ -585,23 +585,24 @@ def z_plus_rhs(
         - Boldyrev (2006) PRL 96:115002 - Elsasser formulation for RMHD
         - Maron & Goldreich (2001) ApJ 554:1175 - Reduced MHD equations
     """
-    # Compute perpendicular Laplacian of z_plus: ∇²⊥z⁺
-    lap_perp_z_plus = laplacian(z_plus, kx, ky, kz=None)
-
-    # Compute Poisson bracket: {z⁻, ∇²⊥z⁺}
-    # This represents the nonlinear advection of vorticity by the perpendicular flow
+    # Compute Poisson bracket: {z⁻, z⁺}
+    # This represents the nonlinear advection
     bracket = poisson_bracket_3d(
-        z_minus, lap_perp_z_plus,
+        z_minus, z_plus,
         kx, ky,
         Nz, Ny, Nx,
         dealias_mask
     )
 
+    # Apply perpendicular Laplacian to the bracket: ∇²⊥{z⁻, z⁺}
+    # This gives the vorticity advection term
+    bracket_with_lap = laplacian(bracket, kx, ky, kz=None)
+
     # Compute parallel derivative: ∇∥z⁻ = ∂z⁻/∂z
     parallel_grad_z_minus = derivative_z(z_minus, kz)
 
     # Assemble RHS: -∇²⊥{z⁻, z⁺} - ∇∥z⁻
-    rhs = -bracket - parallel_grad_z_minus
+    rhs = -bracket_with_lap - parallel_grad_z_minus
 
     # Add dissipation: η∇²z⁺ (always compute, multiply by eta)
     lap_z_plus = laplacian(z_plus, kx, ky, kz)
@@ -683,30 +684,197 @@ def z_minus_rhs(
         - Boldyrev (2006) PRL 96:115002 - Elsasser formulation for RMHD
         - Maron & Goldreich (2001) ApJ 554:1175 - Reduced MHD equations
     """
-    # Compute perpendicular Laplacian of z_minus: ∇²⊥z⁻
-    lap_perp_z_minus = laplacian(z_minus, kx, ky, kz=None)
-
-    # Compute Poisson bracket: {z⁺, ∇²⊥z⁻}
-    # This represents the nonlinear advection of vorticity by the perpendicular flow
+    # Compute Poisson bracket: {z⁺, z⁻}
+    # This represents the nonlinear advection
     bracket = poisson_bracket_3d(
-        z_plus, lap_perp_z_minus,
+        z_plus, z_minus,
         kx, ky,
         Nz, Ny, Nx,
         dealias_mask
     )
+
+    # Apply perpendicular Laplacian to the bracket: ∇²⊥{z⁺, z⁻}
+    # This gives the vorticity advection term
+    bracket_with_lap = laplacian(bracket, kx, ky, kz=None)
 
     # Compute parallel derivative: ∇∥z⁺ = ∂z⁺/∂z
     parallel_grad_z_plus = derivative_z(z_plus, kz)
 
     # Assemble RHS: -∇²⊥{z⁺, z⁻} + ∇∥z⁺
     # NOTE: Opposite sign on parallel gradient compared to z_plus_rhs
-    rhs = -bracket + parallel_grad_z_plus
+    rhs = -bracket_with_lap + parallel_grad_z_plus
 
     # Add dissipation: η∇²z⁻ (always compute, multiply by eta)
     lap_z_minus = laplacian(z_minus, kx, ky, kz)
     rhs = rhs + eta * lap_z_minus
 
     # Zero out k=0 mode (mean field should not evolve)
+    rhs = zero_k0_mode(rhs)
+
+    return rhs
+
+
+# =============================================================================
+# GANDALF-style Elsasser RHS (Energy-Conserving Formulation)
+# =============================================================================
+
+
+@partial(jax.jit, static_argnums=(7, 8, 9))
+def z_plus_rhs_gandalf(
+    z_plus: Array,
+    z_minus: Array,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    eta: float,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+) -> Array:
+    """
+    Compute RHS for z⁺ using GANDALF's energy-conserving formulation.
+
+    This matches the original GANDALF Fortran/CUDA implementation from nonlin.cu:
+        bracket1 = {z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺}
+        bracket2 = -k⊥²{z⁺, z⁻}
+        RHS_nonlinear = k⊥²^(-1) × [bracket1 - bracket2]
+
+    Which expands to:
+        ∂z⁺/∂t = k⊥²^(-1)[{z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺} + k⊥²{z⁺, z⁻}] - ∂∥z⁻ + η∇²z⁺
+
+    This formulation exactly conserves perpendicular gradient energy:
+        E = (1/4) ∫ (|∇⊥z⁺|² + |∇⊥z⁻|²) dx
+
+    Args:
+        z_plus: Elsasser z⁺ in Fourier space
+        z_minus: Elsasser z⁻ in Fourier space
+        kx, ky, kz: Wavenumber arrays
+        dealias_mask: 2/3 dealiasing mask
+        eta: Resistivity
+        Nz, Ny, Nx: Grid dimensions (static)
+
+    Returns:
+        Time derivative ∂z⁺/∂t in Fourier space
+
+    Reference:
+        Original GANDALF: nonlin.cu and timestep.cu (alf_adv function)
+    """
+    # Compute perpendicular Laplacian terms
+    lap_perp_z_plus = laplacian(z_plus, kx, ky, kz=None)   # -k⊥²z⁺
+    lap_perp_z_minus = laplacian(z_minus, kx, ky, kz=None)  # -k⊥²z⁻
+
+    # bracket1 = {z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺}
+    bracket1a = poisson_bracket_3d(z_plus, lap_perp_z_minus, kx, ky, Nz, Ny, Nx, dealias_mask)
+    bracket1b = poisson_bracket_3d(z_minus, lap_perp_z_plus, kx, ky, Nz, Ny, Nx, dealias_mask)
+    bracket1 = bracket1a + bracket1b
+
+    # bracket2 = -k⊥²{z⁺, z⁻}
+    bracket_zm_zp = poisson_bracket_3d(z_plus, z_minus, kx, ky, Nz, Ny, Nx, dealias_mask)
+    bracket2 = laplacian(bracket_zm_zp, kx, ky, kz=None)  # -k⊥²{z⁺,z⁻}
+
+    # Compute: bracket1 - bracket2
+    combined_bracket = bracket1 - bracket2
+
+    # Apply inverse Laplacian: k⊥²^(-1) × [bracket1 - bracket2]
+    # In Fourier space: multiply by -1/k⊥² (negative because laplacian returns -k⊥²f)
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+
+    # Avoid division by zero at k=0
+    k_perp_squared_safe = jnp.where(k_perp_squared == 0, 1.0, k_perp_squared)
+    inv_laplacian = combined_bracket / (-k_perp_squared_safe)
+    inv_laplacian = jnp.where(k_perp_squared == 0, 0.0 + 0.0j, inv_laplacian)
+
+    # Parallel gradient term: -∂∥z⁻
+    parallel_grad_z_minus = derivative_z(z_minus, kz)
+
+    # Assemble RHS
+    rhs = -inv_laplacian - parallel_grad_z_minus
+
+    # Add dissipation
+    lap_z_plus = laplacian(z_plus, kx, ky, kz)
+    rhs = rhs + eta * lap_z_plus
+
+    # Zero k=0 mode
+    rhs = zero_k0_mode(rhs)
+
+    return rhs
+
+
+@partial(jax.jit, static_argnums=(7, 8, 9))
+def z_minus_rhs_gandalf(
+    z_plus: Array,
+    z_minus: Array,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    eta: float,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+) -> Array:
+    """
+    Compute RHS for z⁻ using GANDALF's energy-conserving formulation.
+
+    This matches the original GANDALF Fortran/CUDA implementation.
+    For z⁻, the signs differ from z⁺ in the parallel gradient term:
+        ∂z⁻/∂t = k⊥²^(-1)[{z⁻, -k⊥²z⁺} + {z⁺, -k⊥²z⁻} + k⊥²{z⁻, z⁺}] + ∂∥z⁺ + η∇²z⁻
+
+    (Note: Opposite sign on parallel gradient compared to z⁺)
+
+    Args:
+        z_plus: Elsasser z⁺ in Fourier space
+        z_minus: Elsasser z⁻ in Fourier space
+        kx, ky, kz: Wavenumber arrays
+        dealias_mask: 2/3 dealiasing mask
+        eta: Resistivity
+        Nz, Ny, Nx: Grid dimensions (static)
+
+    Returns:
+        Time derivative ∂z⁻/∂t in Fourier space
+
+    Reference:
+        Original GANDALF: nonlin.cu and timestep.cu (alf_adv function)
+    """
+    # Compute perpendicular Laplacian terms
+    lap_perp_z_plus = laplacian(z_plus, kx, ky, kz=None)
+    lap_perp_z_minus = laplacian(z_minus, kx, ky, kz=None)
+
+    # bracket1 = {z⁻, -k⊥²z⁺} + {z⁺, -k⊥²z⁻}  (same as z⁺ but roles swapped)
+    bracket1a = poisson_bracket_3d(z_minus, lap_perp_z_plus, kx, ky, Nz, Ny, Nx, dealias_mask)
+    bracket1b = poisson_bracket_3d(z_plus, lap_perp_z_minus, kx, ky, Nz, Ny, Nx, dealias_mask)
+    bracket1 = bracket1a + bracket1b
+
+    # bracket2 = -k⊥²{z⁻, z⁺}
+    bracket_zp_zm = poisson_bracket_3d(z_minus, z_plus, kx, ky, Nz, Ny, Nx, dealias_mask)
+    bracket2 = laplacian(bracket_zp_zm, kx, ky, kz=None)
+
+    # Compute: bracket1 - bracket2
+    combined_bracket = bracket1 - bracket2
+
+    # Apply inverse Laplacian
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+
+    k_perp_squared_safe = jnp.where(k_perp_squared == 0, 1.0, k_perp_squared)
+    inv_laplacian = combined_bracket / (-k_perp_squared_safe)
+    inv_laplacian = jnp.where(k_perp_squared == 0, 0.0 + 0.0j, inv_laplacian)
+
+    # Parallel gradient term: +∂∥z⁺ (OPPOSITE sign from z_plus_rhs)
+    parallel_grad_z_plus = derivative_z(z_plus, kz)
+
+    # Assemble RHS
+    rhs = -inv_laplacian + parallel_grad_z_plus  # Note: + sign!
+
+    # Add dissipation
+    lap_z_minus = laplacian(z_minus, kx, ky, kz)
+    rhs = rhs + eta * lap_z_minus
+
+    # Zero k=0 mode
     rhs = zero_k0_mode(rhs)
 
     return rhs
