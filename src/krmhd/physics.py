@@ -515,212 +515,15 @@ def zero_k0_mode(field: Array) -> Array:
 # =============================================================================
 
 
+# =============================================================================
+# Elsasser RHS Functions (GANDALF Energy-Conserving Formulation)
+# =============================================================================
+# NOTE: This is the ONLY formulation we use. The simplified -∇²⊥{z⁻, z⁺}
+# formulation does NOT conserve energy and has been removed to avoid confusion.
+
+
 @partial(jax.jit, static_argnums=(7, 8, 9))
 def z_plus_rhs(
-    z_plus: Array,
-    z_minus: Array,
-    kx: Array,
-    ky: Array,
-    kz: Array,
-    dealias_mask: Array,
-    eta: float,
-    Nz: int,
-    Ny: int,
-    Nx: int,
-) -> Array:
-    """
-    Compute RHS for z⁺ evolution: ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∇∥z⁻ + η∇²z⁺.
-
-    This implements the Elsasser formulation of RMHD for the co-propagating
-    wave packet z⁺ = φ + A∥. The equation shows that z⁺ is:
-    - Advected by z⁻ through the perpendicular Poisson bracket
-    - Coupled to z⁻ through the parallel gradient ∇∥z⁻
-    - Dissipated by resistivity η
-
-    **Why ∇²⊥ appears in the Poisson bracket:**
-    In RMHD, we evolve vorticity ω = ∇²⊥φ, not φ itself. The vorticity
-    equation is: ∂ω/∂t + {φ, ω} = .... Substituting ω = ∇²⊥φ gives
-    ∂(∇²⊥φ)/∂t + {φ, ∇²⊥φ} = ..., which becomes ∂z⁺/∂t = ...∇²⊥{z⁻, z⁺}...
-    in Elsasser variables. This is why the Laplacian appears inside the
-    Poisson bracket - it represents advection of vorticity, not of φ itself.
-
-    Args:
-        z_plus: Elsasser z⁺ in Fourier space (shape: [Nz, Ny, Nx//2+1])
-        z_minus: Elsasser z⁻ in Fourier space (shape: [Nz, Ny, Nx//2+1])
-        kx: Wavenumber array in x direction
-        ky: Wavenumber array in y direction
-        kz: Wavenumber array in z direction
-        dealias_mask: 2/3 dealiasing mask
-        eta: Resistivity coefficient
-        Nz: Number of grid points in z direction (static)
-        Ny: Number of grid points in y direction (static)
-        Nx: Number of grid points in x direction (static)
-
-    Returns:
-        Time derivative ∂z⁺/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
-
-    Physics:
-        The Elsasser equation for z⁺ in RMHD is:
-        ∂z⁺/∂t + (z⁻·∇)z⁺ + ∇P = η∇²z⁺
-
-        In the reduced MHD approximation with strong guide field B₀ẑ,
-        the perpendicular advection (z⁻·∇)z⁺ splits into:
-        - Perpendicular part: ∇²⊥{z⁻, z⁺} (vorticity advection)
-        - Parallel part: ∂∥z⁻ (couples to opposite Elsasser variable)
-
-        This gives:
-        ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∂∥z⁻ + η∇²z⁺
-
-        where ∂∥ = ∂/∂z is the parallel derivative. Note that z⁺ is coupled
-        to the parallel gradient of z⁻, not its own gradient.
-
-    Example:
-        >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
-        >>> z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
-        >>> z_minus = jnp.zeros_like(z_plus)
-        >>> dz_plus_dt = z_plus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-        ...                         grid.dealias_mask, 0.01, grid.Nz, grid.Ny, grid.Nx)
-
-    Reference:
-        - Boldyrev (2006) PRL 96:115002 - Elsasser formulation for RMHD
-        - Maron & Goldreich (2001) ApJ 554:1175 - Reduced MHD equations
-    """
-    # Compute Poisson bracket: {z⁻, z⁺}
-    # This represents the nonlinear advection
-    bracket = poisson_bracket_3d(
-        z_minus, z_plus,
-        kx, ky,
-        Nz, Ny, Nx,
-        dealias_mask
-    )
-
-    # Apply perpendicular Laplacian to the bracket: ∇²⊥{z⁻, z⁺}
-    # This gives the vorticity advection term
-    bracket_with_lap = laplacian(bracket, kx, ky, kz=None)
-
-    # Compute parallel derivative: ∇∥z⁻ = ∂z⁻/∂z
-    parallel_grad_z_minus = derivative_z(z_minus, kz)
-
-    # Assemble RHS: -∇²⊥{z⁻, z⁺} - ∇∥z⁻
-    rhs = -bracket_with_lap - parallel_grad_z_minus
-
-    # Add dissipation: η∇²z⁺ (always compute, multiply by eta)
-    lap_z_plus = laplacian(z_plus, kx, ky, kz)
-    rhs = rhs + eta * lap_z_plus
-
-    # Zero out k=0 mode (mean field should not evolve)
-    rhs = zero_k0_mode(rhs)
-
-    return rhs
-
-
-@partial(jax.jit, static_argnums=(7, 8, 9))
-def z_minus_rhs(
-    z_plus: Array,
-    z_minus: Array,
-    kx: Array,
-    ky: Array,
-    kz: Array,
-    dealias_mask: Array,
-    eta: float,
-    Nz: int,
-    Ny: int,
-    Nx: int,
-) -> Array:
-    """
-    Compute RHS for z⁻ evolution: ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∇∥z⁺ + η∇²z⁻.
-
-    This implements the Elsasser formulation of RMHD for the counter-propagating
-    wave packet z⁻ = φ - A∥. The equation shows that z⁻ is:
-    - Advected by z⁺ through the perpendicular Poisson bracket
-    - Coupled to z⁺ through the parallel gradient ∇∥z⁺ (opposite sign from z⁺)
-    - Dissipated by resistivity η
-
-    The key difference from z_plus_rhs is the sign of the parallel gradient term
-    (+∂∥z⁺ vs -∂∥z⁻), reflecting the opposite propagation direction along B₀.
-
-    **Vorticity formulation:** See z_plus_rhs docstring for explanation of why
-    ∇²⊥ appears inside the Poisson bracket.
-
-    Args:
-        z_plus: Elsasser z⁺ in Fourier space (shape: [Nz, Ny, Nx//2+1])
-        z_minus: Elsasser z⁻ in Fourier space (shape: [Nz, Ny, Nx//2+1])
-        kx: Wavenumber array in x direction
-        ky: Wavenumber array in y direction
-        kz: Wavenumber array in z direction
-        dealias_mask: 2/3 dealiasing mask
-        eta: Resistivity coefficient
-        Nz: Number of grid points in z direction (static)
-        Ny: Number of grid points in y direction (static)
-        Nx: Number of grid points in x direction (static)
-
-    Returns:
-        Time derivative ∂z⁻/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
-
-    Physics:
-        The Elsasser equation for z⁻ in RMHD is:
-        ∂z⁻/∂t + (z⁺·∇)z⁻ + ∇P = η∇²z⁻
-
-        In the reduced MHD approximation with strong guide field B₀ẑ,
-        the perpendicular advection (z⁺·∇)z⁻ splits into:
-        - Perpendicular part: ∇²⊥{z⁺, z⁻} (vorticity advection)
-        - Parallel part: -∂∥z⁺ (couples to opposite Elsasser variable)
-
-        This gives:
-        ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∂∥z⁺ + η∇²z⁻
-
-        Note the OPPOSITE sign on the parallel gradient compared to z⁺
-        (∂∥z⁺ vs -∂∥z⁻), reflecting counter-propagation. Both equations
-        couple to the gradient of the OPPOSITE Elsasser variable.
-
-    Example:
-        >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
-        >>> z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
-        >>> z_minus = jnp.zeros_like(z_plus)
-        >>> dz_minus_dt = z_minus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-        ...                           grid.dealias_mask, 0.01, grid.Nz, grid.Ny, grid.Nx)
-
-    Reference:
-        - Boldyrev (2006) PRL 96:115002 - Elsasser formulation for RMHD
-        - Maron & Goldreich (2001) ApJ 554:1175 - Reduced MHD equations
-    """
-    # Compute Poisson bracket: {z⁺, z⁻}
-    # This represents the nonlinear advection
-    bracket = poisson_bracket_3d(
-        z_plus, z_minus,
-        kx, ky,
-        Nz, Ny, Nx,
-        dealias_mask
-    )
-
-    # Apply perpendicular Laplacian to the bracket: ∇²⊥{z⁺, z⁻}
-    # This gives the vorticity advection term
-    bracket_with_lap = laplacian(bracket, kx, ky, kz=None)
-
-    # Compute parallel derivative: ∇∥z⁺ = ∂z⁺/∂z
-    parallel_grad_z_plus = derivative_z(z_plus, kz)
-
-    # Assemble RHS: -∇²⊥{z⁺, z⁻} + ∇∥z⁺
-    # NOTE: Opposite sign on parallel gradient compared to z_plus_rhs
-    rhs = -bracket_with_lap + parallel_grad_z_plus
-
-    # Add dissipation: η∇²z⁻ (always compute, multiply by eta)
-    lap_z_minus = laplacian(z_minus, kx, ky, kz)
-    rhs = rhs + eta * lap_z_minus
-
-    # Zero out k=0 mode (mean field should not evolve)
-    rhs = zero_k0_mode(rhs)
-
-    return rhs
-
-
-# =============================================================================
-# GANDALF-style Elsasser RHS (Energy-Conserving Formulation)
-# =============================================================================
-
-
-@partial(jax.jit, static_argnums=(7, 8, 9))
-def z_plus_rhs_gandalf(
     z_plus: Array,
     z_minus: Array,
     kx: Array,
@@ -804,7 +607,7 @@ def z_plus_rhs_gandalf(
 
 
 @partial(jax.jit, static_argnums=(7, 8, 9))
-def z_minus_rhs_gandalf(
+def z_minus_rhs(
     z_plus: Array,
     z_minus: Array,
     kx: Array,

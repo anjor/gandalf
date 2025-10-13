@@ -1589,7 +1589,7 @@ class TestElsasserRHS:
         Note: Previous version of this test used Σ|z±|² without gradients,
         which is NOT conserved by the vorticity formulation.
         """
-        from krmhd.physics import z_plus_rhs_gandalf, z_minus_rhs_gandalf
+        from krmhd.physics import z_plus_rhs, z_minus_rhs
         from krmhd.spectral import rfftn_inverse
 
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
@@ -1613,10 +1613,10 @@ class TestElsasserRHS:
 
         # Compute RHS with NO dissipation (using GANDALF's energy-conserving formulation)
         eta = 0.0
-        dz_plus_dt = z_plus_rhs_gandalf(z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-                                          grid.dealias_mask, eta, grid.Nz, grid.Ny, grid.Nx)
-        dz_minus_dt = z_minus_rhs_gandalf(z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-                                            grid.dealias_mask, eta, grid.Nz, grid.Ny, grid.Nx)
+        dz_plus_dt = z_plus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                                 grid.dealias_mask, eta, grid.Nz, grid.Ny, grid.Nx)
+        dz_minus_dt = z_minus_rhs(z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                                   grid.dealias_mask, eta, grid.Nz, grid.Ny, grid.Nx)
 
         # Compute energy change rate: dE/dt = Re[∫ (∇⊥z⁺* · ∇⊥dz⁺/dt + ∇⊥z⁻* · ∇⊥dz⁻/dt) d³x]
         # Physical energy in RMHD: E = (1/4) ∫ (|∇⊥z⁺|² + |∇⊥z⁻|²) dx

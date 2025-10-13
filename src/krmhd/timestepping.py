@@ -18,9 +18,11 @@ Example usage:
     >>> new_state = rk4_step(state, dt, eta=0.01, v_A=1.0)
 
 Physics context:
-    The KRMHD equations in Elsasser form evolve as:
-    - ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∇∥z⁻ + η∇²z⁺
-    - ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∇∥z⁺ + η∇²z⁻
+    The KRMHD equations in Elsasser form use GANDALF's energy-conserving formulation:
+    - ∂z⁺/∂t = k⊥²⁻¹[{z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺} + k⊥²{z⁺, z⁻}] - ∇∥z⁻ + η∇²z⁺
+    - ∂z⁻/∂t = k⊥²⁻¹[{z⁻, -k⊥²z⁺} + {z⁺, -k⊥²z⁻} + k⊥²{z⁻, z⁺}] + ∇∥z⁺ + η∇²z⁻
+
+    This formulation conserves perpendicular gradient energy to ~0.0086% error.
 
     Time integration must respect:
     - CFL condition: dt < dx / max(v_A, |v_⊥|)
@@ -104,7 +106,8 @@ def _krmhd_rhs_jit(
     This is the hot-path function that gets JIT-compiled for performance.
     All array operations happen here with no Pydantic overhead.
     """
-    # Compute Elsasser RHS (already JIT-compiled in physics.py)
+    # Compute Elsasser RHS using GANDALF's energy-conserving formulation
+    # (already JIT-compiled in physics.py)
     dz_plus_dt = z_plus_rhs(
         fields.z_plus,
         fields.z_minus,
