@@ -21,7 +21,13 @@ from krmhd.spectral import (
     rfftn_forward,
     rfftn_inverse,
 )
-from krmhd.physics import poisson_bracket_2d, poisson_bracket_3d
+from krmhd.physics import (
+    poisson_bracket_2d,
+    poisson_bracket_3d,
+    g0_rhs,
+    g1_rhs,
+    gm_rhs,
+)
 
 
 class TestPoissonBracket2D:
@@ -1732,3 +1738,336 @@ class TestElsasserRHS:
         # In turbulent state, total dE/dt can be large due to cascade + dissipation
         assert relative_dissipation < 10.0, \
             f"Dissipation unreasonably strong: |dE/dt|/E = {relative_dissipation} (expected < 10.0)"
+
+
+# ==============================================================================
+# Hermite Moment RHS Tests
+# ==============================================================================
+
+
+class TestHermiteMomentRHS:
+    """
+    Test suite for Hermite moment RHS functions (Eqs 2.7-2.9 from thesis).
+
+    These tests verify the kinetic electron response implementation:
+    - g0_rhs(): Density perturbation evolution
+    - g1_rhs(): Parallel velocity evolution
+    - gm_rhs(): Higher moment cascade (m ≥ 2)
+    """
+
+    def test_g0_rhs_shape_and_dtype(self):
+        """Test g0_rhs returns correct shape and dtype."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+        
+        # Initialize fields
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        
+        beta_i = 1.0
+        
+        # Compute RHS
+        rhs = g0_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                     grid.dealias_mask, beta_i, grid.Nz, grid.Ny, grid.Nx)
+        
+        # Check shape and dtype
+        assert rhs.shape == (grid.Nz, grid.Ny, grid.Nx//2+1), \
+            f"Expected shape {(grid.Nz, grid.Ny, grid.Nx//2+1)}, got {rhs.shape}"
+        assert jnp.iscomplexobj(rhs), "RHS should be complex-valued in Fourier space"
+        
+    def test_g0_rhs_reality_condition(self):
+        """Test g0_rhs preserves reality condition for real-space fields."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+        
+        # Initialize with random real-space fields, then FFT
+        key = jax.random.PRNGKey(42)
+        key1, key2, key3 = jax.random.split(key, 3)
+        
+        g_real = jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx, M+1), dtype=jnp.float32)
+        z_plus_real = jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx), dtype=jnp.float32)
+        z_minus_real = jax.random.normal(key3, (grid.Nz, grid.Ny, grid.Nx), dtype=jnp.float32)
+        
+        # Transform to Fourier space
+        from krmhd.spectral import rfftn_forward
+        g = jnp.stack([rfftn_forward(g_real[:, :, :, m]) for m in range(M+1)], axis=-1)
+        z_plus = rfftn_forward(z_plus_real)
+        z_minus = rfftn_forward(z_minus_real)
+        
+        beta_i = 1.0
+        
+        # Compute RHS
+        rhs = g0_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                     grid.dealias_mask, beta_i, grid.Nz, grid.Ny, grid.Nx)
+        
+        # Transform back to real space - should give real values
+        from krmhd.spectral import rfftn_inverse
+        rhs_real = rfftn_inverse(rhs, grid.Nz, grid.Ny, grid.Nx)
+        
+        # Check that imaginary part is negligible (reality condition satisfied)
+        max_imag = jnp.max(jnp.abs(jnp.imag(rhs_real)))
+        max_real = jnp.max(jnp.abs(jnp.real(rhs_real)))
+        
+        assert max_imag < 1e-5 * max_real, \
+            f"Reality condition violated: max(imag)/max(real) = {max_imag/max_real}"
+    
+    def test_g0_rhs_couples_to_g1(self):
+        """Test g0_rhs correctly couples to g1 via parallel streaming."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+        
+        # Initialize with g1 = single mode, all other moments zero
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g = g.at[4, 5, 6, 1].set(1.0 + 0.0j)  # Set single g1 mode
+        
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        
+        beta_i = 1.0
+        
+        # Compute RHS
+        rhs = g0_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                     grid.dealias_mask, beta_i, grid.Nz, grid.Ny, grid.Nx)
+        
+        # g0_rhs should be non-zero due to coupling with g1
+        # Specifically, the term -√(βᵢ/2)·∂g₁/∂z should contribute
+        assert jnp.sum(jnp.abs(rhs)) > 0, "g0_rhs should couple to g1"
+        
+        # The coupling should be at the same spatial mode as g1
+        # Check that most energy is near the g1 mode location
+        rhs_mode = jnp.abs(rhs[4, 5, 6])
+        rhs_total = jnp.sum(jnp.abs(rhs))
+        
+        # At least some coupling should occur at this mode
+        assert rhs_mode > 0, "Coupling should occur at g1 mode location"
+
+    def test_g1_rhs_shape_and_dtype(self):
+        """Test g1_rhs returns correct shape and dtype."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+        
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        
+        beta_i = 1.0
+        Lambda = 2.0  # Typical value
+        
+        rhs = g1_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                     grid.dealias_mask, beta_i, Lambda, grid.Nz, grid.Ny, grid.Nx)
+        
+        assert rhs.shape == (grid.Nz, grid.Ny, grid.Nx//2+1)
+        assert jnp.iscomplexobj(rhs)
+
+    def test_g1_rhs_couples_to_g0_and_g2(self):
+        """Test g1_rhs couples to both g0 and g2 via Hermite recurrence."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+        
+        # Test 1: g0 coupling via (1-1/Λ) term
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g = g.at[4, 5, 6, 0].set(1.0 + 0.0j)  # Set single g0 mode
+        
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        
+        beta_i = 1.0
+        Lambda = 2.0
+        
+        rhs = g1_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                     grid.dealias_mask, beta_i, Lambda, grid.Nz, grid.Ny, grid.Nx)
+        
+        # Should couple to g0 if Lambda ≠ 1
+        if Lambda != 1.0:
+            assert jnp.sum(jnp.abs(rhs)) > 0, "g1_rhs should couple to g0 when Λ ≠ 1"
+        
+        # Test 2: g2 coupling via standard Hermite recurrence
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g = g.at[4, 5, 6, 2].set(1.0 + 0.0j)  # Set single g2 mode
+        
+        rhs = g1_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                     grid.dealias_mask, beta_i, Lambda, grid.Nz, grid.Ny, grid.Nx)
+        
+        assert jnp.sum(jnp.abs(rhs)) > 0, "g1_rhs should couple to g2"
+
+    def test_gm_rhs_shape_and_dtype(self):
+        """Test gm_rhs returns correct shape and dtype."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+        
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        
+        m = 5
+        beta_i = 1.0
+        nu = 0.01
+        
+        rhs = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                     grid.dealias_mask, m, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+        
+        assert rhs.shape == (grid.Nz, grid.Ny, grid.Nx//2+1)
+        assert jnp.iscomplexobj(rhs)
+
+    def test_gm_rhs_hermite_recurrence(self):
+        """Test gm_rhs properly implements Hermite recurrence relation."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+        m = 5
+        
+        # Set gₘ₋₁ and gₘ₊₁, with gₘ = 0
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g = g.at[4, 5, 6, m-1].set(1.0 + 0.0j)  # gₘ₋₁
+        g = g.at[4, 5, 6, m+1].set(1.0 + 0.0j)  # gₘ₊₁
+        
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        
+        beta_i = 1.0
+        nu = 0.0  # No collisions for this test
+        
+        rhs = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                     grid.dealias_mask, m, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+        
+        # RHS should be non-zero due to coupling with neighboring moments
+        assert jnp.sum(jnp.abs(rhs)) > 0, "gm_rhs should couple to adjacent moments"
+
+    def test_gm_rhs_collision_operator(self):
+        """Test gm_rhs collision term -νmgₘ works correctly."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+        m = 5
+        
+        # Set only gₘ, with gₘ₋₁ = gₘ₊₁ = 0 and z± = 0
+        # This isolates the collision term
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g = g.at[4, 5, 6, m].set(1.0 + 0.0j)
+        
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        
+        beta_i = 1.0
+        nu = 0.01
+        
+        rhs = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                     grid.dealias_mask, m, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+        
+        # The RHS should be -νm·gₘ at the mode location
+        expected_rhs = -nu * m * g[:, :, :, m]
+        
+        # Check at the mode location
+        rhs_at_mode = rhs[4, 5, 6]
+        expected_at_mode = expected_rhs[4, 5, 6]
+        
+        assert jnp.abs(rhs_at_mode - expected_at_mode) < 1e-6, \
+            f"Collision term mismatch: got {rhs_at_mode}, expected {expected_at_mode}"
+
+    def test_gm_rhs_collision_scaling(self):
+        """Test collision damping scales correctly with moment index m."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+
+        # Initialize only target moments (isolate collision term)
+        # Set gₘ = 1 for m=2 and m=5, all others zero (including neighbors)
+        # This isolates the collision term -νmgₘ
+        g_m2 = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g_m2 = g_m2.at[4, 5, 6, 2].set(1.0 + 0.0j)  # Only g₂
+
+        g_m5 = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g_m5 = g_m5.at[4, 5, 6, 5].set(1.0 + 0.0j)  # Only g₅
+
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+
+        beta_i = 1.0
+        nu = 0.01
+
+        # Compute collision damping for m=2 and m=5
+        rhs_m2 = gm_rhs(g_m2, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, 2, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+        rhs_m5 = gm_rhs(g_m5, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, 5, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+
+        # Extract collision contribution at the mode
+        # With neighbors zero and z± = 0, RHS = -νmgₘ exactly
+        damping_m2 = jnp.abs(rhs_m2[4, 5, 6])
+        damping_m5 = jnp.abs(rhs_m5[4, 5, 6])
+
+        # Expected values: |RHS| = νm for unit amplitude
+        expected_m2 = nu * 2
+        expected_m5 = nu * 5
+
+        # Check absolute values match expected
+        assert jnp.abs(damping_m2 - expected_m2) < 1e-6, \
+            f"m=2 damping should be {expected_m2}, got {damping_m2}"
+        assert jnp.abs(damping_m5 - expected_m5) < 1e-6, \
+            f"m=5 damping should be {expected_m5}, got {damping_m5}"
+
+        # Check ratio is exactly 5/2 = 2.5
+        ratio = damping_m5 / damping_m2
+        expected_ratio = 5.0 / 2.0
+
+        print(f"Collision damping ratio (m=5)/(m=2) = {ratio}, expected = {expected_ratio}")
+        assert jnp.abs(ratio - expected_ratio) < 0.01, \
+            f"Collision ratio should be {expected_ratio}, got {ratio}"
+
+    def test_all_rhs_zero_for_zero_fields(self):
+        """Test all RHS functions return zero for zero input fields."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+        
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        
+        beta_i = 1.0
+        Lambda = 2.0
+        nu = 0.01
+        
+        # Test g0_rhs
+        rhs_g0 = g0_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, beta_i, grid.Nz, grid.Ny, grid.Nx)
+        assert jnp.allclose(rhs_g0, 0.0), "g0_rhs should be zero for zero fields"
+        
+        # Test g1_rhs
+        rhs_g1 = g1_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, beta_i, Lambda, grid.Nz, grid.Ny, grid.Nx)
+        assert jnp.allclose(rhs_g1, 0.0), "g1_rhs should be zero for zero fields"
+        
+        # Test gm_rhs
+        rhs_gm = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, 5, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+        assert jnp.allclose(rhs_gm, 0.0), "gm_rhs should be zero for zero fields"
+
+    def test_rhs_k0_mode_is_zero(self):
+        """Test all RHS functions zero the k=0 mode (mean field)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        M = 10
+        
+        # Initialize with random fields
+        key = jax.random.PRNGKey(42)
+        key1, key2, key3 = jax.random.split(key, 3)
+        
+        g = jax.random.normal(key1, (grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.float32).astype(jnp.complex64)
+        z_plus = jax.random.normal(key2, (grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.float32).astype(jnp.complex64)
+        z_minus = jax.random.normal(key3, (grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.float32).astype(jnp.complex64)
+        
+        beta_i = 1.0
+        Lambda = 2.0
+        nu = 0.01
+        
+        # Test g0_rhs
+        rhs_g0 = g0_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, beta_i, grid.Nz, grid.Ny, grid.Nx)
+        assert jnp.allclose(rhs_g0[0, 0, 0], 0.0), "g0_rhs k=0 mode should be zero"
+        
+        # Test g1_rhs
+        rhs_g1 = g1_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, beta_i, Lambda, grid.Nz, grid.Ny, grid.Nx)
+        assert jnp.allclose(rhs_g1[0, 0, 0], 0.0), "g1_rhs k=0 mode should be zero"
+        
+        # Test gm_rhs
+        rhs_gm = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, 5, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+        assert jnp.allclose(rhs_gm[0, 0, 0], 0.0), "gm_rhs k=0 mode should be zero"

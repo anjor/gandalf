@@ -881,6 +881,263 @@ def z_minus_rhs_gandalf(
 
 
 # =============================================================================
+# Hermite Moment RHS Functions (Kinetic Electron Response)
+# =============================================================================
+
+
+@partial(jax.jit, static_argnums=(8, 9, 10))
+def g0_rhs(
+    g: Array,
+    z_plus: Array,
+    z_minus: Array,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    beta_i: float,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+) -> Array:
+    """
+    Compute RHS for zeroth Hermite moment: dg₀/dt + √βᵢ∇∥(g₁/√2) = 0.
+
+    This implements thesis Eq. 2.7 for the density perturbation moment.
+    g₀ represents the electron density perturbation δn_e/n₀.
+
+    The full equation including convective derivatives (Eq. 2.10) is:
+        [∂/∂t + {Φ,...}]g₀ + √βᵢ[∂/∂z + {Ψ,...}](g₁/√2) = 0
+
+    Moving to RHS form:
+        ∂g₀/∂t = -{Φ, g₀} - √βᵢ·∂(g₁/√2)/∂z - √βᵢ·{Ψ, g₁/√2}
+
+    Where:
+        Φ = (ξ⁺ + ξ⁻)/2 = stream function (same as φ)
+        Ψ = (ξ⁺ - ξ⁻)/2 = parallel vector potential (same as A∥)
+
+    Args:
+        g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
+        z_plus: Elsasser z⁺ field
+        z_minus: Elsasser z⁻ field
+        kx, ky, kz: Wavenumber arrays
+        dealias_mask: 2/3 dealiasing mask
+        beta_i: Ion plasma beta β_i = 8πn_i T_i / B₀²
+        Nz, Ny, Nx: Grid dimensions (static)
+
+    Returns:
+        Time derivative ∂g₀/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
+
+    Reference:
+        Thesis §2.2, Eq. 2.7
+    """
+    # Extract g₀ and g₁ from moment array
+    g0 = g[:, :, :, 0]
+    g1 = g[:, :, :, 1]
+
+    # Compute Φ = (z⁺ + z⁻)/2 and Ψ = (z⁺ - z⁻)/2
+    phi = (z_plus + z_minus) / 2.0
+    psi = (z_plus - z_minus) / 2.0
+
+    # Term 1: -{Φ, g₀} (perpendicular advection)
+    bracket_phi_g0 = poisson_bracket_3d(phi, g0, kx, ky, Nz, Ny, Nx, dealias_mask)
+
+    # Term 2: -√βᵢ·∂(g₁/√2)/∂z = -√(βᵢ/2)·∂g₁/∂z (parallel streaming)
+    parallel_grad_g1 = derivative_z(g1, kz)
+    term2 = jnp.sqrt(beta_i / 2.0) * parallel_grad_g1
+
+    # Term 3: -√βᵢ·{Ψ, g₁/√2} = -√(βᵢ/2)·{Ψ, g₁} (field line advection)
+    bracket_psi_g1 = poisson_bracket_3d(psi, g1, kx, ky, Nz, Ny, Nx, dealias_mask)
+    term3 = jnp.sqrt(beta_i / 2.0) * bracket_psi_g1
+
+    # Assemble RHS
+    rhs = -bracket_phi_g0 - term2 - term3
+
+    # Zero out k=0 mode
+    rhs = zero_k0_mode(rhs)
+
+    return rhs
+
+
+@partial(jax.jit, static_argnums=(9, 10, 11))
+def g1_rhs(
+    g: Array,
+    z_plus: Array,
+    z_minus: Array,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    beta_i: float,
+    Lambda: float,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+) -> Array:
+    """
+    Compute RHS for first Hermite moment: dg₁/dt + √βᵢ∇∥(g₂ + (1-1/Λ)/√2·g₀) = 0.
+
+    This implements thesis Eq. 2.8 for the parallel velocity moment.
+    g₁ represents the parallel electron velocity perturbation u∥_e.
+
+    The (1-1/Λ) term couples g₁ back to g₀, representing kinetic corrections.
+
+    The full equation is:
+        ∂g₁/∂t = -{Φ, g₁} - √βᵢ·∂/∂z[g₂ + (1-1/Λ)/√2·g₀] - √βᵢ·{Ψ, g₂ + (1-1/Λ)/√2·g₀}
+
+    Args:
+        g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
+            Must contain at least 3 moments (M ≥ 2) to access g₀, g₁, g₂.
+        z_plus: Elsasser z⁺ field
+        z_minus: Elsasser z⁻ field
+        kx, ky, kz: Wavenumber arrays
+        dealias_mask: 2/3 dealiasing mask
+        beta_i: Ion plasma beta
+        Lambda: Kinetic parameter Λ appearing in (1-1/Λ) factor
+        Nz, Ny, Nx: Grid dimensions (static)
+
+    Returns:
+        Time derivative ∂g₁/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
+
+    Reference:
+        Thesis §2.2, Eq. 2.8
+    """
+    # Extract g₀, g₁, g₂ from moment array
+    g0 = g[:, :, :, 0]
+    g1 = g[:, :, :, 1]
+    g2 = g[:, :, :, 2]
+
+    # Compute Φ and Ψ
+    phi = (z_plus + z_minus) / 2.0
+    psi = (z_plus - z_minus) / 2.0
+
+    # Compute combined term: g₂ + (1-1/Λ)/√2·g₀
+    coupling_factor = (1.0 - 1.0 / Lambda) / jnp.sqrt(2.0)
+    combined_term = g2 + coupling_factor * g0
+
+    # Term 1: -{Φ, g₁} (perpendicular advection)
+    bracket_phi_g1 = poisson_bracket_3d(phi, g1, kx, ky, Nz, Ny, Nx, dealias_mask)
+
+    # Term 2: -√βᵢ·∂/∂z[combined_term] (parallel streaming)
+    parallel_grad_combined = derivative_z(combined_term, kz)
+    term2 = jnp.sqrt(beta_i) * parallel_grad_combined
+
+    # Term 3: -√βᵢ·{Ψ, combined_term} (field line advection)
+    bracket_psi_combined = poisson_bracket_3d(psi, combined_term, kx, ky, Nz, Ny, Nx, dealias_mask)
+    term3 = jnp.sqrt(beta_i) * bracket_psi_combined
+
+    # Assemble RHS
+    rhs = -bracket_phi_g1 - term2 - term3
+
+    # Zero out k=0 mode
+    rhs = zero_k0_mode(rhs)
+
+    return rhs
+
+
+@partial(jax.jit, static_argnums=(7, 10, 11, 12))
+def gm_rhs(
+    g: Array,
+    z_plus: Array,
+    z_minus: Array,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    m: int,
+    beta_i: float,
+    nu: float,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+) -> Array:
+    """
+    Compute RHS for higher Hermite moments (m ≥ 2):
+        dgₘ/dt + √βᵢ∇∥[√((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁] = -νmgₘ
+
+    This implements thesis Eq. 2.9 for the kinetic cascade in velocity space.
+    The parallel streaming couples each moment to its neighbors (m-1 and m+1),
+    representing phase mixing in the parallel velocity coordinate.
+
+    The collision term -νmgₘ damps high moments (large m), regularizing the
+    cascade at small velocity-space scales.
+
+    The full equation is:
+        ∂gₘ/∂t = -{Φ, gₘ}
+                 - √βᵢ·∂/∂z[√((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁]
+                 - √βᵢ·{Ψ, √((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁}
+                 - νmgₘ
+
+    Args:
+        g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
+            Must contain at least m+1 moments (M ≥ m) for interior moments.
+            For highest moment M, use with appropriate closure (see Issue #24).
+        z_plus: Elsasser z⁺ field
+        z_minus: Elsasser z⁻ field
+        kx, ky, kz: Wavenumber arrays
+        dealias_mask: 2/3 dealiasing mask
+        m: Moment index (2 ≤ m < M for interior moments, m = M requires closure)
+        beta_i: Ion plasma beta
+        nu: Collision frequency ν (Lenard-Bernstein operator)
+        Nz, Ny, Nx: Grid dimensions (static)
+
+    Returns:
+        Time derivative ∂gₘ/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
+
+    Warning:
+        For m = M (highest retained moment), gₘ₊₁ is assumed zero (truncation closure).
+        This is only valid when collision damping ensures gₘ is negligible.
+        For production runs, implement proper closure (Issue #24: gₘ₊₁ = 0 or gₘ₊₁ = gₘ₋₁).
+
+    Reference:
+        Thesis §2.2, Eq. 2.9
+    """
+    # Extract gₘ, gₘ₋₁ from moment array
+    gm = g[:, :, :, m]
+    gm_minus = g[:, :, :, m - 1]
+
+    # Extract gₘ₊₁ with boundary handling
+    # Since m is static_argnums, Python conditionals are fine (evaluated at compile time)
+    M = g.shape[3] - 1  # Maximum moment index
+    if m + 1 <= M:
+        gm_plus = g[:, :, :, m + 1]
+    else:
+        # Truncation closure: gₘ₊₁ = 0 for highest moment
+        gm_plus = jnp.zeros_like(gm)
+
+    # Compute Φ and Ψ
+    phi = (z_plus + z_minus) / 2.0
+    psi = (z_plus - z_minus) / 2.0
+
+    # Compute Hermite recurrence coupling:
+    # √((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁
+    coeff_plus = jnp.sqrt((m + 1) / 2.0)
+    coeff_minus = jnp.sqrt(m / 2.0)
+    coupled_term = coeff_plus * gm_plus + coeff_minus * gm_minus
+
+    # Term 1: -{Φ, gₘ} (perpendicular advection)
+    bracket_phi_gm = poisson_bracket_3d(phi, gm, kx, ky, Nz, Ny, Nx, dealias_mask)
+
+    # Term 2: -√βᵢ·∂/∂z[coupled_term] (parallel streaming)
+    parallel_grad_coupled = derivative_z(coupled_term, kz)
+    term2 = jnp.sqrt(beta_i) * parallel_grad_coupled
+
+    # Term 3: -√βᵢ·{Ψ, coupled_term} (field line advection)
+    bracket_psi_coupled = poisson_bracket_3d(psi, coupled_term, kx, ky, Nz, Ny, Nx, dealias_mask)
+    term3 = jnp.sqrt(beta_i) * bracket_psi_coupled
+
+    # Term 4: -νmgₘ (Lenard-Bernstein collision operator)
+    collision_term = nu * m * gm
+
+    # Assemble RHS
+    rhs = -bracket_phi_gm - term2 - term3 - collision_term
+
+    # Zero out k=0 mode
+    rhs = zero_k0_mode(rhs)
+
+    return rhs
+
+
+# =============================================================================
 # State Initialization Functions
 # =============================================================================
 
