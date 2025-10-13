@@ -986,6 +986,7 @@ def g1_rhs(
 
     Args:
         g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
+            Must contain at least 3 moments (M ≥ 2) to access g₀, g₁, g₂.
         z_plus: Elsasser z⁺ field
         z_minus: Elsasser z⁻ field
         kx, ky, kz: Wavenumber arrays
@@ -1068,11 +1069,13 @@ def gm_rhs(
 
     Args:
         g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
+            Must contain at least m+1 moments (M ≥ m) for interior moments.
+            For highest moment M, use with appropriate closure (see Issue #24).
         z_plus: Elsasser z⁺ field
         z_minus: Elsasser z⁻ field
         kx, ky, kz: Wavenumber arrays
         dealias_mask: 2/3 dealiasing mask
-        m: Moment index (m ≥ 2)
+        m: Moment index (2 ≤ m < M for interior moments, m = M requires closure)
         beta_i: Ion plasma beta
         nu: Collision frequency ν (Lenard-Bernstein operator)
         Nz, Ny, Nx: Grid dimensions (static)
@@ -1080,17 +1083,29 @@ def gm_rhs(
     Returns:
         Time derivative ∂gₘ/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
 
-    Note:
-        Requires m+1 ≤ M where M is the maximum moment. For the highest
-        retained moment M, a closure is needed (see Issue #24).
+    Warning:
+        For m = M (highest retained moment), gₘ₊₁ is assumed zero (truncation closure).
+        This is only valid when collision damping ensures gₘ is negligible.
+        For production runs, implement proper closure (Issue #24: gₘ₊₁ = 0 or gₘ₊₁ = gₘ₋₁).
 
     Reference:
         Thesis §2.2, Eq. 2.9
     """
-    # Extract gₘ, gₘ₋₁, gₘ₊₁ from moment array
+    # Extract gₘ, gₘ₋₁ from moment array
     gm = g[:, :, :, m]
     gm_minus = g[:, :, :, m - 1]
-    gm_plus = g[:, :, :, m + 1] if m + 1 < g.shape[3] else jnp.zeros_like(gm)
+
+    # Extract gₘ₊₁ with JIT-compatible boundary handling
+    # Use jnp.where to avoid Python conditional (JIT incompatible)
+    M = g.shape[3] - 1  # Maximum moment index
+    # If m+1 <= M, use g[:,:,:,m+1], else use zeros
+    # This works because JAX traces both branches
+    gm_plus_exists = m + 1 <= M
+    gm_plus_raw = jnp.where(
+        gm_plus_exists,
+        g[:, :, :, jnp.minimum(m + 1, M)],  # Use minimum to stay in bounds
+        jnp.zeros_like(gm)
+    )
 
     # Compute Φ and Ψ
     phi = (z_plus + z_minus) / 2.0
@@ -1100,7 +1115,7 @@ def gm_rhs(
     # √((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁
     coeff_plus = jnp.sqrt((m + 1) / 2.0)
     coeff_minus = jnp.sqrt(m / 2.0)
-    coupled_term = coeff_plus * gm_plus + coeff_minus * gm_minus
+    coupled_term = coeff_plus * gm_plus_raw + coeff_minus * gm_minus
 
     # Term 1: -{Φ, gₘ} (perpendicular advection)
     bracket_phi_gm = poisson_bracket_3d(phi, gm, kx, ky, Nz, Ny, Nx, dealias_mask)

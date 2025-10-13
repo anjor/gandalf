@@ -1964,40 +1964,53 @@ class TestHermiteMomentRHS:
             f"Collision term mismatch: got {rhs_at_mode}, expected {expected_at_mode}"
 
     def test_gm_rhs_collision_scaling(self):
-        """Test collision damping increases with moment index m."""
+        """Test collision damping scales correctly with moment index m."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
         M = 10
-        
-        # Initialize same amplitude for different moments
-        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
-        g = g.at[4, 5, 6, :].set(1.0 + 0.0j)  # Same amplitude for all moments
-        
+
+        # Initialize only target moments (isolate collision term)
+        # Set gₘ = 1 for m=2 and m=5, all others zero (including neighbors)
+        # This isolates the collision term -νmgₘ
+        g_m2 = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g_m2 = g_m2.at[4, 5, 6, 2].set(1.0 + 0.0j)  # Only g₂
+
+        g_m5 = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g_m5 = g_m5.at[4, 5, 6, 5].set(1.0 + 0.0j)  # Only g₅
+
         z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
         z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
-        
+
         beta_i = 1.0
         nu = 0.01
-        
+
         # Compute collision damping for m=2 and m=5
-        rhs_m2 = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+        rhs_m2 = gm_rhs(g_m2, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
                         grid.dealias_mask, 2, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
-        rhs_m5 = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+        rhs_m5 = gm_rhs(g_m5, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
                         grid.dealias_mask, 5, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
-        
+
         # Extract collision contribution at the mode
-        # (Since all g moments have same amplitude, difference is from -νm factor)
+        # With neighbors zero and z± = 0, RHS = -νmgₘ exactly
         damping_m2 = jnp.abs(rhs_m2[4, 5, 6])
         damping_m5 = jnp.abs(rhs_m5[4, 5, 6])
-        
-        # Damping should scale with m (higher moments damped more)
-        # Ratio should be approximately m5/m2 = 5/2 = 2.5
-        # Allow tolerance due to coupling terms
-        ratio = damping_m5 / (damping_m2 + 1e-10)  # Avoid division by zero
-        
-        print(f"Collision damping ratio (m=5)/(m=2) = {ratio}")
-        # Just check that m=5 has stronger damping
-        assert damping_m5 > damping_m2, \
-            f"Higher moments should have stronger collision damping: |RHS(m=5)| = {damping_m5} > |RHS(m=2)| = {damping_m2}"
+
+        # Expected values: |RHS| = νm for unit amplitude
+        expected_m2 = nu * 2
+        expected_m5 = nu * 5
+
+        # Check absolute values match expected
+        assert jnp.abs(damping_m2 - expected_m2) < 1e-6, \
+            f"m=2 damping should be {expected_m2}, got {damping_m2}"
+        assert jnp.abs(damping_m5 - expected_m5) < 1e-6, \
+            f"m=5 damping should be {expected_m5}, got {damping_m5}"
+
+        # Check ratio is exactly 5/2 = 2.5
+        ratio = damping_m5 / damping_m2
+        expected_ratio = 5.0 / 2.0
+
+        print(f"Collision damping ratio (m=5)/(m=2) = {ratio}, expected = {expected_ratio}")
+        assert jnp.abs(ratio - expected_ratio) < 0.01, \
+            f"Collision ratio should be {expected_ratio}, got {ratio}"
 
     def test_all_rhs_zero_for_zero_fields(self):
         """Test all RHS functions return zero for zero input fields."""
