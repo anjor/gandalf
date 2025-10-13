@@ -1095,17 +1095,14 @@ def gm_rhs(
     gm = g[:, :, :, m]
     gm_minus = g[:, :, :, m - 1]
 
-    # Extract gₘ₊₁ with JIT-compatible boundary handling
-    # Use jnp.where to avoid Python conditional (JIT incompatible)
+    # Extract gₘ₊₁ with boundary handling
+    # Since m is static_argnums, Python conditionals are fine (evaluated at compile time)
     M = g.shape[3] - 1  # Maximum moment index
-    # If m+1 <= M, use g[:,:,:,m+1], else use zeros
-    # This works because JAX traces both branches
-    gm_plus_exists = m + 1 <= M
-    gm_plus_raw = jnp.where(
-        gm_plus_exists,
-        g[:, :, :, jnp.minimum(m + 1, M)],  # Use minimum to stay in bounds
-        jnp.zeros_like(gm)
-    )
+    if m + 1 <= M:
+        gm_plus = g[:, :, :, m + 1]
+    else:
+        # Truncation closure: gₘ₊₁ = 0 for highest moment
+        gm_plus = jnp.zeros_like(gm)
 
     # Compute Φ and Ψ
     phi = (z_plus + z_minus) / 2.0
@@ -1115,7 +1112,7 @@ def gm_rhs(
     # √((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁
     coeff_plus = jnp.sqrt((m + 1) / 2.0)
     coeff_minus = jnp.sqrt(m / 2.0)
-    coupled_term = coeff_plus * gm_plus_raw + coeff_minus * gm_minus
+    coupled_term = coeff_plus * gm_plus + coeff_minus * gm_minus
 
     # Term 1: -{Φ, gₘ} (perpendicular advection)
     bracket_phi_gm = poisson_bracket_3d(phi, gm, kx, ky, Nz, Ny, Nx, dealias_mask)
