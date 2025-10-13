@@ -33,13 +33,117 @@ References:
 """
 
 from functools import partial
-from typing import Callable, Tuple
+from typing import Callable, Tuple, NamedTuple
 import jax
 import jax.numpy as jnp
 from jax import Array
 
 from krmhd.physics import KRMHDState, z_plus_rhs, z_minus_rhs
 from krmhd.spectral import derivative_x, derivative_y, rfftn_inverse
+
+
+class KRMHDFields(NamedTuple):
+    """
+    JAX-compatible lightweight container for KRMHD fields (hot path).
+
+    This is a PyTree-compatible structure for JIT compilation.
+    Use this in inner loops; convert to/from KRMHDState at boundaries.
+
+    All fields are in Fourier space with shape [Nz, Ny, Nx//2+1].
+    """
+    z_plus: Array
+    z_minus: Array
+    B_parallel: Array
+    g: Array  # Shape: [Nz, Ny, Nx//2+1, M+1]
+    time: float
+
+
+def _fields_from_state(state: KRMHDState) -> KRMHDFields:
+    """Extract JAX-compatible fields from KRMHDState for hot path."""
+    return KRMHDFields(
+        z_plus=state.z_plus,
+        z_minus=state.z_minus,
+        B_parallel=state.B_parallel,
+        g=state.g,
+        time=state.time,
+    )
+
+
+def _state_from_fields(fields: KRMHDFields, state_template: KRMHDState) -> KRMHDState:
+    """Reconstruct KRMHDState from JAX fields (validates at boundary)."""
+    return KRMHDState(
+        z_plus=fields.z_plus,
+        z_minus=fields.z_minus,
+        B_parallel=fields.B_parallel,
+        g=fields.g,
+        M=state_template.M,
+        beta_i=state_template.beta_i,
+        v_th=state_template.v_th,
+        nu=state_template.nu,
+        time=fields.time,
+        grid=state_template.grid,
+    )
+
+
+@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx"])
+def _krmhd_rhs_jit(
+    fields: KRMHDFields,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    eta: float,
+    v_A: float,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+) -> KRMHDFields:
+    """
+    JIT-compiled RHS function operating on lightweight KRMHDFields.
+
+    This is the hot-path function that gets JIT-compiled for performance.
+    All array operations happen here with no Pydantic overhead.
+    """
+    # Compute Elsasser RHS (already JIT-compiled in physics.py)
+    dz_plus_dt = z_plus_rhs(
+        fields.z_plus,
+        fields.z_minus,
+        kx,
+        ky,
+        kz,
+        dealias_mask,
+        eta,
+        Nz,
+        Ny,
+        Nx,
+    )
+
+    dz_minus_dt = z_minus_rhs(
+        fields.z_plus,
+        fields.z_minus,
+        kx,
+        ky,
+        kz,
+        dealias_mask,
+        eta,
+        Nz,
+        Ny,
+        Nx,
+    )
+
+    # Passive scalar B∥ evolution (Issue #7 - not yet implemented)
+    dB_parallel_dt = jnp.zeros_like(fields.B_parallel)
+
+    # Hermite moment evolution (Issues #22-24 - not yet implemented)
+    dg_dt = jnp.zeros_like(fields.g)
+
+    return KRMHDFields(
+        z_plus=dz_plus_dt,
+        z_minus=dz_minus_dt,
+        B_parallel=dB_parallel_dt,
+        g=dg_dt,
+        time=0.0,  # Not a derivative
+    )
 
 
 def krmhd_rhs(
@@ -50,13 +154,8 @@ def krmhd_rhs(
     """
     Compute time derivatives for all KRMHD fields.
 
-    This function wraps the individual RHS functions for each field and returns
-    a KRMHDState containing the time derivatives ∂/∂t of all fields.
-
-    Note:
-        This function is not JIT-compiled at the top level due to Pydantic models.
-        The underlying physics functions (z_plus_rhs, z_minus_rhs) are JIT-compiled
-        for performance.
+    This is a thin wrapper that converts KRMHDState to lightweight KRMHDFields,
+    calls the JIT-compiled RHS function, and converts back.
 
     Currently implements:
     - Elsasser fields: z⁺, z⁻ (Alfvénic sector)
@@ -69,69 +168,100 @@ def krmhd_rhs(
         v_A: Alfvén velocity (for normalization)
 
     Returns:
-        KRMHDState with time derivatives (not incrementing time field)
+        KRMHDState with time derivatives (time field set to 0.0)
 
     Example:
-        >>> state = initialize_alfven_wave(grid, kz=1)
+        >>> state = initialize_alfven_wave(grid, M=20, kz_mode=1)
         >>> derivatives = krmhd_rhs(state, eta=0.01, v_A=1.0)
-        >>> # derivatives.z_plus contains ∂z⁺/∂t
 
-    Note:
-        - B_parallel evolution deferred to Issue #7 (passive scalar)
-        - Hermite moment evolution deferred to Issues #22-24 (kinetic physics)
-        - Time field in output is set to 0.0 (not a derivative, just placeholder)
+    Performance:
+        The inner computation is JIT-compiled via _krmhd_rhs_jit().
+        Conversion overhead is minimal (boundary operation only).
     """
-    # Extract grid parameters
     grid = state.grid
-    Nz, Ny, Nx = grid.Nz, grid.Ny, grid.Nx
+    fields = _fields_from_state(state)
 
-    # Compute Elsasser RHS (already implemented in physics.py)
-    dz_plus_dt = z_plus_rhs(
-        state.z_plus,
-        state.z_minus,
+    # Call JIT-compiled kernel
+    deriv_fields = _krmhd_rhs_jit(
+        fields,
         grid.kx,
         grid.ky,
         grid.kz,
         grid.dealias_mask,
         eta,
-        Nz,
-        Ny,
-        Nx,
+        v_A,
+        grid.Nz,
+        grid.Ny,
+        grid.Nx,
     )
 
-    dz_minus_dt = z_minus_rhs(
-        state.z_plus,
-        state.z_minus,
-        grid.kx,
-        grid.ky,
-        grid.kz,
-        grid.dealias_mask,
-        eta,
-        Nz,
-        Ny,
-        Nx,
+    # Convert back to KRMHDState (Pydantic validation at boundary)
+    return _state_from_fields(deriv_fields, state)
+
+
+@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx"])
+def _rk4_step_jit(
+    fields: KRMHDFields,
+    dt: float,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    eta: float,
+    v_A: float,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+) -> KRMHDFields:
+    """
+    JIT-compiled RK4 kernel operating on lightweight KRMHDFields.
+
+    This is the hot-path function with no Pydantic overhead.
+    All 4 stages happen here in JIT-compiled code.
+
+    Memory: Allocates 4 KRMHDFields structures (k1, k2, k3, k4) per call.
+    For 256³ grid: ~1.1 GB temporary allocation.
+    """
+    # Stage 1: k1 = f(y_n)
+    k1 = _krmhd_rhs_jit(fields, kx, ky, kz, dealias_mask, eta, v_A, Nz, Ny, Nx)
+
+    # Stage 2: k2 = f(y_n + dt/2 * k1)
+    fields_k2 = KRMHDFields(
+        z_plus=fields.z_plus + 0.5 * dt * k1.z_plus,
+        z_minus=fields.z_minus + 0.5 * dt * k1.z_minus,
+        B_parallel=fields.B_parallel + 0.5 * dt * k1.B_parallel,
+        g=fields.g + 0.5 * dt * k1.g,
+        time=fields.time + 0.5 * dt,
     )
+    k2 = _krmhd_rhs_jit(fields_k2, kx, ky, kz, dealias_mask, eta, v_A, Nz, Ny, Nx)
 
-    # Passive scalar B∥ evolution (Issue #7 - not yet implemented)
-    # For now: no evolution (∂B∥/∂t = 0)
-    dB_parallel_dt = jnp.zeros_like(state.B_parallel)
+    # Stage 3: k3 = f(y_n + dt/2 * k2)
+    fields_k3 = KRMHDFields(
+        z_plus=fields.z_plus + 0.5 * dt * k2.z_plus,
+        z_minus=fields.z_minus + 0.5 * dt * k2.z_minus,
+        B_parallel=fields.B_parallel + 0.5 * dt * k2.B_parallel,
+        g=fields.g + 0.5 * dt * k2.g,
+        time=fields.time + 0.5 * dt,
+    )
+    k3 = _krmhd_rhs_jit(fields_k3, kx, ky, kz, dealias_mask, eta, v_A, Nz, Ny, Nx)
 
-    # Hermite moment evolution (Issues #22-24 - not yet implemented)
-    # For now: no kinetic evolution (∂g/∂t = 0)
-    dg_dt = jnp.zeros_like(state.g)
+    # Stage 4: k4 = f(y_n + dt * k3)
+    fields_k4 = KRMHDFields(
+        z_plus=fields.z_plus + dt * k3.z_plus,
+        z_minus=fields.z_minus + dt * k3.z_minus,
+        B_parallel=fields.B_parallel + dt * k3.B_parallel,
+        g=fields.g + dt * k3.g,
+        time=fields.time + dt,
+    )
+    k4 = _krmhd_rhs_jit(fields_k4, kx, ky, kz, dealias_mask, eta, v_A, Nz, Ny, Nx)
 
-    # Return state with derivatives (time=0.0 as placeholder)
-    return KRMHDState(
-        z_plus=dz_plus_dt,
-        z_minus=dz_minus_dt,
-        B_parallel=dB_parallel_dt,
-        g=dg_dt,
-        M=state.M,
-        beta_i=state.beta_i,
-        v_th=state.v_th,
-        nu=state.nu,
-        time=0.0,  # Not a derivative, just placeholder
-        grid=state.grid,
+    # Final update: y_{n+1} = y_n + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
+    return KRMHDFields(
+        z_plus=fields.z_plus + (dt / 6.0) * (k1.z_plus + 2.0 * k2.z_plus + 2.0 * k3.z_plus + k4.z_plus),
+        z_minus=fields.z_minus + (dt / 6.0) * (k1.z_minus + 2.0 * k2.z_minus + 2.0 * k3.z_minus + k4.z_minus),
+        B_parallel=fields.B_parallel + (dt / 6.0) * (k1.B_parallel + 2.0 * k2.B_parallel + 2.0 * k3.B_parallel + k4.B_parallel),
+        g=fields.g + (dt / 6.0) * (k1.g + 2.0 * k2.g + 2.0 * k3.g + k4.g),
+        time=fields.time + dt,
     )
 
 
@@ -144,10 +274,6 @@ def rk4_step(
     """
     Advance KRMHD state by one timestep using 4th-order Runge-Kutta.
 
-    Note:
-        This function is not JIT-compiled at the top level due to Pydantic models.
-        The underlying RHS functions are JIT-compiled for performance.
-
     The classic RK4 method computes:
         k1 = f(y_n)
         k2 = f(y_n + dt/2 * k1)
@@ -155,7 +281,7 @@ def rk4_step(
         k4 = f(y_n + dt * k3)
         y_{n+1} = y_n + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
 
-    This provides O(dt⁴) local truncation error and O(dt⁴) global error.
+    This provides O(dt⁴) local truncation error.
 
     Args:
         state: Current KRMHD state at time t
@@ -167,83 +293,42 @@ def rk4_step(
         New KRMHDState at time t + dt
 
     Example:
-        >>> # Single timestep
         >>> state_new = rk4_step(state, dt=0.01, eta=0.01, v_A=1.0)
-        >>>
-        >>> # Multiple timesteps
+        >>> # Or in a loop:
         >>> for i in range(n_steps):
         ...     state = rk4_step(state, dt, eta, v_A)
+
+    Performance:
+        - All 4 RK4 stages run in JIT-compiled code via _rk4_step_jit()
+        - Conversion overhead is minimal (boundary operation only)
+        - Memory: ~1.1 GB temporary allocation for 256³ grid
 
     Physics:
         - Preserves symplectic structure of Hamiltonian systems
         - Energy conservation up to O(dt⁴) + Issue #44 drift
+        - Reality condition f(-k) = f*(k) preserved automatically
         - Stable for dt < CFL limit
-
-    Note:
-        All fields are in Fourier space, so RK4 operates on complex arrays.
-        Reality condition f(-k) = f*(k) is preserved automatically by the RHS.
     """
-    # Stage 1: k1 = f(y_n)
-    k1 = krmhd_rhs(state, eta, v_A)
+    grid = state.grid
+    fields = _fields_from_state(state)
 
-    # Stage 2: k2 = f(y_n + dt/2 * k1)
-    state_k2 = KRMHDState(
-        z_plus=state.z_plus + 0.5 * dt * k1.z_plus,
-        z_minus=state.z_minus + 0.5 * dt * k1.z_minus,
-        B_parallel=state.B_parallel + 0.5 * dt * k1.B_parallel,
-        g=state.g + 0.5 * dt * k1.g,
-        M=state.M,
-        beta_i=state.beta_i,
-        v_th=state.v_th,
-        nu=state.nu,
-        time=state.time + 0.5 * dt,
-        grid=state.grid,
+    # Call JIT-compiled RK4 kernel (all 4 stages in compiled code)
+    new_fields = _rk4_step_jit(
+        fields,
+        dt,
+        grid.kx,
+        grid.ky,
+        grid.kz,
+        grid.dealias_mask,
+        eta,
+        v_A,
+        grid.Nz,
+        grid.Ny,
+        grid.Nx,
     )
-    k2 = krmhd_rhs(state_k2, eta, v_A)
 
-    # Stage 3: k3 = f(y_n + dt/2 * k2)
-    state_k3 = KRMHDState(
-        z_plus=state.z_plus + 0.5 * dt * k2.z_plus,
-        z_minus=state.z_minus + 0.5 * dt * k2.z_minus,
-        B_parallel=state.B_parallel + 0.5 * dt * k2.B_parallel,
-        g=state.g + 0.5 * dt * k2.g,
-        M=state.M,
-        beta_i=state.beta_i,
-        v_th=state.v_th,
-        nu=state.nu,
-        time=state.time + 0.5 * dt,
-        grid=state.grid,
-    )
-    k3 = krmhd_rhs(state_k3, eta, v_A)
-
-    # Stage 4: k4 = f(y_n + dt * k3)
-    state_k4 = KRMHDState(
-        z_plus=state.z_plus + dt * k3.z_plus,
-        z_minus=state.z_minus + dt * k3.z_minus,
-        B_parallel=state.B_parallel + dt * k3.B_parallel,
-        g=state.g + dt * k3.g,
-        M=state.M,
-        beta_i=state.beta_i,
-        v_th=state.v_th,
-        nu=state.nu,
-        time=state.time + dt,
-        grid=state.grid,
-    )
-    k4 = krmhd_rhs(state_k4, eta, v_A)
-
-    # Final update: y_{n+1} = y_n + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
-    return KRMHDState(
-        z_plus=state.z_plus + (dt / 6.0) * (k1.z_plus + 2.0 * k2.z_plus + 2.0 * k3.z_plus + k4.z_plus),
-        z_minus=state.z_minus + (dt / 6.0) * (k1.z_minus + 2.0 * k2.z_minus + 2.0 * k3.z_minus + k4.z_minus),
-        B_parallel=state.B_parallel + (dt / 6.0) * (k1.B_parallel + 2.0 * k2.B_parallel + 2.0 * k3.B_parallel + k4.B_parallel),
-        g=state.g + (dt / 6.0) * (k1.g + 2.0 * k2.g + 2.0 * k3.g + k4.g),
-        M=state.M,
-        beta_i=state.beta_i,
-        v_th=state.v_th,
-        nu=state.nu,
-        time=state.time + dt,
-        grid=state.grid,
-    )
+    # Convert back to KRMHDState (Pydantic validation at boundary)
+    return _state_from_fields(new_fields, state)
 
 
 def compute_cfl_timestep(
