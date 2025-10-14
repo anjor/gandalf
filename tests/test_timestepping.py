@@ -46,6 +46,7 @@ class TestKRMHDRHS:
             beta_i=1.0,
             v_th=1.0,
             nu=0.01,
+            Lambda=1.0,
             time=0.0,
             grid=grid,
         )
@@ -78,6 +79,7 @@ class TestKRMHDRHS:
             beta_i=1.0,
             v_th=1.0,
             nu=0.01,
+            Lambda=1.0,
             time=0.0,
             grid=grid,
         )
@@ -122,6 +124,7 @@ class TestRK4Step:
             beta_i=1.0,
             v_th=1.0,
             nu=0.01,
+            Lambda=1.0,
             time=0.0,
             grid=grid,
         )
@@ -157,6 +160,7 @@ class TestRK4Step:
             beta_i=1.0,
             v_th=1.0,
             nu=0.01,
+            Lambda=1.0,
             time=0.0,
             grid=grid,
         )
@@ -255,6 +259,7 @@ class TestCFLCalculator:
             beta_i=1.0,
             v_th=1.0,
             nu=0.01,
+            Lambda=1.0,
             time=0.0,
             grid=grid,
         )
@@ -420,9 +425,10 @@ class TestAlfvenWavePropagation:
         # Energy should decrease with resistivity (if initial energy is nonzero)
         if E_0 > 1e-10:  # Only test if initial energy is significant
             assert E_1 < E_0, f"Energy should decay with η>0: E_0={E_0:.3e}, E_1={E_1:.3e}"
-            # Should be significant decay (η=0.1 is strong dissipation)
+            # Should be significant decay (η=0.1 is strong perpendicular dissipation)
+            # Note: Using k⊥² dissipation (thesis Eq. 2.23) instead of k², so decay is ~9.5%
             decay_fraction = (E_0 - E_1) / E_0
-            assert decay_fraction > 0.1, f"Insufficient dissipation: only {decay_fraction*100:.1f}% decay"
+            assert decay_fraction > 0.08, f"Insufficient dissipation: only {decay_fraction*100:.1f}% decay"
         else:
             # If initial energy is too small, just verify it stayed small
             assert E_1 < 1e-8, f"Energy grew from nearly zero: E_0={E_0:.3e}, E_1={E_1:.3e}"
@@ -501,3 +507,57 @@ class TestConvergence:
             avg_rate = jnp.mean(jnp.array(convergence_rates))
             assert avg_rate > 1.5, \
                 f"Average convergence rate p={avg_rate:.2f} too low (expected >1.5 for RK2)"
+
+
+class TestHermiteMomentIntegration:
+    """Test that Hermite moments are properly integrated in GANDALF timestepper."""
+
+    def test_hermite_moment_evolution(self):
+        """Verify Hermite moments evolve when integrated with GANDALF (Issue #49)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Initialize with perturbed Hermite moments
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Verify initial g moments are non-zero (have small perturbation from initialization)
+        initial_g_norm = jnp.linalg.norm(state.g)
+        assert initial_g_norm > 0, f"Initial g should have perturbations, got norm={initial_g_norm:.3e}"
+
+        # Take several timesteps
+        dt = 0.01
+        for _ in range(10):
+            state = rk4_step(state, dt, eta=0.01, v_A=1.0)
+
+        # Verify g evolved (changed from initial)
+        final_g_norm = jnp.linalg.norm(state.g)
+        relative_change = jnp.abs(final_g_norm - initial_g_norm) / initial_g_norm
+
+        assert relative_change > 1e-6, \
+            f"g moments should evolve significantly, got {relative_change:.2e} relative change"
+        assert jnp.isfinite(final_g_norm), \
+            f"g moments should remain finite, got {final_g_norm}"
+
+        # Verify moments remain complex-valued
+        assert jnp.iscomplexobj(state.g), "g should remain complex in Fourier space"
+
+    def test_hermite_moment_coupling(self):
+        """Verify Hermite moments couple to Elsasser fields."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Initialize with Alfvén wave (has both Elsasser and Hermite perturbations)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1, beta_i=1.0)
+
+        # Compute initial RHS
+        rhs = krmhd_rhs(state, eta=0.0, v_A=1.0)
+
+        # Verify g RHS is non-zero (coupling exists)
+        g_rhs_norm = jnp.linalg.norm(rhs.g)
+        assert g_rhs_norm > 1e-12, \
+            f"g RHS should be non-zero due to coupling, got norm={g_rhs_norm:.3e}"
+
+        # Verify g0 and g1 specifically evolve (thesis Eq. 2.7-2.8)
+        g0_rhs_norm = jnp.linalg.norm(rhs.g[:, :, :, 0])
+        g1_rhs_norm = jnp.linalg.norm(rhs.g[:, :, :, 1])
+
+        assert g0_rhs_norm > 1e-12, f"g0 RHS should be non-zero, got {g0_rhs_norm:.3e}"
+        assert g1_rhs_norm > 1e-12, f"g1 RHS should be non-zero, got {g1_rhs_norm:.3e}"
