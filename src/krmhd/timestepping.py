@@ -323,8 +323,7 @@ def _gandalf_step_jit(
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
     kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
     ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
-    k_perp_squared = kx_3d**2 + ky_3d**2
-    k_squared = k_perp_squared + kz_3d**2
+    k_perp_squared = kx_3d**2 + ky_3d**2  # Perpendicular wavenumber (thesis uses k⊥² only)
 
     # Integrating factors (thesis Eq. 2.13-2.14)
     # For ∂ξ⁺/∂t - ikz·ξ⁺ = [NL]: multiply by e^(+ikz*t)
@@ -404,13 +403,14 @@ def _gandalf_step_jit(
     g_dissipation = jnp.exp(-eta * k_perp_squared * dt)  # Shape: [Nz, Ny, Nx//2+1]
 
     # Create moment-dependent collision factors using vectorized operations
-    # m=0,1: no collision (factor = 1.0)
-    # m≥2: collision damping (factor = exp(-νm δt))
+    # Physics: Lenard-Bernstein collision operator C[g_m] = -νmg_m (thesis Eq. 2.5)
+    # Integrated analytically: g_m → g_m * exp(-νm·δt)
+    # Conservation: m=0 (particle number) and m=1 (momentum) are exempt from collisions
     moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
     collision_factors = jnp.where(
         moment_indices >= 2,
-        jnp.exp(-nu * moment_indices * dt),  # m≥2: apply collision damping
-        1.0,  # m=0,1: no collision damping
+        jnp.exp(-nu * moment_indices * dt),  # m≥2: collision damping ν_m = νm
+        1.0,  # m=0,1: no collision (conserves particles and momentum)
     )  # Shape: [M+1]
 
     # Apply dissipation: broadcast over moment index
