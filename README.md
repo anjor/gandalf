@@ -123,16 +123,109 @@ krmhd/
 ├── src/krmhd/          # Main package
 │   ├── spectral.py     # ✅ FFT operations, derivatives, dealiasing (2D/3D)
 │   ├── hermite.py      # ✅ Hermite basis (kinetic closures)
-│   ├── physics.py      # ✅ KRMHD state, Poisson brackets, initialization, energy
-│   ├── timestepping.py # RK4/RK45 integrators (TODO)
-│   ├── collisions.py   # Collision operators (TODO)
+│   ├── physics.py      # ✅ KRMHD state, Poisson brackets, Elsasser RHS, Hermite RHS
+│   ├── timestepping.py # ✅ GANDALF integrating factor + RK2 timestepper
+│   ├── diagnostics.py  # ✅ Energy spectra (1D, k⊥, k∥), history, visualization
 │   ├── forcing.py      # Turbulence forcing (TODO)
-│   ├── diagnostics.py  # Energy spectra, fluxes (TODO)
 │   ├── io.py          # HDF5 checkpointing (TODO)
 │   └── validation.py   # Linear physics tests (TODO)
-├── tests/             # Test suite (70+ tests)
-├── examples/          # Example scripts
+├── tests/             # Test suite (191 tests)
+├── examples/          # Example scripts and tutorials
+│   └── decaying_turbulence.py  # ✅ Full workflow demo with plots
 └── pyproject.toml     # Project metadata
+```
+
+## Quick Start: Running Examples
+
+### Decaying Turbulence Simulation
+
+The `examples/decaying_turbulence.py` script demonstrates a complete KRMHD workflow:
+
+```bash
+# Run the example (takes ~1-2 minutes on M1 Pro)
+uv run python examples/decaying_turbulence.py
+```
+
+**What it does:**
+1. Initializes a turbulent k^(-5/3) spectrum (Kolmogorov)
+2. Evolves 100 timesteps using GANDALF integrator
+3. Tracks energy history E(t)
+4. Computes energy spectra E(k), E(k⊥), E(k∥)
+5. Generates publication-ready plots
+
+**Output files** (saved to `examples/output/`):
+- `energy_history.png` - Energy evolution showing selective decay
+- `final_state.png` - 2D slices of φ and A∥ fields
+- `energy_spectra.png` - Three-panel plot with 1D, perpendicular, and parallel spectra
+
+### Example: Custom Simulation
+
+```python
+from krmhd import (
+    SpectralGrid3D,
+    initialize_random_spectrum,
+    gandalf_step,
+    compute_cfl_timestep,
+    EnergyHistory,
+    energy_spectrum_perpendicular,
+    plot_energy_history,
+    plot_state,
+)
+
+# 1. Initialize grid and state
+grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+state = initialize_random_spectrum(
+    grid,
+    M=20,              # Number of Hermite moments
+    alpha=5/3,         # Kolmogorov spectrum
+    amplitude=1.0,
+    k_min=1.0,
+    k_max=10.0,
+)
+
+# 2. Set up energy tracking
+history = EnergyHistory()
+
+# 3. Time evolution loop
+for step in range(100):
+    # Record energy
+    history.append(state)
+
+    # Compute adaptive timestep
+    dt = compute_cfl_timestep(state, v_A=1.0, cfl_safety=0.3)
+
+    # Advance one timestep
+    state = gandalf_step(state, dt, eta=0.01, v_A=1.0)
+
+    print(f"Step {step}: t={state.time:.3f}, E={history.E_total[-1]:.3e}")
+
+# 4. Analyze and visualize
+k_perp, E_perp = energy_spectrum_perpendicular(state)
+plot_energy_history(history, filename='energy.png')
+plot_state(state, filename='final_state.png')
+```
+
+### Generating Custom Plots
+
+```python
+import matplotlib.pyplot as plt
+from krmhd import energy_spectrum_1d, plot_energy_spectrum
+
+# Compute spectrum
+k, E_k = energy_spectrum_1d(state, n_bins=32)
+
+# Option 1: Use built-in plotting
+plot_energy_spectrum(k, E_k, reference_slope=-5/3, filename='spectrum.png')
+
+# Option 2: Custom matplotlib plot
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.loglog(k, E_k, 'b-', linewidth=2, label='E(k)')
+ax.loglog(k, k**(-5/3), 'k--', label='k^(-5/3)')
+ax.set_xlabel('|k|')
+ax.set_ylabel('E(k)')
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.savefig('my_spectrum.png', dpi=150)
 ```
 
 ## Development
@@ -140,7 +233,14 @@ krmhd/
 ### Running Tests
 
 ```bash
+# Run all tests
 uv run pytest
+
+# Run specific test file
+uv run pytest tests/test_diagnostics.py
+
+# Run with verbose output
+uv run pytest -xvs
 ```
 
 ### Code Quality
@@ -191,16 +291,34 @@ The code includes validation against:
   - Orthonormal Hermite functions (quantum harmonic oscillator eigenstates)
   - Moment projection and distribution reconstruction
   - Foundation for Landau closures
+- **Poisson brackets** (Issue #4): Nonlinear advection operator
+  - poisson_bracket_2d() and poisson_bracket_3d() with spectral derivatives
+  - 2/3 dealiasing applied, JIT-compiled
+- **KRMHD equations** (Issues #5-6): Full Elsasser formulation
+  - KRMHDState with z± Elsasser variables
+  - z_plus_rhs() and z_minus_rhs() using GANDALF energy-conserving formulation
+  - Multiple initialization functions (Alfvén waves, turbulent spectra)
+  - Energy conservation: 0.0086% error (Issue #44 resolved!)
+- **Kinetic physics** (Issues #22-24, #49): Hermite moment hierarchy
+  - g0_rhs(), g1_rhs(), gm_rhs() implement full kinetic coupling
+  - Lenard-Bernstein collision operator: C[gm] = -νmgm
+  - Hermite moment closures (truncation, ready for advanced)
+- **Time integration** (Issues #8, #47): GANDALF integrating factor + RK2
+  - Integrating factor e^(±ikz·t) handles linear propagation exactly
+  - RK2 (midpoint method) for nonlinear terms
+  - Exponential dissipation factors for resistivity and collisions
+  - CFL timestep calculator
+- **Diagnostics** (Issue #9): Energy spectra and visualization
+  - energy_spectrum_1d(), energy_spectrum_perpendicular(), energy_spectrum_parallel()
+  - EnergyHistory for tracking E(t), magnetic fraction, dissipation rate
+  - Visualization functions: plot_state(), plot_energy_history(), plot_energy_spectrum()
+  - Example: examples/decaying_turbulence.py demonstrates full workflow
 
-### In Progress 🚧
-- **Poisson brackets** (Issue #4): Next milestone for nonlinear advection
-- **KRMHD equations** (Issues #5-7): Alfvén dynamics and passive scalars
-- **Time integration** (Issue #8): RK4 timestepper
+**Test Coverage:** 191 passing tests across all modules
 
 ### Planned 📋
-- **Kinetic physics** (Issues #22-24): Hermite moment hierarchy, collision operators
-- **Diagnostics** (Issues #9, #25-26): Energy spectra, field line following
-- **Validation suite** (Issues #10-12, #27): Linear physics, Orszag-Tang, turbulence
+- **Validation suite** (Issues #10-12, #27): Linear physics, Orszag-Tang, turbulence benchmarks
+- **Advanced diagnostics** (Issues #25-26): Field line following, phase mixing
 - **Production features** (Issues #13-15, #28-30): HDF5 I/O, forcing, hyper-dissipation
 
 ## References

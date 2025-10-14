@@ -70,6 +70,16 @@ from krmhd.timestepping import (
     compute_cfl_timestep,
 )
 
+from krmhd.diagnostics import (
+    energy_spectrum_1d,
+    energy_spectrum_perpendicular,
+    energy_spectrum_parallel,
+    EnergyHistory,
+    plot_state,
+    plot_energy_history,
+    plot_energy_spectrum,
+)
+
 __all__ = [
     "__version__",
     # Spectral infrastructure
@@ -107,4 +117,12 @@ __all__ = [
     "krmhd_rhs",
     "rk4_step",
     "compute_cfl_timestep",
+    # Diagnostics
+    "energy_spectrum_1d",
+    "energy_spectrum_perpendicular",
+    "energy_spectrum_parallel",
+    "EnergyHistory",
+    "plot_state",
+    "plot_energy_history",
+    "plot_energy_spectrum",
 ]
