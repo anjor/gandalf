@@ -175,11 +175,17 @@ uv run python examples/orszag_tang.py
 4. Tracks energy partition and magnetic/kinetic energy ratio
 5. Validates spectral method accuracy for complex flows
 
-**Output files** (saved to `examples/output/`):
-- `orszag_tang_energy.png` - Energy evolution and partitioning
-- `orszag_tang_initial.png` - Initial condition fields
-- `orszag_tang_final.png` - Final state showing developed structures
-- `orszag_tang_spectrum.png` - Energy spectrum with k^(-5/3) reference
+**Create publication-quality energy plots:**
+
+```bash
+# Run simulation and create energy evolution plot
+uv run python scripts/plot_energy_evolution.py --run-simulation
+
+# Or just plot existing data
+uv run python scripts/plot_energy_evolution.py
+```
+
+This creates a plot showing Total, Kinetic, and Magnetic energy vs. time (normalized by Alfvén crossing time τ_A = L/v_A), matching the style of thesis Figure 2.1.
 
 ### Example 3: Custom Simulation
 
