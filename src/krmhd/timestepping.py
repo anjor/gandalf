@@ -35,7 +35,14 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from krmhd.physics import KRMHDState, z_plus_rhs, z_minus_rhs
+from krmhd.physics import (
+    KRMHDState,
+    z_plus_rhs,
+    z_minus_rhs,
+    g0_rhs,
+    g1_rhs,
+    gm_rhs,
+)
 from krmhd.spectral import derivative_x, derivative_y, rfftn_inverse
 
 
@@ -77,12 +84,13 @@ def _state_from_fields(fields: KRMHDFields, state_template: KRMHDState) -> KRMHD
         beta_i=state_template.beta_i,
         v_th=state_template.v_th,
         nu=state_template.nu,
+        Lambda=state_template.Lambda,
         time=fields.time,
         grid=state_template.grid,
     )
 
 
-@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx"])
+@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M"])
 def _krmhd_rhs_jit(
     fields: KRMHDFields,
     kx: Array,
@@ -91,6 +99,10 @@ def _krmhd_rhs_jit(
     dealias_mask: Array,
     eta: float,
     v_A: float,
+    beta_i: float,
+    nu: float,
+    Lambda: float,
+    M: int,
     Nz: int,
     Ny: int,
     Nx: int,
@@ -132,8 +144,66 @@ def _krmhd_rhs_jit(
     # Passive scalar B∥ evolution (Issue #7 - not yet implemented)
     dB_parallel_dt = jnp.zeros_like(fields.B_parallel)
 
-    # Hermite moment evolution (Issues #22-24 - not yet implemented)
+    # Hermite moment evolution (Issue #49 - now fully implemented!)
+    # Compute g0 RHS (density moment, thesis Eq. 2.7)
+    dg_dt_0 = g0_rhs(
+        fields.g,
+        fields.z_plus,
+        fields.z_minus,
+        kx,
+        ky,
+        kz,
+        dealias_mask,
+        beta_i,
+        Nz,
+        Ny,
+        Nx,
+    )
+
+    # Compute g1 RHS (velocity moment, thesis Eq. 2.8)
+    dg_dt_1 = g1_rhs(
+        fields.g,
+        fields.z_plus,
+        fields.z_minus,
+        kx,
+        ky,
+        kz,
+        dealias_mask,
+        beta_i,
+        Lambda,
+        Nz,
+        Ny,
+        Nx,
+    )
+
+    # Initialize dg_dt array and populate first two moments
     dg_dt = jnp.zeros_like(fields.g)
+    dg_dt = dg_dt.at[:, :, :, 0].set(dg_dt_0)
+    dg_dt = dg_dt.at[:, :, :, 1].set(dg_dt_1)
+
+    # Compute higher moment RHS (m >= 2, thesis Eq. 2.9)
+    # NOTE: Python for loop is correct here! Since M is in static_argnames, the JIT compiler
+    # sees the iteration count at compile time and fully unrolls this loop into separate
+    # gm_rhs() calls for each m. This is necessary because gm_rhs() requires m as a static
+    # argument (for compile-time optimization of Hermite recurrence coefficients).
+    # Using vmap/scan would make m dynamic, breaking the static_argnames contract.
+    for m in range(2, M + 1):
+        dg_dt_m = gm_rhs(
+            fields.g,
+            fields.z_plus,
+            fields.z_minus,
+            kx,
+            ky,
+            kz,
+            dealias_mask,
+            m,
+            beta_i,
+            nu,
+            Nz,
+            Ny,
+            Nx,
+        )
+        dg_dt = dg_dt.at[:, :, :, m].set(dg_dt_m)
 
     return KRMHDFields(
         z_plus=dz_plus_dt,
@@ -157,8 +227,8 @@ def krmhd_rhs(
 
     Currently implements:
     - Elsasser fields: z⁺, z⁻ (Alfvénic sector)
-    - B∥: Passive parallel magnetic field (Issue #7 - set to zero for now)
-    - g: Hermite moments (Issues #22-24 - set to zero for now)
+    - B∥: Passive parallel magnetic field (Issue #7 - not yet implemented)
+    - g: Hermite moments (Issues #22-24, #49 - fully implemented!)
 
     Args:
         state: Current KRMHD state with all fields
@@ -188,6 +258,10 @@ def krmhd_rhs(
         grid.dealias_mask,
         eta,
         v_A,
+        state.beta_i,
+        state.nu,
+        state.Lambda,
+        state.M,
         grid.Nz,
         grid.Ny,
         grid.Nx,
@@ -202,7 +276,7 @@ def krmhd_rhs(
 # =============================================================================
 
 
-@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx"])
+@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M"])
 def _gandalf_step_jit(
     fields: KRMHDFields,
     dt: float,
@@ -212,6 +286,10 @@ def _gandalf_step_jit(
     dealias_mask: Array,
     eta: float,
     v_A: float,
+    beta_i: float,
+    nu: float,
+    Lambda: float,
+    M: int,
     Nz: int,
     Ny: int,
     Nx: int,
@@ -245,8 +323,7 @@ def _gandalf_step_jit(
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
     kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
     ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
-    k_perp_squared = kx_3d**2 + ky_3d**2
-    k_squared = k_perp_squared + kz_3d**2
+    k_perp_squared = kx_3d**2 + ky_3d**2  # Perpendicular wavenumber (thesis uses k⊥² only)
 
     # Integrating factors (thesis Eq. 2.13-2.14)
     # For ∂ξ⁺/∂t - ikz·ξ⁺ = [NL]: multiply by e^(+ikz*t)
@@ -261,7 +338,9 @@ def _gandalf_step_jit(
     # =========================================================================
 
     # Compute initial RHS (with dissipation temporarily set to 0)
-    rhs_0 = _krmhd_rhs_jit(fields, kx, ky, kz, dealias_mask, 0.0, v_A, Nz, Ny, Nx)
+    rhs_0 = _krmhd_rhs_jit(
+        fields, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
+    )
 
     # Extract ONLY nonlinear terms by subtracting linear propagation terms
     # Full RHS includes: nonlinear + linear (∓ikz·ξ±)
@@ -274,11 +353,14 @@ def _gandalf_step_jit(
     z_plus_half = phase_plus_half * (fields.z_plus + phase_plus_half * (dt / 2.0) * nl_plus_0)
     z_minus_half = phase_minus_half * (fields.z_minus + phase_minus_half * (dt / 2.0) * nl_minus_0)
 
+    # Hermite moment half-step: standard RK2, no integrating factor (thesis Eq. 2.15-2.17)
+    g_half = fields.g + (dt / 2.0) * rhs_0.g
+
     fields_half = KRMHDFields(
         z_plus=z_plus_half,
         z_minus=z_minus_half,
         B_parallel=fields.B_parallel,
-        g=fields.g,
+        g=g_half,
         time=fields.time + dt / 2.0,
     )
 
@@ -286,34 +368,60 @@ def _gandalf_step_jit(
     # Step 2: Compute midpoint RHS (thesis Eq. 2.18)
     # =========================================================================
 
-    rhs_half = _krmhd_rhs_jit(fields_half, kx, ky, kz, dealias_mask, 0.0, v_A, Nz, Ny, Nx)
+    rhs_half = _krmhd_rhs_jit(
+        fields_half, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
+    )
 
     # Extract ONLY nonlinear terms (UNCOUPLED)
     nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
     nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
 
     # =========================================================================
-    # Step 3: Full step using midpoint RHS (thesis Eq. 2.19)
+    # Step 3: Full step using midpoint RHS (thesis Eq. 2.19-2.22)
     # =========================================================================
 
-    # Full step: ξ±,n+1 = e^(±ikz·Δt) · [ξ±,n + e^(±ikz·Δt) · Δt · NL^(n+1/2)]
+    # Elsasser full step: ξ±,n+1 = e^(±ikz·Δt) · [ξ±,n + e^(±ikz·Δt) · Δt · NL^(n+1/2)]
     z_plus_new = phase_plus_full * (fields.z_plus + phase_plus_full * dt * nl_plus_half)
     z_minus_new = phase_minus_full * (fields.z_minus + phase_minus_full * dt * nl_minus_half)
+
+    # Hermite moment full-step: standard RK2 using midpoint RHS (thesis Eq. 2.20-2.22)
+    g_new = fields.g + dt * rhs_half.g
 
     # =========================================================================
     # Step 4: Apply dissipation using exponential factors (thesis Eq. 2.23-2.25)
     # =========================================================================
 
-    # Exponential dissipation: ξ± → ξ± * exp(-η*k²*Δt)
-    dissipation_factor = jnp.exp(-eta * k_squared * dt)
-    z_plus_new = z_plus_new * dissipation_factor
-    z_minus_new = z_minus_new * dissipation_factor
+    # Elsasser dissipation uses k_perp² (perpendicular only, thesis Eq. 2.23)
+    # ξ± → ξ± * exp(-η k⊥² Δt)
+    perp_dissipation_factor = jnp.exp(-eta * k_perp_squared * dt)
+    z_plus_new = z_plus_new * perp_dissipation_factor
+    z_minus_new = z_minus_new * perp_dissipation_factor
+
+    # Hermite moment dissipation (thesis Eq. 2.24-2.25)
+    # All moments: g → g * exp(-η k⊥² δt)
+    # Plus collisions for m≥2: g_m → g_m * exp(-νm δt)
+    g_dissipation = jnp.exp(-eta * k_perp_squared * dt)  # Shape: [Nz, Ny, Nx//2+1]
+
+    # Create moment-dependent collision factors using vectorized operations
+    # Physics: Lenard-Bernstein collision operator C[g_m] = -νmg_m (thesis Eq. 2.5)
+    # Integrated analytically: g_m → g_m * exp(-νm·δt)
+    # Conservation: m=0 (particle number) and m=1 (momentum) are exempt from collisions
+    moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
+    collision_factors = jnp.where(
+        moment_indices >= 2,
+        jnp.exp(-nu * moment_indices * dt),  # m≥2: collision damping ν_m = νm
+        1.0,  # m=0,1: no collision (conserves particles and momentum)
+    )  # Shape: [M+1]
+
+    # Apply dissipation: broadcast over moment index
+    g_new = g_new * g_dissipation[:, :, :, jnp.newaxis]  # Resistive dissipation
+    g_new = g_new * collision_factors[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # Collisional damping
 
     return KRMHDFields(
         z_plus=z_plus_new,
         z_minus=z_minus_new,
         B_parallel=fields.B_parallel,  # TODO: Issue #7
-        g=fields.g,  # TODO: Issues #22-24
+        g=g_new,
         time=fields.time + dt,
     )
 
@@ -374,6 +482,10 @@ def gandalf_step(
         grid.dealias_mask,
         eta,
         v_A,
+        state.beta_i,
+        state.nu,
+        state.Lambda,
+        state.M,
         grid.Nz,
         grid.Ny,
         grid.Nx,

@@ -110,6 +110,7 @@ class KRMHDState(BaseModel):
     beta_i: float = Field(gt=0.0, description="Ion plasma beta")
     v_th: float = Field(gt=0.0, description="Electron thermal velocity")
     nu: float = Field(ge=0.0, description="Collision frequency")
+    Lambda: float = Field(gt=0.0, description="Kinetic closure parameter Λ")
     time: float = Field(ge=0.0, description="Simulation time")
     grid: SpectralGrid3D = Field(description="Spectral grid specification")
 
@@ -1033,6 +1034,7 @@ def initialize_alfven_wave(
     v_th: float = 1.0,
     beta_i: float = 1.0,
     nu: float = 0.01,
+    Lambda: float = 1.0,
 ) -> KRMHDState:
     """
     Initialize single-mode Alfvén wave for linear physics validation.
@@ -1106,6 +1108,7 @@ def initialize_alfven_wave(
         beta_i=beta_i,
         v_th=v_th,
         nu=nu,
+        Lambda=Lambda,
         time=0.0,
         grid=grid,
     )
@@ -1121,6 +1124,7 @@ def initialize_kinetic_alfven_wave(
     v_th: float = 1.0,
     beta_i: float = 1.0,
     nu: float = 0.01,
+    Lambda: float = 1.0,
 ) -> KRMHDState:
     """
     Initialize kinetic Alfvén wave with full kinetic response in Hermite moments.
@@ -1163,7 +1167,7 @@ def initialize_kinetic_alfven_wave(
     """
     # Start with fluid Alfvén wave
     state = initialize_alfven_wave(
-        grid, M, kx_mode, ky_mode, kz_mode, amplitude, v_th, beta_i, nu
+        grid, M, kx_mode, ky_mode, kz_mode, amplitude, v_th, beta_i, nu, Lambda
     )
 
     # TODO(Issue #TBD): Implement proper kinetic Alfvén wave solution
@@ -1192,6 +1196,7 @@ def initialize_random_spectrum(
     v_th: float = 1.0,
     beta_i: float = 1.0,
     nu: float = 0.01,
+    Lambda: float = 1.0,
     seed: int = 42,
 ) -> KRMHDState:
     """
@@ -1293,6 +1298,7 @@ def initialize_random_spectrum(
         beta_i=beta_i,
         v_th=v_th,
         nu=nu,
+        Lambda=Lambda,
         time=0.0,
         grid=grid,
     )

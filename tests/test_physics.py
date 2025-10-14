@@ -615,6 +615,7 @@ class TestKRMHDState:
             beta_i=1.0,
             v_th=1.0,
             nu=0.01,
+            Lambda=1.0,
             time=0.0,
             grid=grid,
         )
@@ -654,6 +655,7 @@ class TestKRMHDState:
                 beta_i=1.0,
                 v_th=1.0,
                 nu=0.01,
+                Lambda=1.0,
                 time=0.0,
                 grid=grid,
             )
@@ -911,6 +913,7 @@ class TestKRMHDState:
             beta_i=1.0,
             v_th=1.0,
             nu=0.01,
+            Lambda=1.0,
             time=0.0,
             grid=grid,
         )
@@ -1013,14 +1016,15 @@ class TestKRMHDState:
         # Should fail with real-valued Hermite moments
         with pytest.raises(ValueError, match="complex-valued"):
             KRMHDState(
-                phi=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-                A_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+                z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+                z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
                 B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
                 g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.float32),  # Real!
                 M=M,
                 beta_i=1.0,
                 v_th=1.0,
                 nu=0.01,
+                Lambda=1.0,
                 time=0.0,
                 grid=grid,
             )
