@@ -511,11 +511,6 @@ def zero_k0_mode(field: Array) -> Array:
 
 
 # =============================================================================
-# Elsasser RHS Functions (Time Evolution)
-# =============================================================================
-
-
-# =============================================================================
 # Elsasser RHS Functions (GANDALF Energy-Conserving Formulation)
 # =============================================================================
 # NOTE: This is the ONLY formulation we use. The simplified -∇²⊥{z⁻, z⁺}
@@ -595,6 +590,7 @@ def z_plus_rhs(
     parallel_grad_z_plus = derivative_z(z_plus, kz)
 
     # Assemble RHS: ∂z⁺/∂t = ... + ikz·z⁺
+    # Note: -inv_laplacian because laplacian() returns -k²f, need negative to get +k⁻²·[...]
     rhs = -inv_laplacian + parallel_grad_z_plus
 
     # Add dissipation
@@ -673,6 +669,7 @@ def z_minus_rhs(
     parallel_grad_z_minus = derivative_z(z_minus, kz)
 
     # Assemble RHS: ∂z⁻/∂t = ... - ikz·z⁻
+    # Note: -inv_laplacian because laplacian() returns -k²f, need negative to get +k⁻²·[...]
     rhs = -inv_laplacian - parallel_grad_z_minus
 
     # Add dissipation
