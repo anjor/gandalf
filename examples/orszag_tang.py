@@ -19,10 +19,6 @@ This Adaptation (Incompressible RMHD):
 Runtime: ~1-2 minutes on M1 Pro for 64² resolution
 """
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 import numpy as np
 import jax.numpy as jnp
 from krmhd import (
@@ -74,14 +70,18 @@ z = jnp.linspace(-grid.Lz / 2, grid.Lz / 2, grid.Nz, endpoint=False)
 Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
 
 # Orszag-Tang initial conditions (incompressible version)
-# φ generates v⊥ = (-sin(y), sin(x))/(2π) via v⊥ = ẑ × ∇φ
-phi_real = (jnp.cos(2 * np.pi * X / Lx) + jnp.cos(2 * np.pi * Y / Ly)) / (2 * np.pi)
+# Define wavenumbers for domain periodicity
+kx = 2 * np.pi / Lx  # Fundamental wavenumber in x
+ky = 2 * np.pi / Ly  # Fundamental wavenumber in y
 
-# A∥ generates B⊥ = B0·(-sin(y), sin(2x))/(2π) via B⊥ = ẑ × ∇A∥
-# Note: factor of 2 difference in x-wavenumber (sin(2x) vs sin(x))
+# φ generates v⊥ = (-sin(ky·y), sin(kx·x))/(2π) via v⊥ = ẑ × ∇φ
+phi_real = (jnp.cos(kx * X) + jnp.cos(ky * Y)) / (2 * np.pi)
+
+# A∥ generates B⊥ = B0·(-sin(ky·y), sin(2kx·x))/(2π) via B⊥ = ẑ × ∇A∥
+# Note: factor of 2 in x-wavenumber (sin(2kx·x) vs sin(kx·x))
 A_parallel_real = B0 * (
-    jnp.cos(4 * np.pi * X / Lx) / (4 * np.pi) +
-    jnp.cos(2 * np.pi * Y / Ly) / (2 * np.pi)
+    jnp.cos(2 * kx * X) / (4 * np.pi) +
+    jnp.cos(ky * Y) / (2 * np.pi)
 )
 
 # Transform to Fourier space
@@ -89,12 +89,13 @@ phi_k = rfftn_forward(phi_real)
 A_parallel_k = rfftn_forward(A_parallel_real)
 
 # Create KRMHD state with Elsasser variables z± = φ ± A∥
+M = 10  # Number of Hermite moments
 state = KRMHDState(
     z_plus=phi_k + A_parallel_k,
     z_minus=phi_k - A_parallel_k,
     B_parallel=jnp.zeros_like(phi_k),  # Pure Alfvén mode
-    g=jnp.zeros((Nz, Ny, Nx // 2 + 1, 11), dtype=complex),  # Minimal kinetics
-    M=10,
+    g=jnp.zeros((Nz, Ny, Nx // 2 + 1, M + 1), dtype=complex),  # Hermite moments (0 to M)
+    M=M,
     beta_i=1.0,
     v_th=1.0,
     nu=0.01,
@@ -107,6 +108,10 @@ E0 = compute_energy(state)
 print(f"✓ Initialized Orszag-Tang vortex")
 print(f"  Initial energy: E_total = {E0['total']:.6e}")
 print(f"  E_mag/E_kin = {E0['magnetic']/E0['kinetic']:.3f}")
+
+# Verify initial conditions (sanity check)
+print(f"  Wavenumbers: kx = {kx:.4f}, ky = {ky:.4f}")
+print(f"  Grid spacing: dx = {Lx/Nx:.4f}, dy = {Ly/Ny:.4f}")
 
 # ============================================================================
 # Time Evolution
