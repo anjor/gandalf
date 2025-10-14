@@ -17,11 +17,12 @@ Example usage:
     >>> new_state = gandalf_step(state, dt, eta=0.01, v_A=1.0)
 
 Physics context:
-    The KRMHD equations in Elsasser form (thesis Eq. 2.12):
-    - ∂ξ⁺/∂t - ikz*ξ⁻ = (1/k²⊥)[NL] + η∇²ξ⁺
-    - ∂ξ⁻/∂t + ikz*ξ⁺ = (1/k²⊥)[NL] + η∇²ξ⁻
+    The KRMHD equations in Elsasser form (thesis Eq. 2.12, UNCOUPLED linear terms):
+    - ∂ξ⁺/∂t - ikz*ξ⁺ = (1/k²⊥)[NL] + η∇²ξ⁺
+    - ∂ξ⁻/∂t + ikz*ξ⁻ = (1/k²⊥)[NL] + η∇²ξ⁻
 
-    The integrating factor e^(∓ikz*t) removes the linear propagation terms.
+    Note: Linear terms are UNCOUPLED (ξ⁺ uses ξ⁺, ξ⁻ uses ξ⁻, not crossed).
+    The integrating factor e^(∓ikz*t) removes the linear propagation terms exactly.
 
 References:
     - Thesis Chapter 2, §2.4 - GANDALF Algorithm
@@ -265,8 +266,8 @@ def _gandalf_step_jit(
     # Extract ONLY nonlinear terms by subtracting linear propagation terms
     # Full RHS includes: nonlinear + linear (∓ikz·ξ±)
     # We need: nonlinear only (equations are UNCOUPLED in linear term)
-    nl_plus_0 = rhs_0.z_plus - (1j * kz_3d * fields.z_plus)  # Subtract +ikz·z⁺
-    nl_minus_0 = rhs_0.z_minus - (-1j * kz_3d * fields.z_minus)  # Subtract -ikz·z⁻
+    nl_plus_0 = rhs_0.z_plus - (1j * kz_3d * fields.z_plus)    # Subtract +ikz·z⁺
+    nl_minus_0 = rhs_0.z_minus + (1j * kz_3d * fields.z_minus)  # Subtract -ikz·z⁻
 
     # Half-step update: ξ±,n+1/2 = e^(±ikz·Δt/2) · [ξ±,n + e^(±ikz·Δt/2) · Δt/2 · NL^n]
     # Note: the e^(±ikz·Δt/2) factor appears twice (thesis Eq. 2.14)
@@ -289,7 +290,7 @@ def _gandalf_step_jit(
 
     # Extract ONLY nonlinear terms (UNCOUPLED)
     nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
-    nl_minus_half = rhs_half.z_minus - (-1j * kz_3d * fields_half.z_minus)
+    nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
 
     # =========================================================================
     # Step 3: Full step using midpoint RHS (thesis Eq. 2.19)
@@ -383,6 +384,11 @@ def gandalf_step(
 
 
 # Alias for backward compatibility with tests
+# NOTE: Despite the name, this is NOT plain RK4! It's GANDALF's integrating factor + RK2.
+# The name is kept for backward compatibility but the algorithm is:
+#   - Integrating factor: e^(±ikz·t) handles linear propagation exactly
+#   - RK2 (midpoint method): 2nd-order for nonlinear terms
+# This is MORE accurate than plain RK4 for linear waves (zero temporal error).
 rk4_step = gandalf_step
 
 

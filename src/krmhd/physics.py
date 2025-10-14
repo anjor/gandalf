@@ -539,7 +539,9 @@ def z_plus_rhs(
         RHS_nonlinear = k⊥²^(-1) × [bracket1 - bracket2]
 
     Which expands to:
-        ∂z⁺/∂t = k⊥²^(-1)[{z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺} + k⊥²{z⁺, z⁻}] - ∂∥z⁻ + η∇²z⁺
+        ∂z⁺/∂t = k⊥²^(-1)[{z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺} + k⊥²{z⁺, z⁻}] + ∂∥z⁺ + η∇²z⁺
+
+    Note: Linear term is +ikz·z⁺ (UNCOUPLED - same variable, not opposite!)
 
     This formulation exactly conserves perpendicular gradient energy:
         E = (1/4) ∫ (|∇⊥z⁺|² + |∇⊥z⁻|²) dx
@@ -580,10 +582,12 @@ def z_plus_rhs(
     ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
     k_perp_squared = kx_3d**2 + ky_3d**2
 
-    # Avoid division by zero at k=0
+    # Apply inverse perpendicular Laplacian k⊥²^(-1)
+    # Physics: k=0 mode (domain-averaged quantities) doesn't evolve via Poisson bracket
+    # because {f,g} measures perpendicular advection, which vanishes at k⊥=0
     k_perp_squared_safe = jnp.where(k_perp_squared == 0, 1.0, k_perp_squared)
     inv_laplacian = combined_bracket / (-k_perp_squared_safe)
-    inv_laplacian = jnp.where(k_perp_squared == 0, 0.0 + 0.0j, inv_laplacian)
+    inv_laplacian = jnp.where(k_perp_squared == 0, 0.0 + 0.0j, inv_laplacian)  # Set k=0 → 0
 
     # Parallel gradient term: +ikz·z⁺ (GANDALF Eq. 2.12 - UNCOUPLED!)
     # Note: Linear term is +ikz·ξ⁺ (same variable), not +ikz·ξ⁻
@@ -621,9 +625,10 @@ def z_minus_rhs(
 
     This matches the original GANDALF Fortran/CUDA implementation.
     For z⁻, the signs differ from z⁺ in the parallel gradient term:
-        ∂z⁻/∂t = k⊥²^(-1)[{z⁻, -k⊥²z⁺} + {z⁺, -k⊥²z⁻} + k⊥²{z⁻, z⁺}] + ∂∥z⁺ + η∇²z⁻
+        ∂z⁻/∂t = k⊥²^(-1)[{z⁻, -k⊥²z⁺} + {z⁺, -k⊥²z⁻} + k⊥²{z⁻, z⁺}] - ∂∥z⁻ + η∇²z⁻
 
-    (Note: Opposite sign on parallel gradient compared to z⁺)
+    Note: Linear term is -ikz·z⁻ (UNCOUPLED - same variable, not opposite!)
+    (Opposite sign on parallel gradient compared to z⁺)
 
     Args:
         z_plus: Elsasser z⁺ in Fourier space
@@ -655,14 +660,16 @@ def z_minus_rhs(
     # Compute: bracket1 - bracket2
     combined_bracket = bracket1 - bracket2
 
-    # Apply inverse Laplacian
+    # Apply inverse perpendicular Laplacian k⊥²^(-1)
+    # Physics: k=0 mode (domain-averaged quantities) doesn't evolve via Poisson bracket
+    # because {f,g} measures perpendicular advection, which vanishes at k⊥=0
     kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
     ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
     k_perp_squared = kx_3d**2 + ky_3d**2
 
     k_perp_squared_safe = jnp.where(k_perp_squared == 0, 1.0, k_perp_squared)
     inv_laplacian = combined_bracket / (-k_perp_squared_safe)
-    inv_laplacian = jnp.where(k_perp_squared == 0, 0.0 + 0.0j, inv_laplacian)
+    inv_laplacian = jnp.where(k_perp_squared == 0, 0.0 + 0.0j, inv_laplacian)  # Set k=0 → 0
 
     # Parallel gradient term: -ikz·z⁻ (GANDALF Eq. 2.12 - UNCOUPLED!)
     # Note: Linear term is -ikz·ξ⁻ (same variable), not -ikz·ξ⁺
