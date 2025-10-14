@@ -41,7 +41,6 @@ References:
 
 from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass, field
-from functools import partial
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -438,7 +437,7 @@ class EnergyHistory:
         """
         E_mag = jnp.array(self.E_magnetic)
         E_tot = jnp.array(self.E_total)
-        return E_mag / jnp.where(E_tot > 0, E_tot, 1.0)
+        return jnp.where(E_tot > 0, E_mag / E_tot, 0.0)
 
     def dissipation_rate(self) -> Array:
         """
