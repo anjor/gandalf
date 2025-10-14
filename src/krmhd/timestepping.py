@@ -248,11 +248,12 @@ def _gandalf_step_jit(
     k_squared = k_perp_squared + kz_3d**2
 
     # Integrating factors (thesis Eq. 2.13-2.14)
-    # For ξ⁺: multiply by e^(-ikz*t), for ξ⁻: multiply by e^(+ikz*t)
-    phase_plus_half = jnp.exp(-1j * kz_3d * dt / 2.0)
-    phase_minus_half = jnp.exp(+1j * kz_3d * dt / 2.0)
-    phase_plus_full = jnp.exp(-1j * kz_3d * dt)
-    phase_minus_full = jnp.exp(+1j * kz_3d * dt)
+    # For ∂ξ⁺/∂t - ikz·ξ⁺ = [NL]: multiply by e^(+ikz*t)
+    # For ∂ξ⁻/∂t + ikz·ξ⁻ = [NL]: multiply by e^(-ikz*t)
+    phase_plus_half = jnp.exp(+1j * kz_3d * dt / 2.0)
+    phase_minus_half = jnp.exp(-1j * kz_3d * dt / 2.0)
+    phase_plus_full = jnp.exp(+1j * kz_3d * dt)
+    phase_minus_full = jnp.exp(-1j * kz_3d * dt)
 
     # =========================================================================
     # Step 1: Half-step (thesis Eq. 2.14-2.17)
@@ -262,10 +263,10 @@ def _gandalf_step_jit(
     rhs_0 = _krmhd_rhs_jit(fields, kx, ky, kz, dealias_mask, 0.0, v_A, Nz, Ny, Nx)
 
     # Extract ONLY nonlinear terms by subtracting linear propagation terms
-    # Full RHS includes: nonlinear + linear (∓ikz·ξ∓)
-    # We need: nonlinear only
-    nl_plus_0 = rhs_0.z_plus - (1j * kz_3d * fields.z_minus)  # Subtract +ikz·z⁻
-    nl_minus_0 = rhs_0.z_minus - (-1j * kz_3d * fields.z_plus)  # Subtract -ikz·z⁺
+    # Full RHS includes: nonlinear + linear (∓ikz·ξ±)
+    # We need: nonlinear only (equations are UNCOUPLED in linear term)
+    nl_plus_0 = rhs_0.z_plus - (1j * kz_3d * fields.z_plus)  # Subtract +ikz·z⁺
+    nl_minus_0 = rhs_0.z_minus - (-1j * kz_3d * fields.z_minus)  # Subtract -ikz·z⁻
 
     # Half-step update: ξ±,n+1/2 = e^(±ikz·Δt/2) · [ξ±,n + e^(±ikz·Δt/2) · Δt/2 · NL^n]
     # Note: the e^(±ikz·Δt/2) factor appears twice (thesis Eq. 2.14)
@@ -286,9 +287,9 @@ def _gandalf_step_jit(
 
     rhs_half = _krmhd_rhs_jit(fields_half, kx, ky, kz, dealias_mask, 0.0, v_A, Nz, Ny, Nx)
 
-    # Extract ONLY nonlinear terms
-    nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_minus)
-    nl_minus_half = rhs_half.z_minus - (-1j * kz_3d * fields_half.z_plus)
+    # Extract ONLY nonlinear terms (UNCOUPLED)
+    nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
+    nl_minus_half = rhs_half.z_minus - (-1j * kz_3d * fields_half.z_minus)
 
     # =========================================================================
     # Step 3: Full step using midpoint RHS (thesis Eq. 2.19)

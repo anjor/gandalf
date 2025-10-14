@@ -590,11 +590,12 @@ def z_plus_rhs(
     inv_laplacian = combined_bracket / (-k_perp_squared_safe)
     inv_laplacian = jnp.where(k_perp_squared == 0, 0.0 + 0.0j, inv_laplacian)
 
-    # Parallel gradient term: +ikz·z⁻ (GANDALF Eq. 2.12)
-    parallel_grad_z_minus = derivative_z(z_minus, kz)
+    # Parallel gradient term: +ikz·z⁺ (GANDALF Eq. 2.12 - UNCOUPLED!)
+    # Note: Linear term is +ikz·ξ⁺ (same variable), not +ikz·ξ⁻
+    parallel_grad_z_plus = derivative_z(z_plus, kz)
 
-    # Assemble RHS: ∂z⁺/∂t = ... + ikz·z⁻
-    rhs = -inv_laplacian + parallel_grad_z_minus
+    # Assemble RHS: ∂z⁺/∂t = ... + ikz·z⁺
+    rhs = -inv_laplacian + parallel_grad_z_plus
 
     # Add dissipation
     lap_z_plus = laplacian(z_plus, kx, ky, kz)
@@ -667,11 +668,12 @@ def z_minus_rhs(
     inv_laplacian = combined_bracket / (-k_perp_squared_safe)
     inv_laplacian = jnp.where(k_perp_squared == 0, 0.0 + 0.0j, inv_laplacian)
 
-    # Parallel gradient term: -ikz·z⁺ (GANDALF Eq. 2.12)
-    parallel_grad_z_plus = derivative_z(z_plus, kz)
+    # Parallel gradient term: -ikz·z⁻ (GANDALF Eq. 2.12 - UNCOUPLED!)
+    # Note: Linear term is -ikz·ξ⁻ (same variable), not -ikz·ξ⁺
+    parallel_grad_z_minus = derivative_z(z_minus, kz)
 
-    # Assemble RHS: ∂z⁻/∂t = ... - ikz·z⁺
-    rhs = -inv_laplacian - parallel_grad_z_plus
+    # Assemble RHS: ∂z⁻/∂t = ... - ikz·z⁻
+    rhs = -inv_laplacian - parallel_grad_z_minus
 
     # Add dissipation
     lap_z_minus = laplacian(z_minus, kx, ky, kz)
