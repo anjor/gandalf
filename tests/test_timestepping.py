@@ -400,17 +400,31 @@ class TestAlfvenWavePropagation:
                 f"Energy changed by {relative_change:.1%} over 50 steps, expected < 5%"
 
     def test_dissipation_with_eta(self):
-        """Energy should decay monotonically with resistivity η > 0."""
-        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
-        state = initialize_alfven_wave(grid, M=20, kz_mode=1, amplitude=0.1)
+        """Energy should decay with resistivity η > 0 according to exp(-2ηk⊥²t)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+
+        # Initialize Alfvén wave with known k⊥
+        kz_mode = 1
+        state = initialize_alfven_wave(grid, M=20, kz_mode=kz_mode, amplitude=0.1)
 
         E_dict_0 = energy(state)
         E_0 = E_dict_0['total']
 
-        # Integrate with resistivity
+        # Integration parameters
         eta = 0.1  # Strong dissipation for clear signal
         dt = 0.01
         n_steps = 50
+        total_time = dt * n_steps
+
+        # Calculate expected dissipation for dominant mode (kx=1, ky=0)
+        # For Alfvén wave initialized with kx_mode=1.0, ky_mode=0.0:
+        kx_dominant = 2.0 * jnp.pi / grid.Lx  # = 1.0
+        ky_dominant = 0.0
+        k_perp_squared = kx_dominant**2 + ky_dominant**2
+
+        # Energy decays as: E(t) = E_0 * exp(-2 * η * k⊥² * t)
+        # (factor of 2 because energy ~ |field|², and field decays as exp(-ηk⊥²t))
+        expected_decay_fraction = 1.0 - jnp.exp(-2.0 * eta * k_perp_squared * total_time)
 
         for _ in range(n_steps):
             state = rk4_step(state, dt, eta=eta, v_A=1.0)
@@ -425,10 +439,15 @@ class TestAlfvenWavePropagation:
         # Energy should decrease with resistivity (if initial energy is nonzero)
         if E_0 > 1e-10:  # Only test if initial energy is significant
             assert E_1 < E_0, f"Energy should decay with η>0: E_0={E_0:.3e}, E_1={E_1:.3e}"
-            # Should be significant decay (η=0.1 is strong perpendicular dissipation)
-            # Note: Using k⊥² dissipation (thesis Eq. 2.23) instead of k², so decay is ~9.5%
-            decay_fraction = (E_0 - E_1) / E_0
-            assert decay_fraction > 0.08, f"Insufficient dissipation: only {decay_fraction*100:.1f}% decay"
+
+            # Check dissipation against analytical prediction (with tolerance)
+            # Using k⊥² dissipation (thesis Eq. 2.23): E(t) = E_0 * exp(-2ηk⊥²t)
+            actual_decay_fraction = (E_0 - E_1) / E_0
+
+            # Allow 60%-140% of expected decay (accounting for nonlinear effects, RK2 error, etc.)
+            assert 0.6 * expected_decay_fraction < actual_decay_fraction < 1.4 * expected_decay_fraction, \
+                f"Dissipation rate mismatch: expected {expected_decay_fraction*100:.1f}% decay, " \
+                f"got {actual_decay_fraction*100:.1f}% (tolerance: 60%-140%)"
         else:
             # If initial energy is too small, just verify it stayed small
             assert E_1 < 1e-8, f"Energy grew from nearly zero: E_0={E_0:.3e}, E_1={E_1:.3e}"
