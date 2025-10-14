@@ -131,13 +131,14 @@ krmhd/
 │   └── validation.py   # Linear physics tests (TODO)
 ├── tests/             # Test suite (191 tests)
 ├── examples/          # Example scripts and tutorials
-│   └── decaying_turbulence.py  # ✅ Full workflow demo with plots
+│   ├── decaying_turbulence.py  # ✅ Turbulent cascade with diagnostics
+│   └── orszag_tang.py          # ✅ Orszag-Tang vortex benchmark
 └── pyproject.toml     # Project metadata
 ```
 
 ## Quick Start: Running Examples
 
-### Decaying Turbulence Simulation
+### Example 1: Decaying Turbulence Simulation
 
 The `examples/decaying_turbulence.py` script demonstrates a complete KRMHD workflow:
 
@@ -158,7 +159,29 @@ uv run python examples/decaying_turbulence.py
 - `final_state.png` - 2D slices of φ and A∥ fields
 - `energy_spectra.png` - Three-panel plot with 1D, perpendicular, and parallel spectra
 
-### Example: Custom Simulation
+### Example 2: Orszag-Tang Vortex
+
+The `examples/orszag_tang.py` script runs a classic nonlinear MHD benchmark:
+
+```bash
+# Run the Orszag-Tang vortex (takes ~1-2 minutes on M1 Pro)
+uv run python examples/orszag_tang.py
+```
+
+**What it does:**
+1. Initializes incompressible Orszag-Tang vortex in RMHD formulation
+2. Tests nonlinear dynamics, energy cascade, and current sheet formation
+3. Evolves to t=1.0 (standard benchmark time)
+4. Tracks energy partition and magnetic/kinetic energy ratio
+5. Validates spectral method accuracy for complex flows
+
+**Output files** (saved to `examples/output/`):
+- `orszag_tang_energy.png` - Energy evolution and partitioning
+- `orszag_tang_initial.png` - Initial condition fields
+- `orszag_tang_final.png` - Final state showing developed structures
+- `orszag_tang_spectrum.png` - Energy spectrum with k^(-5/3) reference
+
+### Example 3: Custom Simulation
 
 ```python
 from krmhd import (
@@ -269,11 +292,12 @@ Reference values for astrophysical plasmas:
 
 The code includes validation against:
 
-1. **Linear dispersion relations**: Alfven waves, kinetic Alfven waves
-2. **Landau damping**: Analytical damping rates
-3. **Orszag-Tang vortex**: Standard MHD benchmark
-4. **Decaying turbulence**: k^(-5/3) inertial range spectrum
-5. **Energy conservation**: Sub-machine precision for inviscid runs
+1. **Linear dispersion relations**: Alfven waves (ω² = k∥²v_A²) - tests in `test_physics.py`
+2. **Orszag-Tang vortex**: Standard MHD benchmark - `examples/orszag_tang.py` ✅
+3. **Decaying turbulence**: k^(-5/3) inertial range spectrum - `examples/decaying_turbulence.py` ✅
+4. **Energy conservation**: 0.0086% error in inviscid runs (Issue #44 resolved)
+5. **Kinetic Alfven waves**: FLR corrections (planned - Issue #10)
+6. **Landau damping**: Analytical damping rates (planned - Issue #27)
 
 ## Current Status
 
@@ -312,14 +336,18 @@ The code includes validation against:
   - energy_spectrum_1d(), energy_spectrum_perpendicular(), energy_spectrum_parallel()
   - EnergyHistory for tracking E(t), magnetic fraction, dissipation rate
   - Visualization functions: plot_state(), plot_energy_history(), plot_energy_spectrum()
-  - Example: examples/decaying_turbulence.py demonstrates full workflow
+  - Examples: decaying_turbulence.py and orszag_tang.py demonstrate full workflow
+- **Validation examples** (Issues #11-12): Physics benchmarks
+  - Orszag-Tang vortex: Nonlinear dynamics and current sheet formation
+  - Decaying turbulence: Spectral cascade and selective decay
+  - Both with comprehensive diagnostics and visualization
 
 **Test Coverage:** 191 passing tests across all modules
 
 ### Planned 📋
-- **Validation suite** (Issues #10-12, #27): Linear physics, Orszag-Tang, turbulence benchmarks
-- **Advanced diagnostics** (Issues #25-26): Field line following, phase mixing
-- **Production features** (Issues #13-15, #28-30): HDF5 I/O, forcing, hyper-dissipation
+- **Extended validation** (Issues #10, #27): Kinetic Alfven waves, Landau damping, FDT validation
+- **Advanced diagnostics** (Issues #25-26): Field line following, phase mixing analysis
+- **Production features** (Issues #13-15, #28-30): HDF5 I/O, forcing, hyper-dissipation, configuration files
 
 ## References
 
