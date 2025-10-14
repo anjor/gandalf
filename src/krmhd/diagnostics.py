@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 import jax
 import jax.numpy as jnp
 from jax import Array
+from jax.ops import segment_sum
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -113,8 +114,9 @@ def energy_spectrum_1d(
     k_mag = jnp.sqrt(kx_3d**2 + ky_3d**2 + kz_3d**2)  # Shape: [Nz, Ny, Nx//2+1]
 
     # Compute energy density in Fourier space
-    # E = (1/2) * |∇φ|² + (1/2) * |∇A∥|²
-    #   = (1/2) * k²|φ|² + (1/2) * k²|A∥|²
+    # Note: RMHD energy involves only perpendicular derivatives (thesis Eq. 2.12)
+    # E = (1/2) * |∇⊥φ|² + (1/2) * |∇⊥A∥|²
+    #   = (1/2) * k_perp²|φ|² + (1/2) * k_perp²|A∥|²
     k_perp_squared = kx_3d**2 + ky_3d**2
 
     phi = (state.z_plus + state.z_minus) / 2.0
@@ -141,17 +143,9 @@ def energy_spectrum_1d(
     k_indices = jnp.digitize(k_mag.flatten(), k_bins) - 1
     k_indices = jnp.clip(k_indices, 0, n_bins - 1)
 
-    # Sum energy in each bin
+    # Sum energy in each bin using vectorized segment_sum (JAX-native, JIT-compatible)
     energy_flat = energy_density.flatten()
-
-    # Use a vectorized approach: create bin counts
-    E_k = jnp.zeros(n_bins)
-    for i in range(n_bins):
-        # Create boolean mask
-        mask = (k_indices == i)
-        # Sum energies where mask is True
-        bin_energy = jnp.sum(energy_flat * mask)
-        E_k = E_k.at[i].set(bin_energy)
+    E_k = segment_sum(energy_flat, k_indices, num_segments=n_bins)
 
     # Normalize by total number of grid points and bin width
     N_total = grid.Nx * grid.Ny * grid.Nz
@@ -243,16 +237,9 @@ def energy_spectrum_perpendicular(
     k_perp_indices = jnp.digitize(k_perp.flatten(), k_perp_bins) - 1
     k_perp_indices = jnp.clip(k_perp_indices, 0, n_bins - 1)
 
-    # Sum energy in each bin
+    # Sum energy in each bin using vectorized segment_sum (JAX-native, JIT-compatible)
     energy_flat = energy_density.flatten()
-
-    E_perp = jnp.zeros(n_bins)
-    for i in range(n_bins):
-        # Create boolean mask
-        mask = (k_perp_indices == i)
-        # Sum energies where mask is True
-        bin_energy = jnp.sum(energy_flat * mask)
-        E_perp = E_perp.at[i].set(bin_energy)
+    E_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
 
     # Normalize
     N_total = grid.Nx * grid.Ny * grid.Nz
@@ -327,7 +314,11 @@ def energy_spectrum_parallel(
     # Sum over perpendicular modes for each kz
     E_parallel = jnp.sum(energy_density, axis=(1, 2))  # Sum over ky, kx → [Nz]
 
-    # Normalize
+    # Normalize by number of perpendicular modes
+    # Note: Unlike the binned spectra (1D, perpendicular), this is a discrete spectrum
+    # where each kz corresponds to a specific Fourier mode (not averaged over bins).
+    # Therefore we normalize by N_perp only, not by dkz. To integrate to E_total:
+    # sum(E_parallel) * dkz ≈ E_total where dkz = 2π/Lz
     N_perp = grid.Nx * grid.Ny
     E_parallel = E_parallel / N_perp
 

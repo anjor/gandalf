@@ -33,6 +33,7 @@ from krmhd import (
     initialize_random_spectrum,
     gandalf_step,
     compute_cfl_timestep,
+    energy as compute_energy,
 )
 from krmhd.diagnostics import (
     EnergyHistory,
@@ -107,7 +108,10 @@ def main():
         seed=42,
     )
     print(f"✓ Initialized random k^(-{alpha:.2f}) spectrum")
-    print(f"  Initial energy: E_total = {state.grid.Nx}")
+
+    # Compute initial energy
+    initial_energies = compute_energy(state)
+    print(f"  Initial energy: E_total = {initial_energies['total']:.6e}")
 
     # ==========================================================================
     # Time Evolution
