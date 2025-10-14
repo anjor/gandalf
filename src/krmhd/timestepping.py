@@ -1,35 +1,32 @@
 """
-Time integration for KRMHD simulations.
+Time integration for KRMHD simulations using GANDALF integrating factor + RK2.
 
-This module implements time-stepping algorithms for evolving the KRMHD equations:
-- RK4 (4th-order Runge-Kutta) for robust, fixed-timestep integration
-- CFL condition calculator for numerical stability
-- Unified RHS function combining all physics terms
+This module implements the original GANDALF time-stepping algorithm from the thesis
+Chapter 2, Equations 2.13-2.19:
+- Integrating factor for linear propagation term (analytically exact)
+- RK2 (midpoint method) for nonlinear terms
+- Exponential integration for dissipation
 
-The timestepping operates on KRMHDState objects and preserves:
-- Field shapes and reality conditions
-- Energy conservation (up to numerical precision and Issue #44)
-- JIT compilation for performance
+The integrating factor e^(±ikz*t) removes the stiff linear term, allowing the
+nonlinear terms to be integrated with RK2 (2nd-order accurate).
 
 Example usage:
     >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
     >>> state = initialize_alfven_wave(grid, kz=1, amplitude=0.1)
     >>> dt = compute_cfl_timestep(state, v_A=1.0, cfl_safety=0.3)
-    >>> new_state = rk4_step(state, dt, eta=0.01, v_A=1.0)
+    >>> new_state = gandalf_step(state, dt, eta=0.01, v_A=1.0)
 
 Physics context:
-    The KRMHD equations in Elsasser form evolve as:
-    - ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∇∥z⁻ + η∇²z⁺
-    - ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∇∥z⁺ + η∇²z⁻
+    The KRMHD equations in Elsasser form (thesis Eq. 2.12, UNCOUPLED linear terms):
+    - ∂ξ⁺/∂t - ikz*ξ⁺ = (1/k²⊥)[NL] + η∇²ξ⁺
+    - ∂ξ⁻/∂t + ikz*ξ⁻ = (1/k²⊥)[NL] + η∇²ξ⁻
 
-    Time integration must respect:
-    - CFL condition: dt < dx / max(v_A, |v_⊥|)
-    - Energy conservation in inviscid limit (η=0)
-    - Phase relationships for Alfvén waves
+    Note: Linear terms are UNCOUPLED (ξ⁺ uses ξ⁺, ξ⁻ uses ξ⁻, not crossed).
+    The integrating factor e^(∓ikz*t) removes the linear propagation terms exactly.
 
 References:
-    - Press et al. (2007) "Numerical Recipes" §17.1 - RK methods
-    - Courant, Friedrichs, Lewy (1928) - CFL condition
+    - Thesis Chapter 2, §2.4 - GANDALF Algorithm
+    - Eqs. 2.13-2.25 - Integrating factor + RK2 timestepping
 """
 
 from functools import partial
@@ -104,7 +101,8 @@ def _krmhd_rhs_jit(
     This is the hot-path function that gets JIT-compiled for performance.
     All array operations happen here with no Pydantic overhead.
     """
-    # Compute Elsasser RHS (already JIT-compiled in physics.py)
+    # Compute Elsasser RHS using GANDALF's energy-conserving formulation
+    # (already JIT-compiled in physics.py)
     dz_plus_dt = z_plus_rhs(
         fields.z_plus,
         fields.z_minus,
@@ -199,8 +197,13 @@ def krmhd_rhs(
     return _state_from_fields(deriv_fields, state)
 
 
+# =============================================================================
+# GANDALF Integrating Factor + RK2 Timestepping (Thesis Eq. 2.13-2.19)
+# =============================================================================
+
+
 @partial(jax.jit, static_argnames=["Nz", "Ny", "Nx"])
-def _rk4_step_jit(
+def _gandalf_step_jit(
     fields: KRMHDFields,
     dt: float,
     kx: Array,
@@ -214,78 +217,127 @@ def _rk4_step_jit(
     Nx: int,
 ) -> KRMHDFields:
     """
-    JIT-compiled RK4 kernel operating on lightweight KRMHDFields.
+    JIT-compiled GANDALF integrating factor + RK2 timestepper.
 
-    This is the hot-path function with no Pydantic overhead.
-    All 4 stages happen here in JIT-compiled code.
+    Implements thesis Equations 2.13-2.25:
+    1. Half-step: Apply integrating factor and advance with initial RHS
+    2. Compute midpoint nonlinear terms
+    3. Full step: Use midpoint RHS for final update
+    4. Apply dissipation exactly using exponential factors
 
-    Memory: Allocates 4 KRMHDFields structures (k1, k2, k3, k4) per call.
-    For 256³ grid: ~1.1 GB temporary allocation.
+    The integrating factor e^(±ikz*dt) handles the linear propagation term
+    ∓ikz*ξ∓ analytically, removing stiffness. RK2 (midpoint method) gives
+    2nd-order accuracy for the nonlinear terms.
+
+    Args:
+        fields: Current KRMHD fields
+        dt: Timestep
+        kx, ky, kz: Wavenumbers
+        dealias_mask: 2/3 dealiasing mask
+        eta: Resistivity
+        v_A: Alfvén velocity
+        Nz, Ny, Nx: Grid dimensions
+
+    Returns:
+        Updated KRMHDFields after full timestep
     """
-    # Stage 1: k1 = f(y_n)
-    k1 = _krmhd_rhs_jit(fields, kx, ky, kz, dealias_mask, eta, v_A, Nz, Ny, Nx)
+    # Build 3D arrays
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+    k_squared = k_perp_squared + kz_3d**2
 
-    # Stage 2: k2 = f(y_n + dt/2 * k1)
-    fields_k2 = KRMHDFields(
-        z_plus=fields.z_plus + 0.5 * dt * k1.z_plus,
-        z_minus=fields.z_minus + 0.5 * dt * k1.z_minus,
-        B_parallel=fields.B_parallel + 0.5 * dt * k1.B_parallel,
-        g=fields.g + 0.5 * dt * k1.g,
-        time=fields.time + 0.5 * dt,
+    # Integrating factors (thesis Eq. 2.13-2.14)
+    # For ∂ξ⁺/∂t - ikz·ξ⁺ = [NL]: multiply by e^(+ikz*t)
+    # For ∂ξ⁻/∂t + ikz·ξ⁻ = [NL]: multiply by e^(-ikz*t)
+    phase_plus_half = jnp.exp(+1j * kz_3d * dt / 2.0)
+    phase_minus_half = jnp.exp(-1j * kz_3d * dt / 2.0)
+    phase_plus_full = jnp.exp(+1j * kz_3d * dt)
+    phase_minus_full = jnp.exp(-1j * kz_3d * dt)
+
+    # =========================================================================
+    # Step 1: Half-step (thesis Eq. 2.14-2.17)
+    # =========================================================================
+
+    # Compute initial RHS (with dissipation temporarily set to 0)
+    rhs_0 = _krmhd_rhs_jit(fields, kx, ky, kz, dealias_mask, 0.0, v_A, Nz, Ny, Nx)
+
+    # Extract ONLY nonlinear terms by subtracting linear propagation terms
+    # Full RHS includes: nonlinear + linear (∓ikz·ξ±)
+    # We need: nonlinear only (equations are UNCOUPLED in linear term)
+    nl_plus_0 = rhs_0.z_plus - (1j * kz_3d * fields.z_plus)    # Subtract +ikz·z⁺
+    nl_minus_0 = rhs_0.z_minus + (1j * kz_3d * fields.z_minus)  # Subtract -ikz·z⁻
+
+    # Half-step update: ξ±,n+1/2 = e^(±ikz·Δt/2) · [ξ±,n + e^(±ikz·Δt/2) · Δt/2 · NL^n]
+    # Note: the e^(±ikz·Δt/2) factor appears twice (thesis Eq. 2.14)
+    z_plus_half = phase_plus_half * (fields.z_plus + phase_plus_half * (dt / 2.0) * nl_plus_0)
+    z_minus_half = phase_minus_half * (fields.z_minus + phase_minus_half * (dt / 2.0) * nl_minus_0)
+
+    fields_half = KRMHDFields(
+        z_plus=z_plus_half,
+        z_minus=z_minus_half,
+        B_parallel=fields.B_parallel,
+        g=fields.g,
+        time=fields.time + dt / 2.0,
     )
-    k2 = _krmhd_rhs_jit(fields_k2, kx, ky, kz, dealias_mask, eta, v_A, Nz, Ny, Nx)
 
-    # Stage 3: k3 = f(y_n + dt/2 * k2)
-    fields_k3 = KRMHDFields(
-        z_plus=fields.z_plus + 0.5 * dt * k2.z_plus,
-        z_minus=fields.z_minus + 0.5 * dt * k2.z_minus,
-        B_parallel=fields.B_parallel + 0.5 * dt * k2.B_parallel,
-        g=fields.g + 0.5 * dt * k2.g,
-        time=fields.time + 0.5 * dt,
-    )
-    k3 = _krmhd_rhs_jit(fields_k3, kx, ky, kz, dealias_mask, eta, v_A, Nz, Ny, Nx)
+    # =========================================================================
+    # Step 2: Compute midpoint RHS (thesis Eq. 2.18)
+    # =========================================================================
 
-    # Stage 4: k4 = f(y_n + dt * k3)
-    fields_k4 = KRMHDFields(
-        z_plus=fields.z_plus + dt * k3.z_plus,
-        z_minus=fields.z_minus + dt * k3.z_minus,
-        B_parallel=fields.B_parallel + dt * k3.B_parallel,
-        g=fields.g + dt * k3.g,
-        time=fields.time + dt,
-    )
-    k4 = _krmhd_rhs_jit(fields_k4, kx, ky, kz, dealias_mask, eta, v_A, Nz, Ny, Nx)
+    rhs_half = _krmhd_rhs_jit(fields_half, kx, ky, kz, dealias_mask, 0.0, v_A, Nz, Ny, Nx)
 
-    # Final update: y_{n+1} = y_n + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
+    # Extract ONLY nonlinear terms (UNCOUPLED)
+    nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
+    nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
+
+    # =========================================================================
+    # Step 3: Full step using midpoint RHS (thesis Eq. 2.19)
+    # =========================================================================
+
+    # Full step: ξ±,n+1 = e^(±ikz·Δt) · [ξ±,n + e^(±ikz·Δt) · Δt · NL^(n+1/2)]
+    z_plus_new = phase_plus_full * (fields.z_plus + phase_plus_full * dt * nl_plus_half)
+    z_minus_new = phase_minus_full * (fields.z_minus + phase_minus_full * dt * nl_minus_half)
+
+    # =========================================================================
+    # Step 4: Apply dissipation using exponential factors (thesis Eq. 2.23-2.25)
+    # =========================================================================
+
+    # Exponential dissipation: ξ± → ξ± * exp(-η*k²*Δt)
+    dissipation_factor = jnp.exp(-eta * k_squared * dt)
+    z_plus_new = z_plus_new * dissipation_factor
+    z_minus_new = z_minus_new * dissipation_factor
+
     return KRMHDFields(
-        z_plus=fields.z_plus + (dt / 6.0) * (k1.z_plus + 2.0 * k2.z_plus + 2.0 * k3.z_plus + k4.z_plus),
-        z_minus=fields.z_minus + (dt / 6.0) * (k1.z_minus + 2.0 * k2.z_minus + 2.0 * k3.z_minus + k4.z_minus),
-        B_parallel=fields.B_parallel + (dt / 6.0) * (k1.B_parallel + 2.0 * k2.B_parallel + 2.0 * k3.B_parallel + k4.B_parallel),
-        g=fields.g + (dt / 6.0) * (k1.g + 2.0 * k2.g + 2.0 * k3.g + k4.g),
+        z_plus=z_plus_new,
+        z_minus=z_minus_new,
+        B_parallel=fields.B_parallel,  # TODO: Issue #7
+        g=fields.g,  # TODO: Issues #22-24
         time=fields.time + dt,
     )
 
 
-def rk4_step(
+def gandalf_step(
     state: KRMHDState,
     dt: float,
     eta: float,
     v_A: float,
 ) -> KRMHDState:
     """
-    Advance KRMHD state by one timestep using 4th-order Runge-Kutta.
+    Advance KRMHD state using GANDALF integrating factor + RK2 method.
 
-    The classic RK4 method computes:
-        k1 = f(y_n)
-        k2 = f(y_n + dt/2 * k1)
-        k3 = f(y_n + dt/2 * k2)
-        k4 = f(y_n + dt * k3)
-        y_{n+1} = y_n + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
+    This implements the original GANDALF algorithm from thesis Chapter 2:
+    1. Integrating factor for linear propagation (analytically exact)
+    2. RK2 (midpoint method) for nonlinear terms (2nd-order accurate)
+    3. Exponential integration for dissipation (exact)
 
-    This provides O(dt⁴) local truncation error.
+    The integrating factor e^(±ikz*t) removes the stiff linear term ∓ikz*ξ∓,
+    allowing RK2 to integrate the nonlinear bracket terms efficiently.
 
     Args:
         state: Current KRMHD state at time t
-        dt: Timestep size (should satisfy CFL condition)
+        dt: Timestep size (should satisfy CFL for nonlinear terms)
         eta: Resistivity coefficient
         v_A: Alfvén velocity
 
@@ -293,27 +345,27 @@ def rk4_step(
         New KRMHDState at time t + dt
 
     Example:
-        >>> state_new = rk4_step(state, dt=0.01, eta=0.01, v_A=1.0)
+        >>> state_new = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0)
         >>> # Or in a loop:
         >>> for i in range(n_steps):
-        ...     state = rk4_step(state, dt, eta, v_A)
-
-    Performance:
-        - All 4 RK4 stages run in JIT-compiled code via _rk4_step_jit()
-        - Conversion overhead is minimal (boundary operation only)
-        - Memory: ~1.1 GB temporary allocation for 256³ grid
+        ...     state = gandalf_step(state, dt, eta, v_A)
 
     Physics:
-        - Preserves symplectic structure of Hamiltonian systems
-        - Energy conservation up to O(dt⁴) + Issue #44 drift
-        - Reality condition f(-k) = f*(k) preserved automatically
-        - Stable for dt < CFL limit
+        - Linear propagation: Handled exactly (unconditionally stable)
+        - Nonlinear terms: O(dt²) accurate (RK2)
+        - Dissipation: Exact exponential decay
+        - Overall: O(dt²) convergence
+        - Energy conservation: Excellent in inviscid limit
+
+    Reference:
+        - Thesis Chapter 2, §2.4 - GANDALF Algorithm
+        - Eqs. 2.13-2.25 - Integrating factor + RK2 implementation
     """
     grid = state.grid
     fields = _fields_from_state(state)
 
-    # Call JIT-compiled RK4 kernel (all 4 stages in compiled code)
-    new_fields = _rk4_step_jit(
+    # Call JIT-compiled GANDALF kernel
+    new_fields = _gandalf_step_jit(
         fields,
         dt,
         grid.kx,
@@ -331,6 +383,15 @@ def rk4_step(
     return _state_from_fields(new_fields, state)
 
 
+# Alias for backward compatibility with tests
+# NOTE: Despite the name, this is NOT plain RK4! It's GANDALF's integrating factor + RK2.
+# The name is kept for backward compatibility but the algorithm is:
+#   - Integrating factor: e^(±ikz·t) handles linear propagation exactly
+#   - RK2 (midpoint method): 2nd-order for nonlinear terms
+# This is MORE accurate than plain RK4 for linear waves (zero temporal error).
+rk4_step = gandalf_step
+
+
 def compute_cfl_timestep(
     state: KRMHDState,
     v_A: float,
@@ -344,7 +405,7 @@ def compute_cfl_timestep(
 
         dt ≤ C * min(Δx, Δy, Δz) / max(v_A, |v_⊥|)
 
-    where C is a safety factor (typically 0.1-0.5 for RK4).
+    where C is a safety factor (typically 0.1-0.5 for RK2/RK4).
 
     Args:
         state: Current KRMHD state (used to compute max velocity)
@@ -357,7 +418,7 @@ def compute_cfl_timestep(
     Example:
         >>> dt = compute_cfl_timestep(state, v_A=1.0, cfl_safety=0.3)
         >>> # Use this dt for time integration
-        >>> new_state = rk4_step(state, dt, eta=0.01, v_A=1.0)
+        >>> new_state = gandalf_step(state, dt, eta=0.01, v_A=1.0)
 
     Physics:
         - Alfvén waves propagate at v_A along field lines (parallel)
