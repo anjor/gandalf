@@ -41,6 +41,7 @@ References:
 
 from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass, field
+from functools import partial
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -63,6 +64,10 @@ def energy_spectrum_1d(
 ) -> Tuple[Array, Array]:
     """
     Compute 1D spherically-averaged energy spectrum E(k) vs |k|.
+
+    Note: This function is not JIT-compiled because KRMHDState (Pydantic BaseModel)
+    is not automatically a JAX pytree. To enable JIT, register KRMHDState as a pytree
+    using jax.tree_util.register_pytree_node or convert to a standard dataclass.
 
     Shell-averages energy over all wavenumbers with the same magnitude
     |k| = √(kx² + ky² + kz²). Useful for isotropic turbulence analysis.
@@ -149,7 +154,7 @@ def energy_spectrum_1d(
 
     # Normalize by total number of grid points and bin width
     N_total = grid.Nx * grid.Ny * grid.Nz
-    dk = k_bins[1] - k_bins[0]
+    dk = jnp.maximum(k_bins[1] - k_bins[0], 1e-10)  # Guard against division by zero
     E_k = E_k / (N_total * dk)
 
     return k_centers, E_k
@@ -161,6 +166,10 @@ def energy_spectrum_perpendicular(
 ) -> Tuple[Array, Array]:
     """
     Compute perpendicular energy spectrum E(k⊥) vs k⊥ = √(kx² + ky²).
+
+    Note: This function is not JIT-compiled because KRMHDState (Pydantic BaseModel)
+    is not automatically a JAX pytree. To enable JIT, register KRMHDState as a pytree
+    using jax.tree_util.register_pytree_node or convert to a standard dataclass.
 
     Sums energy over all parallel (k∥ = kz) modes for each k⊥. This is the
     critical diagnostic for RMHD, where perpendicular cascade dominates.
@@ -243,7 +252,7 @@ def energy_spectrum_perpendicular(
 
     # Normalize
     N_total = grid.Nx * grid.Ny * grid.Nz
-    dk_perp = k_perp_bins[1] - k_perp_bins[0]
+    dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)  # Guard against division by zero
     E_perp = E_perp / (N_total * dk_perp)
 
     return k_perp_centers, E_perp
@@ -254,6 +263,10 @@ def energy_spectrum_parallel(
 ) -> Tuple[Array, Array]:
     """
     Compute parallel energy spectrum E(k∥) vs kz.
+
+    Note: This function is not JIT-compiled because KRMHDState (Pydantic BaseModel)
+    is not automatically a JAX pytree. To enable JIT, register KRMHDState as a pytree
+    using jax.tree_util.register_pytree_node or convert to a standard dataclass.
 
     Sums energy over all perpendicular (k⊥) modes for each kz. Shows
     energy distribution along field lines from Alfvén wave propagation.
@@ -317,8 +330,14 @@ def energy_spectrum_parallel(
     # Normalize by number of perpendicular modes
     # Note: Unlike the binned spectra (1D, perpendicular), this is a discrete spectrum
     # where each kz corresponds to a specific Fourier mode (not averaged over bins).
-    # Therefore we normalize by N_perp only, not by dkz. To integrate to E_total:
-    # sum(E_parallel) * dkz ≈ E_total where dkz = 2π/Lz
+    # Therefore we normalize by N_perp only, not by dkz.
+    #
+    # IMPORTANT NORMALIZATION DIFFERENCE:
+    # - 1D/perpendicular spectra: E_k / (N_total * dk) → integrate as ∑E(k)Δk ≈ E_total
+    # - Parallel spectrum: E_parallel / N_perp → integrate as ∑E(k∥)Δk∥ ≈ E_total
+    #   where Δk∥ = 2π/Lz is the parallel wavenumber spacing
+    #
+    # To verify energy conservation: sum(E_parallel) * (2π/Lz) ≈ E_total
     N_perp = grid.Nx * grid.Ny
     E_parallel = E_parallel / N_perp
 
@@ -530,6 +549,7 @@ def plot_state(
 
     if show:
         plt.show()
+        plt.close()  # Close figure after showing to prevent memory leak
     else:
         plt.close()
 
@@ -594,6 +614,7 @@ def plot_energy_history(
 
     if show:
         plt.show()
+        plt.close()  # Close figure after showing to prevent memory leak
     else:
         plt.close()
 
@@ -682,5 +703,6 @@ def plot_energy_spectrum(
 
     if show:
         plt.show()
+        plt.close()  # Close figure after showing to prevent memory leak
     else:
         plt.close()

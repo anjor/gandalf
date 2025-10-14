@@ -162,8 +162,8 @@ def main():
     print("\n" + "-" * 70)
     print("Creating visualizations...")
 
-    # Create output directory
-    output_dir = Path("examples/output")
+    # Create output directory relative to this script's location
+    output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(exist_ok=True)
 
     # Plot 1: Energy history
