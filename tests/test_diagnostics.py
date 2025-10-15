@@ -595,6 +595,18 @@ class TestSpectralPadAndIfft:
         # All errors should be reasonably small (limited by trilinear interpolation)
         assert errors[3] < 0.01, f"Error with 3× padding too large: {errors[3]}"
 
+    def test_grid_too_small_raises(self):
+        """Test that grids smaller than 4 raise ValueError."""
+        import pytest
+        from krmhd.diagnostics import spectral_pad_and_ifft
+
+        # Create a tiny grid (2×2×2) in Fourier space
+        # rfft format: shape is [Nz, Ny, Nx//2+1]
+        tiny_field = jnp.ones((2, 2, 2), dtype=complex)
+
+        with pytest.raises(ValueError, match="Grid too small for spectral padding"):
+            spectral_pad_and_ifft(tiny_field, padding_factor=2)
+
 
 class TestInterpolateOnFineGrid:
     """Test interpolation on spectrally-padded grids."""

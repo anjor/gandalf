@@ -398,6 +398,13 @@ def spectral_pad_and_ifft(
     Nz, Ny, Nx_half = field_fourier.shape
     Nx = (Nx_half - 1) * 2  # Original Nx from rfft format
 
+    # Validate grid size (must be large enough for spectral padding)
+    if Nx < 4 or Ny < 4 or Nz < 4:
+        raise ValueError(
+            f"Grid too small for spectral padding: Nx={Nx}, Ny={Ny}, Nz={Nz}. "
+            f"Minimum size is 4 in each dimension."
+        )
+
     # Calculate padded dimensions
     Nz_pad = Nz * padding_factor
     Ny_pad = Ny * padding_factor
@@ -616,74 +623,34 @@ def compute_magnetic_field_components(
     }
 
 
-def follow_field_line(
-    state: KRMHDState,
+def _follow_field_line_from_B(
+    B_components: Dict[str, Array],
+    grid: 'SpectralGrid3D',
     x0: float,
     y0: float,
     dz: Optional[float] = None,
     padding_factor: int = 2,
 ) -> Array:
     """
-    Follow magnetic field line from (x0, y0, z_min) to (x0, y0, z_max).
+    Internal helper: Follow field line using precomputed B field components.
 
-    Uses RK2 (midpoint method) integration along field line direction b̂ = B/|B|.
-    Interpolation uses spectrally-padded grid for high accuracy.
+    This function performs the actual RK2 integration given precomputed B field
+    components. Used internally by follow_field_line() and plot_field_lines().
 
     Args:
-        state: KRMHD state to compute field lines from
+        B_components: Dict with 'Bx', 'By', 'Bz' arrays on fine grid
+        grid: Spectral grid for domain parameters
         x0, y0: Starting position in perpendicular plane
         dz: Step size in z-direction (default: Lz / (10*Nz))
-        padding_factor: Fine grid resolution multiplier (default: 2)
+        padding_factor: Padding factor used for B_components
 
     Returns:
         trajectory: Array of shape [n_steps, 3] containing (x, y, z) positions
-
-    Algorithm:
-        1. Compute B field components on fine grid (once)
-        2. Initialize position at (x0, y0, -Lz/2)
-        3. RK2 integration:
-           - Predictor: pos_half = pos + 0.5 * ds * b̂(pos)
-           - Corrector: pos_new = pos + ds * b̂(pos_half)
-        4. Continue until z > Lz/2
-        5. Apply periodic boundaries in (x, y)
-
-    Example:
-        >>> traj = follow_field_line(state, x0=np.pi, y0=np.pi)
-        >>> x_traj, y_traj, z_traj = traj[:, 0], traj[:, 1], traj[:, 2]
-
-    Physics:
-        Field line equation: dr/ds = b̂ where b̂ = B/|B|
-
-        In straight field limit (B = B₀ẑ), this gives straight vertical lines.
-        With turbulent δB⊥, field lines wander in (x, y) plane.
-
-        Wandering amplitude: δr⊥ ~ (δB⊥/B₀) × Lz
-
-    Limitations:
-        - Step size uses dz (z-direction) rather than arc length ds along field line
-        - In strong turbulence where Bz → 0, the actual arc length can be much larger
-          than dz, potentially causing accuracy issues or step size limitations
-        - For production use in strong turbulence, consider:
-          * Adaptive step size based on |b̂·ẑ|
-          * Arc-length parameterization: ds = dz/|b̂·ẑ|
-          * Smaller fixed dz for safety (at cost of more steps)
-        - Current implementation uses Python loop (not JIT-optimized)
-          For performance-critical applications, rewrite using jax.lax.scan
-
-    Performance:
-        - One-time cost: Compute B_fine (3 × spectral_pad_and_ifft)
-        - Per-step cost: 3 trilinear interpolations
-        - Typical: 10*Nz steps per field line
-        - For 256³ grid: ~2560 steps, ~7 ms per field line
     """
-    grid = state.grid
-
     # Set default step size
     if dz is None:
         dz = grid.Lz / (10 * grid.Nz)
 
-    # Compute magnetic field on fine grid (expensive, do once)
-    B_components = compute_magnetic_field_components(state, padding_factor)
     Bx_fine = B_components['Bx']
     By_fine = B_components['By']
     Bz_fine = B_components['Bz']
@@ -774,6 +741,79 @@ def follow_field_line(
     trajectory = jnp.array(trajectory_list)
 
     return trajectory
+
+
+def follow_field_line(
+    state: KRMHDState,
+    x0: float,
+    y0: float,
+    dz: Optional[float] = None,
+    padding_factor: int = 2,
+) -> Array:
+    """
+    Follow magnetic field line from (x0, y0, z_min) to (x0, y0, z_max).
+
+    Uses RK2 (midpoint method) integration along field line direction b̂ = B/|B|.
+    Interpolation uses spectrally-padded grid for high accuracy.
+
+    Args:
+        state: KRMHD state to compute field lines from
+        x0, y0: Starting position in perpendicular plane
+        dz: Step size in z-direction (default: Lz / (10*Nz))
+        padding_factor: Fine grid resolution multiplier (default: 2)
+
+    Returns:
+        trajectory: Array of shape [n_steps, 3] containing (x, y, z) positions
+
+    Algorithm:
+        1. Compute B field components on fine grid (once)
+        2. Initialize position at (x0, y0, -Lz/2)
+        3. RK2 integration:
+           - Predictor: pos_half = pos + 0.5 * ds * b̂(pos)
+           - Corrector: pos_new = pos + ds * b̂(pos_half)
+        4. Continue until z > Lz/2
+        5. Apply periodic boundaries in (x, y)
+
+    Example:
+        >>> traj = follow_field_line(state, x0=np.pi, y0=np.pi)
+        >>> x_traj, y_traj, z_traj = traj[:, 0], traj[:, 1], traj[:, 2]
+
+    Physics:
+        Field line equation: dr/ds = b̂ where b̂ = B/|B|
+
+        In straight field limit (B = B₀ẑ), this gives straight vertical lines.
+        With turbulent δB⊥, field lines wander in (x, y) plane.
+
+        Wandering amplitude: δr⊥ ~ (δB⊥/B₀) × Lz
+
+    Limitations:
+        - Step size uses dz (z-direction) rather than arc length ds along field line
+        - In strong turbulence where Bz → 0, the actual arc length can be much larger
+          than dz, potentially causing accuracy issues or step size limitations
+        - For production use in strong turbulence, consider:
+          * Adaptive step size based on |b̂·ẑ|
+          * Arc-length parameterization: ds = dz/|b̂·ẑ|
+          * Smaller fixed dz for safety (at cost of more steps)
+        - Current implementation uses Python loop (not JIT-optimized)
+          For performance-critical applications, rewrite using jax.lax.scan (Issue #61)
+
+    Performance:
+        - One-time cost: Compute B_fine (3 × spectral_pad_and_ifft)
+        - Per-step cost: 3 trilinear interpolations
+        - Typical: 10*Nz steps per field line
+        - For 256³ grid: ~2560 steps, ~7 ms per field line
+
+    Note:
+        For tracing multiple field lines from the same state, consider using
+        plot_field_lines() which computes B once and reuses it for all traces.
+    """
+    # Compute B field components (expensive)
+    B_components = compute_magnetic_field_components(state, padding_factor)
+
+    # Call internal helper to perform integration
+    return _follow_field_line_from_B(
+        B_components, state.grid, x0, y0, dz, padding_factor
+    )
 
 
 # =============================================================================
@@ -1172,10 +1212,10 @@ def plot_field_lines(
         - Strong wandering: Strong turbulence (δB⊥ ~ B₀)
         - Random walk statistics: Field line diffusion
 
-    Performance Note:
-        INEFFICIENCY: Each follow_field_line() call recomputes B field components
-        (3× spectral padding + IFFT). For n_lines=20, this is 60 expensive operations.
-        TODO: Refactor to compute B_components once and pass to all traces (~20× speedup).
+    Performance:
+        Optimized to compute B field components once for all field lines.
+        For n_lines=20: 3 expensive operations instead of 60 (~20× speedup).
+        Uses internal _follow_field_line_from_B() helper with precomputed B.
     """
     grid = state.grid
 
@@ -1188,14 +1228,18 @@ def plot_field_lines(
     ax3d = fig.add_subplot(121, projection='3d')
     ax2d = fig.add_subplot(122)
 
-    # Trace field lines
-    # TODO: Optimize by computing B_components once and passing to all traces
+    # Compute B field components ONCE for all field lines (major performance optimization)
+    B_components = compute_magnetic_field_components(state, padding_factor)
+
+    # Trace field lines using precomputed B components
     for i in range(n_lines):
         x0 = x_starts[i]
         y0 = y_starts[i]
 
-        # NOTE: This recomputes B field for each line (inefficient for n_lines > 1)
-        trajectory = follow_field_line(state, x0, y0, padding_factor=padding_factor)
+        # Use internal helper with precomputed B (n_lines× faster than follow_field_line)
+        trajectory = _follow_field_line_from_B(
+            B_components, state.grid, x0, y0, padding_factor=padding_factor
+        )
 
         # Convert to numpy for plotting
         traj_np = np.array(trajectory)
