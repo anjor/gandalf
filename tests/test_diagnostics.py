@@ -607,6 +607,63 @@ class TestSpectralPadAndIfft:
         with pytest.raises(ValueError, match="Grid too small for spectral padding"):
             spectral_pad_and_ifft(tiny_field, padding_factor=2)
 
+    def test_hermitian_symmetry_preserved(self):
+        """
+        Test that spectral padding preserves reality condition.
+
+        For rfft format starting from a real field:
+        1. Fourier representation implicitly satisfies Hermitian symmetry
+        2. After padding and IFFT, result must remain real (no spurious imaginary components)
+        3. kx=0 and kx=Nyquist planes should be approximately real (within float32 precision)
+
+        This test verifies JAX's irfftn handles Nyquist modes correctly during padding.
+        """
+        from krmhd.diagnostics import spectral_pad_and_ifft
+
+        # Create grid with even dimensions (has Nyquist modes)
+        Nx, Ny, Nz = 16, 16, 16
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+
+        # Start with real field
+        x = jnp.linspace(0, 2*jnp.pi, Nx, endpoint=False)
+        y = jnp.linspace(0, 2*jnp.pi, Ny, endpoint=False)
+        z = jnp.linspace(0, 2*jnp.pi, Nz, endpoint=False)
+        Z, Y, X = jnp.meshgrid(z, y, x, indexing='ij')
+        field_real = jnp.sin(X) * jnp.cos(Y) + jnp.cos(Z)
+
+        # Verify input is real
+        assert jnp.max(jnp.abs(jnp.imag(field_real))) < 1e-10, \
+            "Input field should be real"
+
+        # Transform to Fourier (rfft format: [Nz, Ny, Nx//2+1])
+        field_fourier = jnp.fft.rfftn(field_real)
+
+        # Verify Hermitian symmetry in Fourier space (within float32 precision)
+        # kx=0 plane should be approximately real
+        kx0_plane = field_fourier[:, :, 0]
+        kx0_imag_max = jnp.max(jnp.abs(jnp.imag(kx0_plane)))
+        assert kx0_imag_max < 1e-3, \
+            f"kx=0 plane should be approximately real (float32), got max_imag={kx0_imag_max}"
+
+        # kx=Nyquist plane (last index) should also be approximately real for even Nx
+        kx_nyq_plane = field_fourier[:, :, -1]
+        kx_nyq_imag_max = jnp.max(jnp.abs(jnp.imag(kx_nyq_plane)))
+        assert kx_nyq_imag_max < 1e-3, \
+            f"kx=Nyquist plane should be approximately real (float32), got max_imag={kx_nyq_imag_max}"
+
+        # Pad and transform back
+        field_fine = spectral_pad_and_ifft(field_fourier, padding_factor=2)
+
+        # CRITICAL CHECK: Result should be purely real (no imaginary artifacts from padding)
+        # This is the key guarantee from JAX's irfftn with proper Hermitian input
+        max_imag = jnp.max(jnp.abs(jnp.imag(field_fine)))
+        assert max_imag < 1e-6, \
+            f"Padded field should be real, but has imaginary part: {max_imag}"
+
+        # Verify result dtype is real
+        assert field_fine.dtype == jnp.float32 or field_fine.dtype == jnp.float64, \
+            f"Output should be real-valued array, got dtype={field_fine.dtype}"
+
 
 class TestInterpolateOnFineGrid:
     """Test interpolation on spectrally-padded grids."""
