@@ -357,7 +357,7 @@ The code includes validation against:
 
 ## References
 
-- Original GANDALF code: https://github.com/anjor/gandalf
+- Original GANDALF code: https://github.com/anjor/gandalf-original
 - JAX documentation: https://jax.readthedocs.io/
 - Schekochihin et al. (2009): "Astrophysical Gyrokinetics" (ApJS 182, 310)
 - Kunz et al. (2018): "Kinetic turbulence in pressure-anisotropic plasmas" (JPP 84)
