@@ -2,7 +2,9 @@
 """
 Driven Turbulence Simulation with Forcing
 
-This example demonstrates:
+**For a minimal forcing example (~50 lines, 2s runtime), see forcing_minimal.py**
+
+This comprehensive example demonstrates:
 1. Gaussian white noise forcing at large scales (k ~ 2-5)
 2. Energy injection and steady-state energy balance
 3. Perpendicular cascade transferring energy to small scales

@@ -99,6 +99,30 @@ def _gaussian_white_noise_fourier_jit(
     # k=0 is at [0, 0, 0] in rfft format
     forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
 
+    # CRITICAL: Enforce Hermitian symmetry for rfft format
+    # For real-valued fields in physical space, Fourier coefficients must satisfy:
+    # f(kx, ky, kz) = f*(-kx, -ky, -kz)
+    #
+    # In rfft format (only kx >= 0 stored), special modes must be real:
+    # 1. kx=0 plane: These modes are their own conjugate partners
+    # 2. kx=Nyquist plane (if Nx even): Nyquist frequency must be real
+    #
+    # Without this enforcement, direct Fourier-space operations (like forcing)
+    # can create non-Hermitian fields that violate reality condition.
+
+    # Enforce reality on kx=0 plane (all ky, kz)
+    forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
+
+    # Enforce reality on kx=Nyquist plane (if Nx is even)
+    # For rfft: shape is [Nz, Ny, Nx//2+1]
+    # Nyquist is at index Nx//2 if Nx is even
+    Nx_rfft = forced_field.shape[2]  # This is Nx//2+1
+    if Nx_rfft > 1:  # Have more than just kx=0 mode
+        nyquist_idx = Nx_rfft - 1
+        forced_field = forced_field.at[:, :, nyquist_idx].set(
+            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+        )
+
     return forced_field
 
 
@@ -164,10 +188,12 @@ def gaussian_white_noise_fourier(
 
     # Generate random Gaussian samples
     # Note: Using float32 for stochastic forcing is sufficient because:
-    # 1. Random noise has intrinsic statistical uncertainty >> float32 precision
+    # 1. Random noise has intrinsic statistical uncertainty >> float32 precision (~10⁻⁷)
     # 2. Energy injection rate is time-averaged (individual realizations fluctuate)
-    # 3. Matches grid.kx/ky/kz dtype (float32) for consistent precision
+    # 3. Matches grid.kx/ky/kz dtype (float32) AND state.z_plus dtype (complex64)
+    #    for consistent precision throughout the codebase
     # 4. Reduces memory/compute cost with negligible impact on physics
+    # 5. GANDALF energy conservation (0.0086% error) is not limited by float32
     shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
     real_part = jax.random.normal(subkey1, shape, dtype=jnp.float32)
     imag_part = jax.random.normal(subkey2, shape, dtype=jnp.float32)
@@ -366,7 +392,9 @@ def compute_energy_injection_rate(
     Args:
         state_before: State before forcing was applied
         state_after: State after forcing was applied
-        dt: Timestep (forcing is applied instantaneously, but rate uses dt)
+        dt: Timestep (used ONLY for dimensional conversion: ΔE → ΔE/dt)
+            Note: The physics of forcing is already complete in state_after.
+            This parameter converts energy change to energy *rate* for convenience.
 
     Returns:
         Energy injection rate ε_inj for this realization (can be + or -)

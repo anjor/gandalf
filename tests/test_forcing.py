@@ -22,7 +22,17 @@ from krmhd import (
 
 
 class TestGaussianWhiteNoise:
-    """Test Gaussian white noise generation in Fourier space."""
+    """Test Gaussian white noise generation in Fourier space.
+
+    Note on stochastic test design:
+    - These tests use single seeds for determinism (CI/CD reproducibility)
+    - Tolerances (±10-30%) are empirically chosen to bound typical variance
+    - For more robust validation, consider seed-averaged tests:
+      * Generate 5-10 realizations with different seeds
+      * Check that mean converges to expected value
+      * Example: mean_ratio = np.mean([test_single_seed(i) for i in range(10)])
+    - Production ensemble averaging demonstrated in driven_turbulence.py
+    """
 
     def test_input_validation_k_min_k_max(self):
         """Should raise ValueError if k_min >= k_max."""
@@ -120,8 +130,13 @@ class TestGaussianWhiteNoise:
         # k=0 mode should be exactly zero
         assert noise[0, 0, 0] == 0.0 + 0.0j
 
-    def test_reality_condition(self):
-        """Noise should satisfy reality condition and inverse transform to real field."""
+    def test_reality_condition_kx_zero_plane(self):
+        """kx=0 plane must be real-valued (Hermitian symmetry requirement).
+
+        This is a DIRECT test of Hermitian symmetry enforcement in Fourier space,
+        not relying on irfftn to fix violations. Critical because forcing is applied
+        directly in Fourier space without inverse transform.
+        """
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         key = jax.random.PRNGKey(42)
 
@@ -129,11 +144,35 @@ class TestGaussianWhiteNoise:
             grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
         )
 
-        # For rfft, reality condition requires special constraints
+        # kx=0 plane (index 0 in rfft format) must have zero imaginary part
+        max_imag_kx0 = jnp.max(jnp.abs(noise[:, :, 0].imag))
+        assert max_imag_kx0 < 1e-10, (
+            f"kx=0 plane not real: max(imag) = {max_imag_kx0}. "
+            "Violates Hermitian symmetry required for real fields."
+        )
+
+        # kx=Nyquist plane (if exists) must also have zero imaginary part
+        if grid.Nx % 2 == 0:  # Nyquist frequency exists
+            nyquist_idx = grid.Nx // 2
+            max_imag_nyquist = jnp.max(jnp.abs(noise[:, :, nyquist_idx].imag))
+            assert max_imag_nyquist < 1e-10, (
+                f"kx=Nyquist plane not real: max(imag) = {max_imag_nyquist}. "
+                "Violates Hermitian symmetry."
+            )
+
+    def test_reality_condition_inverse_transform(self):
+        """Inverse transform should give real-valued field (end-to-end test)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        key = jax.random.PRNGKey(42)
+
+        noise, key = gaussian_white_noise_fourier(
+            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+        )
+
         # Shape should be correct for rfft (Nx//2+1 in x-direction)
         assert noise.shape[2] == grid.Nx // 2 + 1
 
-        # CRITICAL TEST: Inverse transform should give real-valued field
+        # Inverse transform should give real-valued field
         from krmhd.spectral import rfftn_inverse
         noise_real = rfftn_inverse(noise, grid.Nz, grid.Ny, grid.Nx)
 
