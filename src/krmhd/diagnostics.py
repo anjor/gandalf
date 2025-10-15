@@ -448,6 +448,11 @@ def spectral_pad_and_ifft(
     # JAX's irfftn normalizes by 1/(Nz_pad * Ny_pad * Nx_pad)
     # But the original forward FFT normalized by 1/(Nz * Ny * Nx)
     # So we need to rescale by (N_pad/N)³ = padding_factor³ to preserve field values
+    #
+    # Note: Hermitian symmetry is automatically preserved by irfftn, which
+    # enforces the conjugate relationship f(-kx,-ky,-kz) = f*(kx,ky,kz).
+    # Since we only copy modes (no modification), and the input has correct
+    # Hermitian symmetry from rfftn, the output is guaranteed to be real.
     field_real_fine = jnp.fft.irfftn(field_padded, s=(Nz_pad, Ny_pad, Nx_pad))
     field_real_fine = field_real_fine * (padding_factor ** 3)
 
@@ -685,7 +690,9 @@ def follow_field_line(
     # Integration loop
     # Note: Can't use jax.lax.while_loop easily because of trajectory accumulation
     # For now, use Python loop (can optimize later with fixed-step scan)
-    n_steps_max = int(jnp.ceil(grid.Lz / dz)) + 10  # Safety margin
+    # Safety margin: +10 steps accounts for field line wandering and numerical rounding
+    # (actual arc length can exceed Lz in strong turbulence where field lines curve)
+    n_steps_max = int(jnp.ceil(grid.Lz / dz)) + 10
 
     for step in range(n_steps_max):
         if pos[2] >= grid.Lz / 2:

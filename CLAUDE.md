@@ -34,6 +34,14 @@ where {f,g} = ẑ·(∇f × ∇g) is the Poisson bracket.
 - Implemented via Hermite representation in v∥ or closure approximation
 - Critical for proper damping at k∥v_te ~ ω
 
+### Normalization Convention
+- **Mean field**: B₀ = 1 in code units (normalized Alfvén velocity v_A = 1)
+- **Magnetic field**: B = B₀ẑ + δB where δB comes from perturbations
+  - Perpendicular: δB⊥ = ∇ × (Ψ ẑ) with Ψ = (z⁺ - z⁻)/2
+  - Parallel: Bz = 1 + δB∥ (state.B_parallel in Fourier space)
+- **Field line following**: Requires full B field, so B₀ must be added in real space
+- **Important**: Never add constants in Fourier space - only k=0 mode is affected!
+
 ## Technical Stack
 
 ### Core Dependencies

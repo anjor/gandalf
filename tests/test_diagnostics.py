@@ -475,7 +475,13 @@ class TestSpectralPadAndIfft:
     """Test spectral interpolation via FFT padding."""
 
     def test_grid_values_match(self):
-        """Test that padded grid matches original at corresponding points."""
+        """
+        Test that padded grid matches original at corresponding points.
+
+        This verifies that the padding_factor³ rescaling in spectral_pad_and_ifft
+        is correct - padding should interpolate smoothly without changing values
+        at the original grid points.
+        """
         grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
 
         # Create a smooth known function in real space
@@ -539,6 +545,55 @@ class TestSpectralPadAndIfft:
         # Check accuracy (tolerance for float32 precision)
         max_error = jnp.max(jnp.abs(field_fine - expected))
         assert max_error < 1e-6, f"Interpolation error too large: {max_error}"
+
+    def test_convergence_with_padding_factor(self):
+        """
+        Test that interpolation accuracy improves with increasing padding_factor.
+
+        For smooth functions, spectral interpolation should give exponential
+        convergence (limited by float32 precision).
+        """
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+
+        # Create smooth function with known values everywhere
+        x = jnp.linspace(0, 2*jnp.pi, 16, endpoint=False)
+        y = jnp.linspace(0, 2*jnp.pi, 16, endpoint=False)
+        z = jnp.linspace(0, 2*jnp.pi, 16, endpoint=False)
+        X, Y, Z = jnp.meshgrid(x, y, z, indexing='ij')
+        field_real = jnp.sin(X) * jnp.cos(Y) * jnp.sin(Z)
+        field_fourier = jnp.fft.rfftn(field_real)
+
+        # Test at arbitrary points (not on grid)
+        test_points = [
+            jnp.array([1.5, 2.3, 3.7]),
+            jnp.array([0.7, 4.2, 1.1]),
+            jnp.array([5.1, 3.8, 2.9]),
+        ]
+
+        errors = {}
+        for padding in [1, 2, 3]:
+            field_fine = spectral_pad_and_ifft(field_fourier, padding_factor=padding)
+
+            # Test interpolation at each point
+            max_err = 0.0
+            for pos in test_points:
+                from krmhd.diagnostics import interpolate_on_fine_grid
+                value = interpolate_on_fine_grid(
+                    field_fine, pos, grid.Lx, grid.Ly, grid.Lz, padding_factor=padding
+                )
+                expected = jnp.sin(pos[0]) * jnp.cos(pos[1]) * jnp.sin(pos[2])
+                err = float(jnp.abs(value - expected))
+                max_err = max(max_err, err)
+
+            errors[padding] = max_err
+
+        # Errors should decrease with padding (spectral convergence)
+        # Note: Trilinear interpolation adds O(h²) error, limiting absolute accuracy
+        assert errors[2] < errors[1], f"Error should decrease: {errors[1]} -> {errors[2]}"
+        assert errors[3] < errors[2], f"Error should decrease: {errors[2]} -> {errors[3]}"
+
+        # All errors should be reasonably small (limited by trilinear interpolation)
+        assert errors[3] < 0.01, f"Error with 3× padding too large: {errors[3]}"
 
 
 class TestInterpolateOnFineGrid:
