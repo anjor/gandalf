@@ -42,6 +42,8 @@ References:
 from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass, field
 from functools import partial
+import warnings
+
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -55,6 +57,20 @@ from krmhd.spectral import (
     derivative_x,
     derivative_y,
 )
+
+
+# =============================================================================
+# Constants for Field Line Following
+# =============================================================================
+
+# Minimum magnetic field magnitude for direction calculation
+# Below this, default to z-direction (mean field B₀)
+B_MAGNITUDE_MIN = 1e-8
+
+# Safety factor for maximum integration steps
+# Multiplicative margin: allows field lines up to N× longer than straight path
+# In strong turbulence (Bz → 0), arc length can be >> Lz due to spiraling
+FIELD_LINE_SAFETY_FACTOR = 10
 
 
 # =============================================================================
@@ -669,8 +685,7 @@ def _follow_field_line_from_B(
     # CRITICAL: Safety margin must be multiplicative, not additive!
     # In strong turbulence (Bz → 0), field lines can spiral extensively in (x,y)
     # with minimal z-progress. Arc length can be >> Lz.
-    # Factor of 10 allows for field lines up to 10× longer than straight path.
-    n_steps_max = int(jnp.ceil(grid.Lz / dz)) * 10
+    n_steps_max = int(jnp.ceil(grid.Lz / dz)) * FIELD_LINE_SAFETY_FACTOR
 
     for step in range(n_steps_max):
         if pos[2] >= grid.Lz / 2:
@@ -687,7 +702,7 @@ def _follow_field_line_from_B(
         # Avoid division by zero: if |B| is very small, use z-direction (mean field)
         # This handles magnetic null points gracefully
         b_hat = jnp.where(
-            B_magnitude > 1e-8,
+            B_magnitude > B_MAGNITUDE_MIN,
             B / B_magnitude,
             jnp.array([0.0, 0.0, 1.0])  # Default to z-direction
         )
@@ -709,7 +724,7 @@ def _follow_field_line_from_B(
 
         # Avoid division by zero at midpoint
         b_hat_half = jnp.where(
-            B_half_magnitude > 1e-8,
+            B_half_magnitude > B_MAGNITUDE_MIN,
             B_half / B_half_magnitude,
             jnp.array([0.0, 0.0, 1.0])  # Default to z-direction
         )
@@ -726,7 +741,6 @@ def _follow_field_line_from_B(
 
     # Check for incomplete trajectory (hit step limit before reaching z_max)
     if pos[2] < grid.Lz / 2:
-        import warnings
         warnings.warn(
             f"Field line integration incomplete: stopped at z={float(pos[2]):.3f} "
             f"< z_max={grid.Lz/2:.3f} after {n_steps_max} steps. "
@@ -787,15 +801,19 @@ def follow_field_line(
         Wandering amplitude: δr⊥ ~ (δB⊥/B₀) × Lz
 
     Limitations:
-        - Step size uses dz (z-direction) rather than arc length ds along field line
-        - In strong turbulence where Bz → 0, the actual arc length can be much larger
-          than dz, potentially causing accuracy issues or step size limitations
-        - For production use in strong turbulence, consider:
-          * Adaptive step size based on |b̂·ẑ|
-          * Arc-length parameterization: ds = dz/|b̂·ẑ|
-          * Smaller fixed dz for safety (at cost of more steps)
-        - Current implementation uses Python loop (not JIT-optimized)
-          For performance-critical applications, rewrite using jax.lax.scan (Issue #61)
+        1. **Step size (IMPORTANT for strong turbulence):**
+           - Uses fixed dz in z-direction, not adaptive arc-length ds
+           - When Bz → 0, field lines spiral with minimal z-progress
+           - Current safety factor (10×) may fail in extreme turbulence
+           - **Recommended for production:** Adaptive step size
+             ds = dz / max(|b̂_z|, 0.1) to account for field line direction
+           - Alternative: Smaller fixed dz (more steps but safer)
+
+        2. **Performance:**
+           - Uses Python loop (not JIT-compiled)
+           - ~100× slower than JAX-native implementation
+           - **For production:** Rewrite using jax.lax.scan (Issue #61)
+           - Expected speedup: 10-100× with JIT compilation
 
     Performance:
         - One-time cost: Compute B_fine (3 × spectral_pad_and_ifft)
