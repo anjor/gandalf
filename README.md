@@ -126,21 +126,60 @@ krmhd/
 │   ├── physics.py      # ✅ KRMHD state, Poisson brackets, Elsasser RHS, Hermite RHS
 │   ├── timestepping.py # ✅ GANDALF integrating factor + RK2 timestepper
 │   ├── diagnostics.py  # ✅ Energy spectra (1D, k⊥, k∥), history, visualization
-│   ├── forcing.py      # Turbulence forcing (TODO)
+│   ├── forcing.py      # ✅ Gaussian white noise forcing for driven turbulence
 │   ├── io.py          # HDF5 checkpointing (TODO)
 │   └── validation.py   # Linear physics tests (TODO)
-├── tests/             # Test suite (191 tests)
+├── tests/             # Test suite (222 tests)
 ├── examples/          # Example scripts and tutorials
-│   ├── decaying_turbulence.py  # ✅ Turbulent cascade with diagnostics
-│   └── orszag_tang.py          # ✅ Orszag-Tang vortex benchmark
+│   ├── decaying_turbulence.py   # ✅ Turbulent cascade with diagnostics
+│   ├── driven_turbulence.py     # ✅ Forced turbulence with steady-state balance
+│   ├── forcing_minimal.py       # ✅ Minimal forcing example (50 lines)
+│   └── orszag_tang.py           # ✅ Orszag-Tang vortex benchmark
 └── pyproject.toml     # Project metadata
 ```
 
 ## Quick Start: Running Examples
 
-### Example 1: Decaying Turbulence Simulation
+### Example 1: Minimal Forcing Example
 
-The `examples/decaying_turbulence.py` script demonstrates a complete KRMHD workflow:
+The `examples/forcing_minimal.py` script shows basic forcing usage (~50 lines):
+
+```bash
+# Run the minimal example (takes ~2 seconds on M1 Pro)
+uv run python examples/forcing_minimal.py
+```
+
+**What it does:**
+1. Initializes a simple Alfvén wave
+2. Applies forcing at large scales (k ~ 2-5)
+3. Evolves 10 timesteps with forcing + dissipation
+4. Prints energy and injection rate at each step
+
+**Perfect for:** Learning the forcing API basics before diving into comprehensive examples.
+
+### Example 2: Driven Turbulence Simulation
+
+The `examples/driven_turbulence.py` script demonstrates forced turbulence (~317 lines):
+
+```bash
+# Run the driven turbulence example (takes ~20 seconds on M1 Pro)
+uv run python examples/driven_turbulence.py
+```
+
+**What it does:**
+1. Applies Gaussian white noise forcing at large scales (k ~ 2-5)
+2. Evolves 200 timesteps to approach steady state
+3. Tracks energy injection rate and energy balance
+4. Computes energy spectra showing inertial range
+5. Generates publication-ready plots
+
+**Output files** (saved to `examples/output/`):
+- `driven_energy_history.png` - Energy evolution and magnetic fraction
+- `driven_energy_spectra.png` - E(k), E(k⊥), E(k∥) with forcing band highlighted
+
+### Example 3: Decaying Turbulence Simulation
+
+The `examples/decaying_turbulence.py` script demonstrates unforced turbulent decay:
 
 ```bash
 # Run the example (takes ~1-2 minutes on M1 Pro)
@@ -150,16 +189,16 @@ uv run python examples/decaying_turbulence.py
 **What it does:**
 1. Initializes a turbulent k^(-5/3) spectrum (Kolmogorov)
 2. Evolves 100 timesteps using GANDALF integrator
-3. Tracks energy history E(t)
+3. Tracks energy history E(t) showing exponential decay
 4. Computes energy spectra E(k), E(k⊥), E(k∥)
-5. Generates publication-ready plots
+5. Demonstrates selective decay (magnetic energy dominates)
 
 **Output files** (saved to `examples/output/`):
 - `energy_history.png` - Energy evolution showing selective decay
 - `final_state.png` - 2D slices of φ and A∥ fields
 - `energy_spectra.png` - Three-panel plot with 1D, perpendicular, and parallel spectra
 
-### Example 2: Orszag-Tang Vortex
+### Example 4: Orszag-Tang Vortex
 
 The `examples/orszag_tang.py` script runs a classic nonlinear MHD benchmark:
 
@@ -187,19 +226,25 @@ uv run python scripts/plot_energy_evolution.py
 
 This creates a plot showing Total, Kinetic, and Magnetic energy vs. time (normalized by Alfvén crossing time τ_A = L/v_A), matching the style of thesis Figure 2.1.
 
-### Example 3: Custom Simulation
+### Example 5: Custom Simulation with Forcing
 
 ```python
+import jax
 from krmhd import (
     SpectralGrid3D,
     initialize_random_spectrum,
     gandalf_step,
     compute_cfl_timestep,
+    force_alfven_modes,
+    compute_energy_injection_rate,
     EnergyHistory,
     energy_spectrum_perpendicular,
     plot_energy_history,
     plot_state,
 )
+
+# Initialize JAX random key for forcing
+key = jax.random.PRNGKey(42)
 
 # 1. Initialize grid and state
 grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
@@ -215,18 +260,30 @@ state = initialize_random_spectrum(
 # 2. Set up energy tracking
 history = EnergyHistory()
 
-# 3. Time evolution loop
+# 3. Time evolution loop with forcing
+dt = 0.01
 for step in range(100):
-    # Record energy
+    # Record energy before forcing
     history.append(state)
 
-    # Compute adaptive timestep
-    dt = compute_cfl_timestep(state, v_A=1.0, cfl_safety=0.3)
+    # Apply forcing at large scales
+    state_before = state
+    state, key = force_alfven_modes(
+        state,
+        amplitude=0.3,
+        k_min=2.0,
+        k_max=5.0,
+        dt=dt,
+        key=key
+    )
 
-    # Advance one timestep
+    # Measure energy injection
+    eps_inj = compute_energy_injection_rate(state_before, state, dt)
+
+    # Advance one timestep (cascade + dissipation)
     state = gandalf_step(state, dt, eta=0.01, v_A=1.0)
 
-    print(f"Step {step}: t={state.time:.3f}, E={history.E_total[-1]:.3e}")
+    print(f"Step {step}: t={state.time:.3f}, E={history.E_total[-1]:.3e}, ε_inj={eps_inj:.2e}")
 
 # 4. Analyze and visualize
 k_perp, E_perp = energy_spectrum_perpendicular(state)
@@ -343,17 +400,28 @@ The code includes validation against:
   - EnergyHistory for tracking E(t), magnetic fraction, dissipation rate
   - Visualization functions: plot_state(), plot_energy_history(), plot_energy_spectrum()
   - Examples: decaying_turbulence.py and orszag_tang.py demonstrate full workflow
+- **Forcing mechanisms** (Issue #29): Gaussian white noise forcing for driven turbulence
+  - gaussian_white_noise_fourier(): Band-limited stochastic forcing
+  - force_alfven_modes(): Forces z⁺=z⁻ identically (drives u⊥ only, not B⊥)
+  - force_slow_modes(): Independent forcing for δB∥
+  - compute_energy_injection_rate(): Energy diagnostics for balance validation
+  - Hermitian symmetry enforcement for rfft format (critical for direct Fourier operations)
 - **Validation examples** (Issues #11-12): Physics benchmarks
   - Orszag-Tang vortex: Nonlinear dynamics and current sheet formation
   - Decaying turbulence: Spectral cascade and selective decay
-  - Both with comprehensive diagnostics and visualization
+  - Driven turbulence: Forced steady-state with energy balance (ε_inj ≈ ε_diss)
+  - Minimal forcing: 50-line example showing basic forcing workflow
+  - All with comprehensive diagnostics and visualization
 
-**Test Coverage:** 191 passing tests across all modules
+**Test Coverage:** 222 passing tests across all modules (194 core + 28 forcing)
+
+### In Progress 🚧
+- **Extended validation** (Issues #10, #27): Kinetic Alfven waves, Landau damping, FDT validation
+  - Issue #27 (Kinetic FDT validation) now unblocked by forcing implementation
+- **Advanced diagnostics** (Issues #25-26): Field line following, phase mixing analysis
 
 ### Planned 📋
-- **Extended validation** (Issues #10, #27): Kinetic Alfven waves, Landau damping, FDT validation
-- **Advanced diagnostics** (Issues #25-26): Field line following, phase mixing analysis
-- **Production features** (Issues #13-15, #28-30): HDF5 I/O, forcing, hyper-dissipation, configuration files
+- **Production features** (Issues #13, #15, #28, #30): HDF5 I/O, hyper-dissipation, configuration files
 
 ## References
 

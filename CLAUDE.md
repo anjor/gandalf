@@ -65,11 +65,13 @@ krmhd/
 ├── timestepping.py  # ✅ COMPLETE: GANDALF integrating factor + RK2 timestepper (includes collisions)
 ├── hermite.py       # ✅ COMPLETE: Hermite basis for kinetic physics
 ├── diagnostics.py   # ✅ COMPLETE: Energy spectra (1D, k⊥, k∥), history, visualization
-├── forcing.py       # Gaussian white noise forcing (Issue #29)
+├── forcing.py       # ✅ COMPLETE: Gaussian white noise forcing, energy injection diagnostics (Issue #29)
 ├── io.py           # HDF5 checkpointing (Issue #13)
 └── validation.py    # Linear physics tests (Issue #10)
 
 examples/
+├── forcing_minimal.py      # ✅ COMPLETE: Minimal forcing example (~50 lines, 2s runtime)
+├── driven_turbulence.py    # ✅ COMPLETE: Comprehensive driven turbulence with forcing (317 lines, 20s runtime)
 ├── decaying_turbulence.py  # ✅ COMPLETE: Turbulent cascade with diagnostics (Issue #12)
 └── orszag_tang.py          # ✅ COMPLETE: Orszag-Tang vortex benchmark (Issue #11)
 ```
@@ -142,8 +144,11 @@ checkpoints to return to.
 3. **Parallel gradient**: ∇∥ = ik∥ only valid for periodic boundary conditions
 4. **Initial conditions**: Must satisfy ∇·B = 0 and reality conditions
 5. **Slow mode coupling**: Any back-reaction indicates coding error
+6. **Hermitian symmetry in forcing**: When adding forcing directly in Fourier space, must explicitly enforce reality on kx=0 and kx=Nyquist planes (rfft format requirement). JAX's irfftn doesn't get called to fix violations automatically.
 
 ## Current Development Status
+
+**Test Coverage:** 222 passing tests across all modules (194 core + 28 forcing)
 
 ### Completed (Issues #1-3, #21)
 - [x] Basic spectral infrastructure (2D/3D, Issue #2)
@@ -230,6 +235,18 @@ checkpoints to return to.
   - Hermite moment flux: Γₘ,ₖ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ]
   - Phase mixing/unmixing spectrum decomposition
 
+### Forcing Mechanisms (Issue #29) ✅ COMPLETE
+- [x] Gaussian white noise forcing (Issue #29) ✅
+  - gaussian_white_noise_fourier(): Band-limited stochastic forcing with δ-correlated time statistics
+  - force_alfven_modes(): Forces z⁺=z⁻ identically (drives u⊥ only, not B⊥)
+  - force_slow_modes(): Independent forcing for δB∥
+  - compute_energy_injection_rate(): Energy diagnostics for balance validation
+  - **Critical physics**: z⁺=z⁻ forcing drives φ (flow) only, prevents spurious magnetic reconnection
+  - **Hermitian symmetry**: Explicit enforcement for rfft format (kx=0 and kx=Nyquist planes must be real)
+  - **White noise scaling**: amplitude/√dt for time-independent energy injection
+  - 28 comprehensive tests: reality condition, Hermitian symmetry, energy injection, input validation
+  - Examples: forcing_minimal.py (50 lines, 2s) and driven_turbulence.py (317 lines, 20s)
+
 ### Validation (Issues #10-12, #27)
 - [x] Linear physics tests (Issue #10, partial) ✅
   - Alfvén wave dispersion tests (test_physics.py:1498)
@@ -248,12 +265,12 @@ checkpoints to return to.
   - Spectrum analysis with visualization
 - [ ] Kinetic FDT validation (Issue #27)
   - Critical validation against analytical Vlasov theory
-  - Requires forcing (Issue #29) and phase mixing diagnostics (Issue #26)
+  - **Unblocked**: Forcing (Issue #29) now complete ✅
+  - Still requires: Phase mixing diagnostics (Issue #26)
 
-### Production Features (Issues #13-15, #28-30)
+### Production Features (Issues #13-15, #28, #30)
 - [ ] HDF5 I/O (Issue #13)
 - [ ] Hyper-dissipation (Issue #28)
-- [ ] Forcing mechanisms (Issue #29)
 - [ ] Integrating factor timestepper (Issue #30, optional)
 - [ ] Configuration files and run scripts (Issue #15)
 
