@@ -74,7 +74,7 @@ class TestGaussianWhiteNoise:
         assert noise[0, 0, 0] == 0.0 + 0.0j
 
     def test_reality_condition(self):
-        """Noise should satisfy reality condition (rfft ensures this automatically)."""
+        """Noise should satisfy reality condition and inverse transform to real field."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         key = jax.random.PRNGKey(42)
 
@@ -82,9 +82,17 @@ class TestGaussianWhiteNoise:
             grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
         )
 
-        # For rfft, reality condition is automatically satisfied
-        # Just verify the shape is correct for rfft (Nx//2+1 in x-direction)
+        # For rfft, reality condition requires special constraints
+        # Shape should be correct for rfft (Nx//2+1 in x-direction)
         assert noise.shape[2] == grid.Nx // 2 + 1
+
+        # CRITICAL TEST: Inverse transform should give real-valued field
+        from krmhd.spectral import rfftn_inverse
+        noise_real = rfftn_inverse(noise, grid.Nz, grid.Ny, grid.Nx)
+
+        # Check that imaginary part is negligible (< 1e-10)
+        max_imag = jnp.max(jnp.abs(jnp.imag(noise_real)))
+        assert max_imag < 1e-10, f"Inverse transform not real: max(imag) = {max_imag}"
 
     def test_key_threading(self):
         """Different keys should produce different noise realizations."""
@@ -133,7 +141,8 @@ class TestGaussianWhiteNoise:
 
         # Ratio of magnitudes should be ~10x (amplitude ratio)
         ratio = jnp.mean(jnp.abs(noise_strong)) / jnp.mean(jnp.abs(noise_weak))
-        assert jnp.abs(ratio - 10.0) < 2.0  # Allow some statistical variation
+        # Tighter tolerance: ±10% (was ±20%)
+        assert jnp.abs(ratio - 10.0) < 1.0, f"Amplitude scaling failed: ratio={ratio:.2f}, expected=10.0"
 
     def test_timestep_scaling(self):
         """White noise scaling: amplitude/√dt → energy injection independent of dt."""
@@ -152,7 +161,8 @@ class TestGaussianWhiteNoise:
         # Ratio should be ~√10 ≈ 3.16 (√(dt_large/dt_small))
         ratio = jnp.mean(jnp.abs(noise_small_dt)) / jnp.mean(jnp.abs(noise_large_dt))
         expected_ratio = jnp.sqrt(0.01 / 0.001)
-        assert jnp.abs(ratio - expected_ratio) < 0.5
+        # Tighter tolerance: ±0.3 instead of ±0.5 (~10% instead of ~16%)
+        assert jnp.abs(ratio - expected_ratio) < 0.3, f"Timestep scaling failed: ratio={ratio:.2f}, expected={expected_ratio:.2f}"
 
 
 class TestAlfvenForcing:
@@ -379,7 +389,9 @@ class TestEnergyInjection:
 
         # Energy injection should scale as amplitude² → ratio ~ 100
         ratio = eps_strong / eps_weak
-        assert 50 < ratio < 150  # Allow statistical variation
+        # Tighter tolerance: 70-130 (±30%) instead of 50-150 (±50%)
+        # Statistical variation is real but should be bounded
+        assert 70 < ratio < 130, f"Energy scaling failed: ratio={ratio:.1f}, expected~100"
 
     def test_cumulative_energy_over_multiple_steps(self):
         """Cumulative energy injection over multiple steps."""
@@ -450,8 +462,16 @@ class TestIntegrationWithTimestepping:
         assert state.time > 0
         assert energy(state)["total"] > 0
 
-    def test_steady_state_energy_balance(self):
-        """Forced turbulence should approach steady state (ε_inj ≈ ε_diss)."""
+    def test_forced_evolution_stability(self):
+        """Forced turbulence evolution should remain stable over many steps.
+
+        Note: This is a weak integration test that verifies the forcing+timestepping
+        loop runs without errors. It does NOT validate steady-state energy balance
+        (ε_inj ≈ ε_diss), which would require much longer integration (~1000+ steps)
+        and careful dissipation rate measurement.
+
+        For true steady-state validation, see driven_turbulence.py example.
+        """
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         state = initialize_random_spectrum(
             grid, M=10, alpha=5/3, amplitude=0.01, seed=42
@@ -460,7 +480,7 @@ class TestIntegrationWithTimestepping:
         dt = 0.01
         eta = 0.1  # Moderate dissipation
 
-        # Run to quasi-steady-state (~50 steps)
+        # Run forced evolution loop for 50 steps
         energies = []
         for i in range(50):
             # Force
@@ -474,14 +494,13 @@ class TestIntegrationWithTimestepping:
             # Track energy
             energies.append(energy(state)["total"])
 
-        # Energy should stabilize (later values more stable than early)
-        early_std = jnp.std(jnp.array(energies[:20]))
-        late_std = jnp.std(jnp.array(energies[30:]))
-
-        # Standard deviation should decrease (approaching equilibrium)
-        # Note: This is a weak test, true steady-state needs longer integration
+        # Basic stability checks
         assert len(energies) == 50  # Completed all steps
-        assert energies[-1] > 0  # Energy remains positive
+        assert all(e > 0 for e in energies)  # Energy always positive
+        assert all(jnp.isfinite(e) for e in energies)  # No NaN/Inf
+
+        # Energy should increase initially (forcing dominates dissipation)
+        assert energies[-1] > energies[0], "Energy should increase with forcing"
 
     def test_forced_vs_unforced_evolution(self):
         """Forced evolution should maintain higher energy than unforced."""

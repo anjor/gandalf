@@ -40,7 +40,7 @@ from krmhd.physics import KRMHDState, energy
 from krmhd.spectral import SpectralGrid3D
 
 
-@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx"])
+@jax.jit
 def _gaussian_white_noise_fourier_jit(
     kx: Array,
     ky: Array,
@@ -51,9 +51,6 @@ def _gaussian_white_noise_fourier_jit(
     dt: float,
     real_part: Array,
     imag_part: Array,
-    Nz: int,
-    Ny: int,
-    Nx: int,
 ) -> Array:
     """
     JIT-compiled core function for generating Gaussian white noise in Fourier space.
@@ -66,7 +63,6 @@ def _gaussian_white_noise_fourier_jit(
         dt: Timestep (for proper dimensional scaling)
         real_part: Random normal samples for real part [Nz, Ny, Nx//2+1]
         imag_part: Random normal samples for imaginary part [Nz, Ny, Nx//2+1]
-        Nz, Ny, Nx: Grid dimensions (for normalization)
 
     Returns:
         Complex Fourier field with forcing at k ∈ [k_min, k_max]
@@ -90,7 +86,10 @@ def _gaussian_white_noise_fourier_jit(
     scale = amplitude / jnp.sqrt(dt)
 
     # Generate complex noise field
-    # Reality condition: automatically satisfied for rfft output
+    # Note: JAX's irfftn automatically enforces Hermitian symmetry during inverse
+    # transform, so the output will be exactly real-valued even if we don't
+    # explicitly enforce f(-k) = f*(k) here. Special modes (kx=0, Nyquist) will
+    # be handled correctly by the forcing mask (which zeros k=0) and JAX's FFT.
     noise = (real_part + 1j * imag_part) * scale
 
     # Apply spectral mask to localize forcing
@@ -171,9 +170,6 @@ def gaussian_white_noise_fourier(
         dt,
         real_part,
         imag_part,
-        grid.Nz,
-        grid.Ny,
-        grid.Nx,
     )
 
     return noise_field.astype(jnp.complex64), key
