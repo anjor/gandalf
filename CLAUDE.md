@@ -228,12 +228,18 @@ checkpoints to return to.
   - Visualization: plot_state(), plot_energy_history(), plot_energy_spectrum()
   - Examples: decaying_turbulence.py and orszag_tang.py demonstrate full workflow
   - 23 comprehensive tests: normalization, single modes, zero states
-- [ ] Field line following - k∥ spectra (Issue #25)
-  - True k∥ along curved field lines (bˆ·∇ = ∂/∂z + {Ψ,...})
-  - Current implementation uses simple kz-based spectrum
+- [x] Field line following - k∥ spectra (Issue #25, partial) ✅
+  - **Infrastructure complete**: Spectral interpolation via FFT padding (2× resolution)
+  - follow_field_line(): RK2 integration with spectral-accurate interpolation
+  - compute_magnetic_field_components(): B = (Bx, By, Bz) on fine grid
+  - plot_field_lines(): 3D visualization of field line wandering
+  - Example: field_line_visualization.py demonstrates all functionality
+  - **Key improvement**: Spectral interpolation (vs bilinear in original GANDALF)
+  - **TODO**: True k∥ spectrum via FFT along curved field lines (deferred)
 - [ ] Phase mixing diagnostics (Issue #26)
   - Hermite moment flux: Γₘ,ₖ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ]
   - Phase mixing/unmixing spectrum decomposition
+  - **Unblocked**: Field line infrastructure now available
 
 ### Forcing Mechanisms (Issue #29) ✅ COMPLETE
 - [x] Gaussian white noise forcing (Issue #29) ✅
