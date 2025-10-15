@@ -151,10 +151,23 @@ def gaussian_white_noise_fourier(
 
         Energy injection rate: ε_inj = amplitude² × N_modes (independent of dt)
     """
+    # Input validation
+    if k_min >= k_max:
+        raise ValueError(f"k_min must be < k_max, got k_min={k_min}, k_max={k_max}")
+    if amplitude <= 0:
+        raise ValueError(f"amplitude must be positive, got {amplitude}")
+    if dt <= 0:
+        raise ValueError(f"dt must be positive, got {dt}")
+
     # Split key for real and imaginary parts
     key, subkey1, subkey2 = jax.random.split(key, 3)
 
     # Generate random Gaussian samples
+    # Note: Using float32 for stochastic forcing is sufficient because:
+    # 1. Random noise has intrinsic statistical uncertainty >> float32 precision
+    # 2. Energy injection rate is time-averaged (individual realizations fluctuate)
+    # 3. Matches grid.kx/ky/kz dtype (float32) for consistent precision
+    # 4. Reduces memory/compute cost with negligible impact on physics
     shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
     real_part = jax.random.normal(subkey1, shape, dtype=jnp.float32)
     imag_part = jax.random.normal(subkey2, shape, dtype=jnp.float32)
@@ -228,6 +241,10 @@ def force_alfven_modes(
         This is the standard method for driving MHD turbulence without
         artificial reconnection (Elenbaas+ 2008, Schekochihin+ 2009).
     """
+    # Input validation (gaussian_white_noise_fourier validates k_min, k_max, dt)
+    if amplitude <= 0:
+        raise ValueError(f"amplitude must be positive, got {amplitude}")
+
     # Generate single forcing field
     forcing, key = gaussian_white_noise_fourier(
         state.grid, amplitude, k_min, k_max, dt, key
@@ -297,6 +314,10 @@ def force_slow_modes(
         The forcing F_slow is uncorrelated with Alfvén forcing and allows
         studying passive scalar advection, intermittency, and compressive effects.
     """
+    # Input validation (gaussian_white_noise_fourier validates k_min, k_max, dt)
+    if amplitude <= 0:
+        raise ValueError(f"amplitude must be positive, got {amplitude}")
+
     # Generate forcing field for B∥
     forcing, key = gaussian_white_noise_fourier(
         state.grid, amplitude, k_min, k_max, dt, key
@@ -329,12 +350,18 @@ def compute_energy_injection_rate(
     dt: float,
 ) -> float:
     """
-    Compute energy injection rate from forcing.
+    Compute instantaneous energy injection rate from forcing.
 
     This measures the rate at which forcing adds energy to the system:
     ε_inj = (E_after - E_before) / dt
 
-    In steady-state driven turbulence, ε_inj ≈ ε_diss (energy balance).
+    **Important:** This is an INSTANTANEOUS measurement for a single forcing
+    realization. For steady-state energy balance validation (ε_inj ≈ ε_diss),
+    TIME-AVERAGE over many forcing realizations:
+
+        ⟨ε_inj⟩ = (1/T) ∫₀ᵀ ε_inj(t) dt
+
+    Individual realizations have O(1) variance due to stochastic forcing.
 
     Args:
         state_before: State before forcing was applied
@@ -342,21 +369,38 @@ def compute_energy_injection_rate(
         dt: Timestep (forcing is applied instantaneously, but rate uses dt)
 
     Returns:
-        Energy injection rate ε_inj (positive if forcing adds energy)
+        Energy injection rate ε_inj for this realization (can be + or -)
 
     Example:
         >>> key = jax.random.PRNGKey(42)
+        >>> # Single realization (fluctuates)
         >>> state_old = state
         >>> state_new, key = force_alfven_modes(state, 0.1, 2.0, 5.0, dt, key)
         >>> eps_inj = compute_energy_injection_rate(state_old, state_new, dt)
-        >>> print(f"Energy injection: {eps_inj:.3e}")
+        >>> print(f"Instantaneous: {eps_inj:.3e}")
+        >>>
+        >>> # Time-averaged (steady-state validation)
+        >>> eps_inj_list = []
+        >>> for i in range(100):
+        ...     state_old = state
+        ...     state, key = force_alfven_modes(state, 0.1, 2.0, 5.0, dt, key)
+        ...     eps_inj_list.append(compute_energy_injection_rate(state_old, state, dt))
+        ...     state = gandalf_step(state, dt, eta=0.01, v_A=1.0)
+        >>> eps_inj_avg = np.mean(eps_inj_list)
+        >>> print(f"Time-averaged: {eps_inj_avg:.3e}")
 
     Physics:
         For white noise forcing with amplitude A at N_modes:
-        ⟨ε_inj⟩ ≈ A² × N_modes (time-averaged)
+        ⟨ε_inj⟩ ≈ A² × N_modes (time-averaged expectation value)
 
-        Individual realizations fluctuate around this mean value.
+        Individual realizations fluctuate: ε_inj(t) = ⟨ε_inj⟩ ± O(⟨ε_inj⟩)
+
+        In steady state: ⟨ε_inj⟩ = ⟨ε_diss⟩ (energy balance)
     """
+    # Input validation
+    if dt <= 0:
+        raise ValueError(f"dt must be positive, got {dt}")
+
     # Compute total energies before and after forcing
     energy_before = energy(state_before)["total"]
     energy_after = energy(state_after)["total"]

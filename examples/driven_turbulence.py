@@ -20,7 +20,7 @@ Expected results:
     - Inertial range spectrum between forcing and dissipation scales
     - Energy injection rate measurable and positive
 
-Runtime: ~2-3 minutes on M1 Pro for 64³ resolution
+Runtime: ~20s on M1 Pro for 64×64×32 resolution @ 200 steps
 """
 
 import time
@@ -174,7 +174,7 @@ def main():
 
     print(f"\n✓ Completed {n_steps} timesteps")
     print(f"  Runtime: {elapsed_time:.1f} seconds ({elapsed_time/60:.2f} minutes)")
-    print(f"  (Estimated ~2-3 minutes on M1 Pro for 64³ resolution)")
+    print(f"  (Estimated ~20s on M1 Pro for 64×64×32 @ 200 steps)")
 
     # ==========================================================================
     # Final Diagnostics

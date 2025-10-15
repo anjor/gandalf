@@ -24,6 +24,53 @@ from krmhd import (
 class TestGaussianWhiteNoise:
     """Test Gaussian white noise generation in Fourier space."""
 
+    def test_input_validation_k_min_k_max(self):
+        """Should raise ValueError if k_min >= k_max."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        key = jax.random.PRNGKey(42)
+
+        # k_min > k_max should fail
+        with pytest.raises(ValueError, match="k_min must be < k_max"):
+            gaussian_white_noise_fourier(
+                grid, amplitude=0.1, k_min=5.0, k_max=2.0, dt=0.01, key=key
+            )
+
+        # k_min == k_max should fail
+        with pytest.raises(ValueError, match="k_min must be < k_max"):
+            gaussian_white_noise_fourier(
+                grid, amplitude=0.1, k_min=2.0, k_max=2.0, dt=0.01, key=key
+            )
+
+    def test_input_validation_amplitude(self):
+        """Should raise ValueError if amplitude <= 0."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        key = jax.random.PRNGKey(42)
+
+        with pytest.raises(ValueError, match="amplitude must be positive"):
+            gaussian_white_noise_fourier(
+                grid, amplitude=0.0, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            )
+
+        with pytest.raises(ValueError, match="amplitude must be positive"):
+            gaussian_white_noise_fourier(
+                grid, amplitude=-0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            )
+
+    def test_input_validation_dt(self):
+        """Should raise ValueError if dt <= 0."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        key = jax.random.PRNGKey(42)
+
+        with pytest.raises(ValueError, match="dt must be positive"):
+            gaussian_white_noise_fourier(
+                grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.0, key=key
+            )
+
+        with pytest.raises(ValueError, match="dt must be positive"):
+            gaussian_white_noise_fourier(
+                grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=-0.01, key=key
+            )
+
     def test_noise_shape(self):
         """Noise field should have correct Fourier space shape."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
@@ -126,7 +173,12 @@ class TestGaussianWhiteNoise:
         assert jnp.allclose(noise1, noise2)
 
     def test_amplitude_scaling(self):
-        """Larger amplitude should produce larger noise."""
+        """Larger amplitude should produce larger noise.
+
+        Note: Uses single seed for determinism. For more robust validation of
+        stochastic scaling, average over multiple seeds (see driven_turbulence.py
+        for ensemble-averaged steady-state validation).
+        """
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         key = jax.random.PRNGKey(42)
 
@@ -145,7 +197,12 @@ class TestGaussianWhiteNoise:
         assert jnp.abs(ratio - 10.0) < 1.0, f"Amplitude scaling failed: ratio={ratio:.2f}, expected=10.0"
 
     def test_timestep_scaling(self):
-        """White noise scaling: amplitude/√dt → energy injection independent of dt."""
+        """White noise scaling: amplitude/√dt → energy injection independent of dt.
+
+        Note: Uses single seed for determinism. Statistical fluctuations are real
+        but bounded by ±10% tolerance. For production use, time-average over many
+        forcing realizations.
+        """
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         key = jax.random.PRNGKey(42)
 
@@ -368,7 +425,13 @@ class TestEnergyInjection:
         assert eps_inj > 0
 
     def test_energy_injection_scales_with_amplitude(self):
-        """Energy injection should scale with amplitude²."""
+        """Energy injection should scale with amplitude².
+
+        Note: Single-seed test with ±30% tolerance accounts for stochastic
+        fluctuations. The ε ∝ A² scaling is a time-averaged property, and
+        individual realizations show O(1) variance. For steady-state validation,
+        see driven_turbulence.py example (~200 steps, ensemble averaging).
+        """
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.01)
         dt = 0.01
