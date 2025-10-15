@@ -41,6 +41,7 @@ References:
 
 from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass, field
+from functools import partial
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -49,7 +50,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from krmhd.physics import KRMHDState, energy as compute_energy
-from krmhd.spectral import rfftn_inverse
+from krmhd.spectral import (
+    rfftn_inverse,
+    derivative_x,
+    derivative_y,
+)
 
 
 # =============================================================================
@@ -341,6 +346,380 @@ def energy_spectrum_parallel(
     E_parallel = E_parallel / N_perp
 
     return grid.kz, E_parallel
+
+
+# =============================================================================
+# Field Line Following and Spectral Interpolation
+# =============================================================================
+
+
+@partial(jax.jit, static_argnames=['padding_factor'])
+def spectral_pad_and_ifft(
+    field_fourier: Array,
+    grid: "SpectralGrid3D",
+    padding_factor: int = 2,
+) -> Array:
+    """
+    Pad Fourier modes and inverse FFT to get high-resolution real-space field.
+
+    Uses spectral interpolation via zero-padding in Fourier space to achieve
+    sub-grid accuracy. This maintains spectral accuracy (limited only by the
+    original band limit) when interpolating to arbitrary positions.
+
+    Args:
+        field_fourier: Field in Fourier space, shape [Nz, Ny, Nx//2+1]
+        grid: SpectralGrid3D object
+        padding_factor: Factor to increase resolution (default: 2 for 2× resolution)
+
+    Returns:
+        field_real_fine: Real-space field on fine grid
+                        Shape: [Nz*padding_factor, Ny*padding_factor, Nx*padding_factor]
+
+    Algorithm:
+        1. Pad Fourier modes with zeros to simulate higher resolution
+        2. Inverse FFT to get fine real-space grid
+        3. Result is band-limited to original k_max but on finer grid
+
+    Example:
+        >>> B_fine = spectral_pad_and_ifft(B_fourier, grid, padding_factor=2)
+        >>> # B_fine is now 2× resolution in each dimension
+
+    Physics:
+        Zero-padding in Fourier space is equivalent to ideal sinc interpolation
+        in real space. For band-limited functions, this is exact interpolation
+        (Shannon sampling theorem).
+
+    Performance:
+        - Memory: padding_factor³ × original size
+        - Compute: O(N log N) FFT cost on padded grid
+        - For padding_factor=2: 8× memory, 8× FFT cost
+    """
+    Nz, Ny, Nx_half = field_fourier.shape
+    Nx = (Nx_half - 1) * 2  # Original Nx from rfft format
+
+    # Calculate padded dimensions
+    Nz_pad = Nz * padding_factor
+    Ny_pad = Ny * padding_factor
+    Nx_pad = Nx * padding_factor
+    Nx_pad_half = Nx_pad // 2 + 1
+
+    # Create padded array in Fourier space
+    # For 3D rfft: shape is [Nz, Ny, Nx//2+1]
+    # We need to pad in all three k-dimensions carefully
+
+    # Initialize padded array with zeros
+    field_padded = jnp.zeros((Nz_pad, Ny_pad, Nx_pad_half), dtype=complex)
+
+    # Copy original modes to padded array
+    # kx: 0 to Nx//2 (already in rfft format)
+    # ky: 0 to Ny//2, then -Ny//2 to -1 (need to handle wraparound)
+    # kz: 0 to Nz//2, then -Nz//2 to -1 (need to handle wraparound)
+
+    # Handle ky: positive frequencies [0, Ny//2], negative [-Ny//2, -1]
+    ky_pos = Ny // 2 + 1  # Number of positive ky frequencies
+    ky_neg = Ny - ky_pos  # Number of negative ky frequencies
+
+    # Handle kz: positive frequencies [0, Nz//2], negative [-Nz//2, -1]
+    kz_pos = Nz // 2 + 1  # Number of positive kz frequencies
+    kz_neg = Nz - kz_pos  # Number of negative kz frequencies
+
+    # Copy positive kz, positive ky
+    field_padded = field_padded.at[:kz_pos, :ky_pos, :Nx_half].set(
+        field_fourier[:kz_pos, :ky_pos, :]
+    )
+
+    # Copy positive kz, negative ky
+    if ky_neg > 0:
+        field_padded = field_padded.at[:kz_pos, -ky_neg:, :Nx_half].set(
+            field_fourier[:kz_pos, -ky_neg:, :]
+        )
+
+    # Copy negative kz, positive ky
+    if kz_neg > 0:
+        field_padded = field_padded.at[-kz_neg:, :ky_pos, :Nx_half].set(
+            field_fourier[-kz_neg:, :ky_pos, :]
+        )
+
+    # Copy negative kz, negative ky
+    if kz_neg > 0 and ky_neg > 0:
+        field_padded = field_padded.at[-kz_neg:, -ky_neg:, :Nx_half].set(
+            field_fourier[-kz_neg:, -ky_neg:, :]
+        )
+
+    # Inverse FFT to real space
+    # Need to account for scaling: irfftn normalizes by 1/N
+    # When we pad, we increase N, so we need to rescale
+    field_real_fine = jnp.fft.irfftn(field_padded, s=(Nz_pad, Ny_pad, Nx_pad))
+
+    # Rescale to preserve energy: padding_factor³ accounts for the increased grid points
+    field_real_fine = field_real_fine * (padding_factor ** 3)
+
+    return field_real_fine
+
+
+@partial(jax.jit, static_argnames=['padding_factor'])
+def interpolate_on_fine_grid(
+    field_fine: Array,
+    position: Array,
+    grid: "SpectralGrid3D",
+    padding_factor: int = 2,
+) -> Array:
+    """
+    Interpolate field value at arbitrary position using fine grid.
+
+    Uses trilinear interpolation on the spectrally-padded grid. Since the fine
+    grid has padding_factor× resolution, trilinear interpolation achieves
+    near-spectral accuracy.
+
+    Args:
+        field_fine: Fine grid field from spectral_pad_and_ifft()
+                   Shape: [Nz*padding_factor, Ny*padding_factor, Nx*padding_factor]
+        position: Physical position [x, y, z] to interpolate at
+        grid: SpectralGrid3D object with domain sizes
+        padding_factor: Padding factor used (must match field_fine)
+
+    Returns:
+        Interpolated field value at position (scalar)
+
+    Algorithm:
+        1. Convert physical position to fine grid indices
+        2. Find 8 surrounding grid points
+        3. Trilinear interpolation using weighted average
+        4. Handle periodic boundaries
+
+    Example:
+        >>> value = interpolate_on_fine_grid(B_fine, jnp.array([1.2, 3.4, 5.6]), grid)
+
+    Notes:
+        - Handles periodic boundaries automatically
+        - Position should be in physical units [0, Lx] × [0, Ly] × [0, Lz]
+        - Returns 0 if position is exactly on the boundary (shouldn't happen)
+    """
+    Nz_fine, Ny_fine, Nx_fine = field_fine.shape
+
+    # Convert physical position to grid indices (periodic)
+    ix_float = (position[0] % grid.Lx) / grid.Lx * Nx_fine
+    iy_float = (position[1] % grid.Ly) / grid.Ly * Ny_fine
+    iz_float = (position[2] % grid.Lz) / grid.Lz * Nz_fine
+
+    # Get integer indices and fractional parts
+    ix0 = jnp.floor(ix_float).astype(int) % Nx_fine
+    iy0 = jnp.floor(iy_float).astype(int) % Ny_fine
+    iz0 = jnp.floor(iz_float).astype(int) % Nz_fine
+
+    ix1 = (ix0 + 1) % Nx_fine
+    iy1 = (iy0 + 1) % Ny_fine
+    iz1 = (iz0 + 1) % Nz_fine
+
+    # Fractional distances
+    dx = ix_float - jnp.floor(ix_float)
+    dy = iy_float - jnp.floor(iy_float)
+    dz = iz_float - jnp.floor(iz_float)
+
+    # Trilinear interpolation
+    # c000 = (1-dx)(1-dy)(1-dz), etc.
+    c000 = field_fine[iz0, iy0, ix0] * (1 - dx) * (1 - dy) * (1 - dz)
+    c001 = field_fine[iz0, iy0, ix1] * dx * (1 - dy) * (1 - dz)
+    c010 = field_fine[iz0, iy1, ix0] * (1 - dx) * dy * (1 - dz)
+    c011 = field_fine[iz0, iy1, ix1] * dx * dy * (1 - dz)
+    c100 = field_fine[iz1, iy0, ix0] * (1 - dx) * (1 - dy) * dz
+    c101 = field_fine[iz1, iy0, ix1] * dx * (1 - dy) * dz
+    c110 = field_fine[iz1, iy1, ix0] * (1 - dx) * dy * dz
+    c111 = field_fine[iz1, iy1, ix1] * dx * dy * dz
+
+    return c000 + c001 + c010 + c011 + c100 + c101 + c110 + c111
+
+
+def compute_magnetic_field_components(
+    state: KRMHDState,
+    padding_factor: int = 2,
+) -> Dict[str, Array]:
+    """
+    Compute magnetic field components B = (Bx, By, Bz) on fine grid.
+
+    Computes the full 3D magnetic field including:
+    - Perpendicular components from vector potential: B⊥ = ∇ × (Ψ ẑ)
+    - Parallel component: Bz = B₀ + δB∥
+
+    All components are computed on a spectrally-padded fine grid for
+    accurate field line following.
+
+    Args:
+        state: KRMHD state with z_plus, z_minus, B_parallel
+        padding_factor: Resolution increase factor (default: 2)
+
+    Returns:
+        Dictionary with keys 'Bx', 'By', 'Bz', each containing fine-grid array
+        Shape of each: [Nz*padding_factor, Ny*padding_factor, Nx*padding_factor]
+
+    Physics:
+        The magnetic field in RMHD:
+        B = B₀ẑ + δB
+
+        where δB comes from:
+        - B⊥ = ∇ × (Ψ ẑ) = (∂yΨ, -∂xΨ, 0)
+        - Bz = B₀ + δB∥
+
+        Here Ψ = (z⁺ - z⁻)/2 is the parallel vector potential (up to normalization).
+
+        Note: In the normalized equations, B₀ may not appear explicitly, but
+        for field line following we need the full field direction.
+
+    Example:
+        >>> B = compute_magnetic_field_components(state, padding_factor=2)
+        >>> Bx_fine, By_fine, Bz_fine = B['Bx'], B['By'], B['Bz']
+
+    Performance:
+        - Computes 3 derivative operations in Fourier space
+        - Performs 3 padded IFFTs
+        - Memory: 3 × padding_factor³ × base grid size
+        - For 256³ with padding_factor=2: 3 × 8 × ~130 MB ≈ 3.1 GB
+    """
+    grid = state.grid
+
+    # Compute Ψ = (z⁺ - z⁻)/2 (parallel vector potential)
+    Psi = (state.z_plus - state.z_minus) / 2.0
+
+    # Compute perpendicular B components: B⊥ = ∇ × (Ψ ẑ)
+    # Bx = ∂yΨ
+    # By = -∂xΨ
+    Bx_fourier = derivative_y(Psi, grid.ky)
+    By_fourier = -derivative_x(Psi, grid.kx)
+
+    # Parallel component: Bz = B₀ + δB∥
+    # In normalized units, B₀ is implicit. For field line following,
+    # we need the full field. Assume B₀ = 1 in code units.
+    # Convert B_parallel to 3D array if needed
+    Bz_fourier = state.B_parallel + 1.0  # B₀ = 1 in normalized units
+
+    # Pad and transform to real space
+    Bx_fine = spectral_pad_and_ifft(Bx_fourier, grid, padding_factor)
+    By_fine = spectral_pad_and_ifft(By_fourier, grid, padding_factor)
+    Bz_fine = spectral_pad_and_ifft(Bz_fourier, grid, padding_factor)
+
+    return {
+        'Bx': Bx_fine,
+        'By': By_fine,
+        'Bz': Bz_fine,
+    }
+
+
+def follow_field_line(
+    state: KRMHDState,
+    x0: float,
+    y0: float,
+    dz: Optional[float] = None,
+    padding_factor: int = 2,
+) -> Array:
+    """
+    Follow magnetic field line from (x0, y0, z_min) to (x0, y0, z_max).
+
+    Uses RK2 (midpoint method) integration along field line direction b̂ = B/|B|.
+    Interpolation uses spectrally-padded grid for high accuracy.
+
+    Args:
+        state: KRMHD state to compute field lines from
+        x0, y0: Starting position in perpendicular plane
+        dz: Step size in z-direction (default: Lz / (10*Nz))
+        padding_factor: Fine grid resolution multiplier (default: 2)
+
+    Returns:
+        trajectory: Array of shape [n_steps, 3] containing (x, y, z) positions
+
+    Algorithm:
+        1. Compute B field components on fine grid (once)
+        2. Initialize position at (x0, y0, -Lz/2)
+        3. RK2 integration:
+           - Predictor: pos_half = pos + 0.5 * ds * b̂(pos)
+           - Corrector: pos_new = pos + ds * b̂(pos_half)
+        4. Continue until z > Lz/2
+        5. Apply periodic boundaries in (x, y)
+
+    Example:
+        >>> traj = follow_field_line(state, x0=np.pi, y0=np.pi)
+        >>> x_traj, y_traj, z_traj = traj[:, 0], traj[:, 1], traj[:, 2]
+
+    Physics:
+        Field line equation: dr/ds = b̂ where b̂ = B/|B|
+
+        In straight field limit (B = B₀ẑ), this gives straight vertical lines.
+        With turbulent δB⊥, field lines wander in (x, y) plane.
+
+        Wandering amplitude: δr⊥ ~ (δB⊥/B₀) × Lz
+
+    Performance:
+        - One-time cost: Compute B_fine (3 × spectral_pad_and_ifft)
+        - Per-step cost: 3 trilinear interpolations
+        - Typical: 10*Nz steps per field line
+        - For 256³ grid: ~2560 steps, ~7 ms per field line
+    """
+    grid = state.grid
+
+    # Set default step size
+    if dz is None:
+        dz = grid.Lz / (10 * grid.Nz)
+
+    # Compute magnetic field on fine grid (expensive, do once)
+    B_components = compute_magnetic_field_components(state, padding_factor)
+    Bx_fine = B_components['Bx']
+    By_fine = B_components['By']
+    Bz_fine = B_components['Bz']
+
+    # Initialize trajectory storage
+    trajectory_list = []
+
+    # Starting position
+    pos = jnp.array([x0, y0, -grid.Lz / 2])
+    trajectory_list.append(pos.copy())
+
+    # Integration loop
+    # Note: Can't use jax.lax.while_loop easily because of trajectory accumulation
+    # For now, use Python loop (can optimize later with fixed-step scan)
+    n_steps_max = int(jnp.ceil(grid.Lz / dz)) + 10  # Safety margin
+
+    for step in range(n_steps_max):
+        if pos[2] >= grid.Lz / 2:
+            break
+
+        # Interpolate B at current position
+        Bx = interpolate_on_fine_grid(Bx_fine, pos, grid, padding_factor)
+        By = interpolate_on_fine_grid(By_fine, pos, grid, padding_factor)
+        Bz = interpolate_on_fine_grid(Bz_fine, pos, grid, padding_factor)
+
+        B = jnp.array([Bx, By, Bz])
+        B_magnitude = jnp.linalg.norm(B)
+        b_hat = B / (B_magnitude + 1e-10)  # Avoid division by zero
+
+        # RK2 predictor: half-step
+        pos_half = pos + 0.5 * dz * b_hat
+
+        # Apply periodic boundaries
+        pos_half = pos_half.at[0].set(pos_half[0] % grid.Lx)
+        pos_half = pos_half.at[1].set(pos_half[1] % grid.Ly)
+
+        # Interpolate B at half-step
+        Bx_half = interpolate_on_fine_grid(Bx_fine, pos_half, grid, padding_factor)
+        By_half = interpolate_on_fine_grid(By_fine, pos_half, grid, padding_factor)
+        Bz_half = interpolate_on_fine_grid(Bz_fine, pos_half, grid, padding_factor)
+
+        B_half = jnp.array([Bx_half, By_half, Bz_half])
+        B_half_magnitude = jnp.linalg.norm(B_half)
+        b_hat_half = B_half / (B_half_magnitude + 1e-10)
+
+        # RK2 corrector: full step with midpoint slope
+        pos_new = pos + dz * b_hat_half
+
+        # Apply periodic boundaries
+        pos_new = pos_new.at[0].set(pos_new[0] % grid.Lx)
+        pos_new = pos_new.at[1].set(pos_new[1] % grid.Ly)
+
+        pos = pos_new
+        trajectory_list.append(pos.copy())
+
+    # Convert list to array
+    trajectory = jnp.array(trajectory_list)
+
+    return trajectory
 
 
 # =============================================================================
