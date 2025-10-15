@@ -61,12 +61,14 @@ from krmhd.physics import (
     initialize_alfven_wave,
     initialize_kinetic_alfven_wave,
     initialize_random_spectrum,
+    initialize_orszag_tang,
     energy,
 )
 
 from krmhd.timestepping import (
     krmhd_rhs,
     rk4_step,
+    gandalf_step,
     compute_cfl_timestep,
 )
 
@@ -112,10 +114,12 @@ __all__ = [
     "initialize_alfven_wave",
     "initialize_kinetic_alfven_wave",
     "initialize_random_spectrum",
+    "initialize_orszag_tang",
     "energy",
     # Time integration
     "krmhd_rhs",
     "rk4_step",
+    "gandalf_step",
     "compute_cfl_timestep",
     # Diagnostics
     "energy_spectrum_1d",

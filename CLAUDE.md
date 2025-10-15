@@ -62,13 +62,16 @@ where {f,g} = ẑ·(∇f × ∇g) is the Poisson bracket.
 krmhd/
 ├── spectral.py      # ✅ COMPLETE: FFT operations, derivatives, dealiasing (2D/3D)
 ├── physics.py       # ✅ COMPLETE: Poisson bracket, Elsasser RHS, Hermite moment RHS
-├── timestepping.py  # ✅ COMPLETE: GANDALF integrating factor + RK2 timestepper
+├── timestepping.py  # ✅ COMPLETE: GANDALF integrating factor + RK2 timestepper (includes collisions)
 ├── hermite.py       # ✅ COMPLETE: Hermite basis for kinetic physics
 ├── diagnostics.py   # ✅ COMPLETE: Energy spectra (1D, k⊥, k∥), history, visualization
-├── collisions.py    # ⚠️ Integrated into physics.py/timestepping.py (Lenard-Bernstein)
 ├── forcing.py       # Gaussian white noise forcing (Issue #29)
 ├── io.py           # HDF5 checkpointing (Issue #13)
 └── validation.py    # Linear physics tests (Issue #10)
+
+examples/
+├── decaying_turbulence.py  # ✅ COMPLETE: Turbulent cascade with diagnostics (Issue #12)
+└── orszag_tang.py          # ✅ COMPLETE: Orszag-Tang vortex benchmark (Issue #11)
 ```
 
 **spectral.py** includes:
@@ -199,33 +202,53 @@ checkpoints to return to.
   - Hermite recurrence relations for m ≥ 2
   - Integrated into timestepping with collision damping
   - 10+ comprehensive tests: shape, coupling, collisions
-- [x] Collision operators (Issue #23, #49) ✅
-  - Lenard-Bernstein collision operator: C[gm] = -νmgm
+- [x] Collision operators (Issue #23) ✅
+  - Lenard-Bernstein collision operator: C[gm] = -νmgm (thesis Eq. 2.5)
   - Exponential damping: gm → gm × exp(-νm·δt)
   - Conservation: m=0 (particles) and m=1 (momentum) exempt
-  - Vectorized implementation in timestepping.py
-- [x] Hermite closures (Issue #24, #49) ✅
-  - Truncation closure for highest moment: gM+1 = 0
+  - Vectorized implementation in timestepping.py:402-418
+  - Integrated into gandalf_step() function
+- [x] Hermite closures (Issue #24, partial) ✅
+  - Truncation closure for highest moment: gM+1 = 0 (implicit default)
   - Kinetic parameter Λ in g1_rhs: (1-1/Λ) coupling factor
   - Ready for advanced closures (gM+1 = gM-1 for better convergence)
+  - Utility functions (closure_zero, check_hermite_convergence) deferred
 
 ### Diagnostics (Issues #9, #25-26)
 - [x] Basic diagnostics - energy, spectra (Issue #9) ✅
   - energy_spectrum_1d(): Spherically-averaged E(|k|)
   - energy_spectrum_perpendicular(): E(k⊥) for perpendicular cascade
-  - energy_spectrum_parallel(): E(k∥) for field-line structure
+  - energy_spectrum_parallel(): E(k∥) for field-line structure (kz-based, not true field line following)
   - EnergyHistory: Track E(t), magnetic fraction, dissipation rate
   - Visualization: plot_state(), plot_energy_history(), plot_energy_spectrum()
-  - Example: examples/decaying_turbulence.py demonstrates full workflow
+  - Examples: decaying_turbulence.py and orszag_tang.py demonstrate full workflow
   - 23 comprehensive tests: normalization, single modes, zero states
 - [ ] Field line following - k∥ spectra (Issue #25)
+  - True k∥ along curved field lines (bˆ·∇ = ∂/∂z + {Ψ,...})
+  - Current implementation uses simple kz-based spectrum
 - [ ] Phase mixing diagnostics (Issue #26)
+  - Hermite moment flux: Γₘ,ₖ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ]
+  - Phase mixing/unmixing spectrum decomposition
 
 ### Validation (Issues #10-12, #27)
-- [ ] Linear physics tests (Issue #10)
-- [ ] Orszag-Tang vortex (Issue #11)
-- [ ] Decaying turbulence (Issue #12)
+- [x] Linear physics tests (Issue #10, partial) ✅
+  - Alfvén wave dispersion tests (test_physics.py:1498)
+  - Wave frequency validation (test_timestepping.py:334)
+  - Energy conservation tests
+  - Kinetic Alfvén waves and Landau damping still needed
+- [x] Orszag-Tang vortex (Issue #11) ✅
+  - Full implementation in examples/orszag_tang.py
+  - Incompressible RMHD adaptation
+  - Tests nonlinear dynamics and current sheet formation
+  - Validates spectral method accuracy
+- [x] Decaying turbulence (Issue #12) ✅
+  - Full implementation in examples/decaying_turbulence.py
+  - k^(-5/3) turbulent spectrum initialization
+  - Energy history tracking and selective decay
+  - Spectrum analysis with visualization
 - [ ] Kinetic FDT validation (Issue #27)
+  - Critical validation against analytical Vlasov theory
+  - Requires forcing (Issue #29) and phase mixing diagnostics (Issue #26)
 
 ### Production Features (Issues #13-15, #28-30)
 - [ ] HDF5 I/O (Issue #13)
