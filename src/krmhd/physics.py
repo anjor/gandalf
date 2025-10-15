@@ -1412,3 +1412,130 @@ def energy(state: KRMHDState) -> Dict[str, float]:
         "compressive": float(E_compressive),
         "total": float(E_total),
     }
+
+
+def initialize_orszag_tang(
+    grid: SpectralGrid3D,
+    M: int = 10,
+    B0: float = None,
+    v_th: float = 1.0,
+    beta_i: float = 1.0,
+    nu: float = 0.01,
+    Lambda: float = 1.0,
+) -> KRMHDState:
+    """
+    Initialize incompressible Orszag-Tang vortex for RMHD.
+
+    Creates the classic Orszag-Tang vortex adapted to incompressible reduced MHD,
+    using stream function φ and vector potential A∥ formulation. This is a
+    standard benchmark for nonlinear MHD dynamics.
+
+    Original Orszag-Tang (compressible MHD):
+        Velocity: v = (-sin(y), sin(x), 0)
+        Magnetic: B = (-B0·sin(y), B0·sin(2x), 0) with B0 = 1/√(4π)
+
+    This implementation (incompressible RMHD):
+        Stream function: φ = [cos(kx·x) + cos(ky·y)]/(2π)
+            → generates v⊥ = ẑ × ∇φ = (-sin(ky·y), sin(kx·x))/(2π)
+        Vector potential: A∥ = B0·[cos(2kx·x)/(4π) + cos(ky·y)]/(2π)
+            → generates B⊥ = ẑ × ∇A∥ = B0·(-sin(ky·y), sin(2kx·x))/(2π)
+
+    where kx = 2π/Lx, ky = 2π/Ly are the fundamental wavenumbers.
+
+    Args:
+        grid: SpectralGrid3D defining spatial dimensions
+        M: Number of Hermite moments (default: 10)
+            **Why M=10?** Orszag-Tang is primarily a fluid test (nonlinear MHD).
+            The kinetic response (Hermite moments g) represents small thermal
+            corrections. M=10 is sufficient for the fluid limit where kinetic
+            effects are minimal. For fully kinetic problems, use M=20-30.
+        B0: Magnetic field amplitude (default: 1/√(4π) ≈ 0.282)
+            Standard Orszag-Tang normalization from original paper
+        v_th: Electron thermal velocity (default: 1.0)
+        beta_i: Ion plasma beta (default: 1.0)
+        nu: Collision frequency (default: 0.01)
+        Lambda: Kinetic parameter Λ = k∥²λ_D² (default: 1.0)
+
+    Returns:
+        KRMHDState with Orszag-Tang initial condition
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=2)
+        >>> state = initialize_orszag_tang(grid)
+        >>> # Evolve and track energy cascade, current sheet formation
+
+    Physics:
+        The Orszag-Tang vortex tests:
+        - Nonlinear coupling via Poisson brackets {f,g}
+        - Energy cascade from large to small scales
+        - Formation of current sheets (analog of shocks in compressible case)
+        - Selective decay (magnetic energy increases over kinetic)
+
+    Note:
+        - Uses Nz=2 minimum for 2D problem (3D machinery with z-independence)
+        - **Initial Hermite moments g = 0** represents fluid limit (no kinetic response).
+          This is correct for Orszag-Tang, which tests fluid nonlinear dynamics.
+          For kinetic problems, use initialize_kinetic_alfven_wave() instead.
+        - No compressibility: ∇·v = 0, ∇·B = 0 enforced by spectral methods
+
+    References:
+        - Orszag & Tang (1979): "Small-scale structure of two-dimensional
+          magnetohydrodynamic turbulence", J. Fluid Mech. 90:129
+        - This adaptation: Incompressible RMHD formulation
+    """
+    # Default magnetic field amplitude (standard Orszag-Tang)
+    if B0 is None:
+        B0 = 1.0 / jnp.sqrt(4 * jnp.pi)
+
+    # Create coordinate arrays (shape: Nz, Ny, Nx)
+    x = jnp.linspace(0, grid.Lx, grid.Nx, endpoint=False)
+    y = jnp.linspace(0, grid.Ly, grid.Ny, endpoint=False)
+    z = jnp.linspace(-grid.Lz / 2, grid.Lz / 2, grid.Nz, endpoint=False)
+    Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
+
+    # Define wavenumbers for domain periodicity
+    # This makes the code robust to arbitrary domain sizes
+    kx = 2 * jnp.pi / grid.Lx  # Fundamental wavenumber in x
+    ky = 2 * jnp.pi / grid.Ly  # Fundamental wavenumber in y
+
+    # Orszag-Tang initial conditions (incompressible version)
+    # φ generates v⊥ = ẑ × ∇φ = (∂φ/∂y, -∂φ/∂x, 0)
+    phi_real = (jnp.cos(kx * X) + jnp.cos(ky * Y)) / (2 * jnp.pi)
+
+    # A∥ generates B⊥ = ẑ × ∇A∥ = (∂A∥/∂y, -∂A∥/∂x, 0)
+    # Note: factor of 2 in x-wavenumber (sin(2kx·x) vs sin(kx·x))
+    # This creates the characteristic Orszag-Tang magnetic topology
+    A_parallel_real = B0 * (
+        jnp.cos(2 * kx * X) / (4 * jnp.pi) +
+        jnp.cos(ky * Y) / (2 * jnp.pi)
+    )
+
+    # Transform to Fourier space
+    phi_k = rfftn_forward(phi_real)
+    A_parallel_k = rfftn_forward(A_parallel_real)
+
+    # Convert to Elsasser variables z± = φ ± A∥
+    z_plus_k = phi_k + A_parallel_k
+    z_minus_k = phi_k - A_parallel_k
+
+    # Initialize parallel magnetic field (passive, set to zero for pure Alfvén mode)
+    B_parallel = jnp.zeros_like(phi_k)
+
+    # Initialize Hermite moments (kinetic distribution)
+    # g = 0 represents fluid limit: no kinetic response
+    # This is appropriate for Orszag-Tang, which tests fluid nonlinear dynamics
+    g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=complex)
+
+    return KRMHDState(
+        z_plus=z_plus_k,
+        z_minus=z_minus_k,
+        B_parallel=B_parallel,
+        g=g,
+        M=M,
+        beta_i=beta_i,
+        v_th=v_th,
+        nu=nu,
+        Lambda=Lambda,
+        time=0.0,
+        grid=grid,
+    )

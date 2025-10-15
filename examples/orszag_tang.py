@@ -20,15 +20,13 @@ Runtime: ~1-2 minutes on M1 Pro for 64² resolution
 """
 
 import numpy as np
-import jax.numpy as jnp
 from krmhd import (
     SpectralGrid3D,
-    KRMHDState,
+    initialize_orszag_tang,
     gandalf_step,
     compute_cfl_timestep,
     energy as compute_energy,
 )
-from krmhd.spectral import rfftn_forward
 from krmhd.diagnostics import EnergyHistory
 
 print("=" * 70)
@@ -63,54 +61,22 @@ print(f"Evolution: t ∈ [0, {t_final}]")
 print("\nInitializing...")
 grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
 
-# Create coordinate arrays (shape: Nz, Ny, Nx)
-x = jnp.linspace(0, grid.Lx, grid.Nx, endpoint=False)
-y = jnp.linspace(0, grid.Ly, grid.Ny, endpoint=False)
-z = jnp.linspace(-grid.Lz / 2, grid.Lz / 2, grid.Nz, endpoint=False)
-Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
-
-# Orszag-Tang initial conditions (incompressible version)
-# Define wavenumbers for domain periodicity
-kx = 2 * np.pi / Lx  # Fundamental wavenumber in x
-ky = 2 * np.pi / Ly  # Fundamental wavenumber in y
-
-# φ generates v⊥ = (-sin(ky·y), sin(kx·x))/(2π) via v⊥ = ẑ × ∇φ
-phi_real = (jnp.cos(kx * X) + jnp.cos(ky * Y)) / (2 * np.pi)
-
-# A∥ generates B⊥ = B0·(-sin(ky·y), sin(2kx·x))/(2π) via B⊥ = ẑ × ∇A∥
-# Note: factor of 2 in x-wavenumber (sin(2kx·x) vs sin(kx·x))
-A_parallel_real = B0 * (
-    jnp.cos(2 * kx * X) / (4 * np.pi) +
-    jnp.cos(ky * Y) / (2 * np.pi)
-)
-
-# Transform to Fourier space
-phi_k = rfftn_forward(phi_real)
-A_parallel_k = rfftn_forward(A_parallel_real)
-
-# Create KRMHD state with Elsasser variables z± = φ ± A∥
-M = 10  # Number of Hermite moments
-state = KRMHDState(
-    z_plus=phi_k + A_parallel_k,
-    z_minus=phi_k - A_parallel_k,
-    B_parallel=jnp.zeros_like(phi_k),  # Pure Alfvén mode
-    g=jnp.zeros((Nz, Ny, Nx // 2 + 1, M + 1), dtype=complex),  # Hermite moments (0 to M)
-    M=M,
-    beta_i=1.0,
+# Initialize Orszag-Tang vortex using shared function
+state = initialize_orszag_tang(
+    grid=grid,
+    M=10,  # Number of Hermite moments (sufficient for fluid limit)
+    B0=B0,
     v_th=1.0,
+    beta_i=1.0,
     nu=0.01,
     Lambda=1.0,
-    time=0.0,
-    grid=grid,
 )
 
 E0 = compute_energy(state)
 print(f"✓ Initialized Orszag-Tang vortex")
 print(f"  Initial energy: E_total = {E0['total']:.6e}")
 print(f"  E_mag/E_kin = {E0['magnetic']/E0['kinetic']:.3f}")
-
-# Verify initial conditions (sanity check)
-print(f"  Wavenumbers: kx = {kx:.4f}, ky = {ky:.4f}")
+print(f"  Grid: {Nx} × {Ny}, domain: {Lx:.2f} × {Ly:.2f}")
 print(f"  Grid spacing: dx = {Lx/Nx:.4f}, dy = {Ly/Ny:.4f}")
 
 # ============================================================================

@@ -61,6 +61,7 @@ from krmhd.physics import (
     initialize_alfven_wave,
     initialize_kinetic_alfven_wave,
     initialize_random_spectrum,
+    initialize_orszag_tang,
     energy,
 )
 
@@ -113,6 +114,7 @@ __all__ = [
     "initialize_alfven_wave",
     "initialize_kinetic_alfven_wave",
     "initialize_random_spectrum",
+    "initialize_orszag_tang",
     "energy",
     # Time integration
     "krmhd_rhs",

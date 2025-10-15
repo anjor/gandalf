@@ -14,12 +14,11 @@ import pytest
 
 from krmhd import (
     SpectralGrid3D,
-    KRMHDState,
+    initialize_orszag_tang,
     gandalf_step,
     compute_cfl_timestep,
     energy as compute_energy,
 )
-from krmhd.spectral import rfftn_forward
 
 
 class TestOrszagTangVortex:
@@ -49,42 +48,16 @@ class TestOrszagTangVortex:
         cfl_safety = 0.3
         t_final = 0.1  # Short time for CI
 
-        # Initialize grid
+        # Initialize grid and state using shared function
         grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
-
-        # Create coordinate arrays
-        x = jnp.linspace(0, grid.Lx, grid.Nx, endpoint=False)
-        y = jnp.linspace(0, grid.Ly, grid.Ny, endpoint=False)
-        z = jnp.linspace(-grid.Lz / 2, grid.Lz / 2, grid.Nz, endpoint=False)
-        Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
-
-        # Orszag-Tang initial conditions with explicit wavenumbers
-        kx = 2 * np.pi / Lx
-        ky = 2 * np.pi / Ly
-        phi_real = (jnp.cos(kx * X) + jnp.cos(ky * Y)) / (2 * np.pi)
-        A_parallel_real = B0 * (
-            jnp.cos(2 * kx * X) / (4 * np.pi) +
-            jnp.cos(ky * Y) / (2 * np.pi)
-        )
-
-        # Transform to Fourier space
-        phi_k = rfftn_forward(phi_real)
-        A_parallel_k = rfftn_forward(A_parallel_real)
-
-        # Create state
-        M = 10
-        state = KRMHDState(
-            z_plus=phi_k + A_parallel_k,
-            z_minus=phi_k - A_parallel_k,
-            B_parallel=jnp.zeros_like(phi_k),
-            g=jnp.zeros((Nz, Ny, Nx // 2 + 1, M + 1), dtype=complex),
-            M=M,
-            beta_i=1.0,
+        state = initialize_orszag_tang(
+            grid=grid,
+            M=10,
+            B0=B0,
             v_th=1.0,
+            beta_i=1.0,
             nu=0.01,
             Lambda=1.0,
-            time=0.0,
-            grid=grid,
         )
 
         # Record initial energy
@@ -133,24 +106,11 @@ class TestOrszagTangVortex:
         B0 = 1.0 / np.sqrt(4 * np.pi)
 
         grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
+        state = initialize_orszag_tang(grid=grid, M=10, B0=B0)
 
-        # Create coordinate arrays
-        x = jnp.linspace(0, grid.Lx, grid.Nx, endpoint=False)
-        y = jnp.linspace(0, grid.Ly, grid.Ny, endpoint=False)
-        z = jnp.linspace(-grid.Lz / 2, grid.Lz / 2, grid.Nz, endpoint=False)
-        Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
-
-        # Initial conditions
-        kx = 2 * np.pi / Lx
-        ky = 2 * np.pi / Ly
-        phi_real = (jnp.cos(kx * X) + jnp.cos(ky * Y)) / (2 * np.pi)
-        A_parallel_real = B0 * (
-            jnp.cos(2 * kx * X) / (4 * np.pi) +
-            jnp.cos(ky * Y) / (2 * np.pi)
-        )
-
-        phi_k = rfftn_forward(phi_real)
-        A_parallel_k = rfftn_forward(A_parallel_real)
+        # Extract Elsasser fields
+        phi_k = (state.z_plus + state.z_minus) / 2
+        A_parallel_k = (state.z_plus - state.z_minus) / 2
 
         # Check reality condition for ky=0 modes (should be real)
         # For rfft, the ky=0 plane should have f(kz, 0, kx) real when kx=0
@@ -166,36 +126,14 @@ class TestOrszagTangVortex:
         B0 = 1.0 / np.sqrt(4 * np.pi)
 
         grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
-
-        x = jnp.linspace(0, grid.Lx, grid.Nx, endpoint=False)
-        y = jnp.linspace(0, grid.Ly, grid.Ny, endpoint=False)
-        z = jnp.linspace(-grid.Lz / 2, grid.Lz / 2, grid.Nz, endpoint=False)
-        Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
-
-        kx = 2 * np.pi / Lx
-        ky = 2 * np.pi / Ly
-        phi_real = (jnp.cos(kx * X) + jnp.cos(ky * Y)) / (2 * np.pi)
-        A_parallel_real = B0 * (
-            jnp.cos(2 * kx * X) / (4 * np.pi) +
-            jnp.cos(ky * Y) / (2 * np.pi)
-        )
-
-        phi_k = rfftn_forward(phi_real)
-        A_parallel_k = rfftn_forward(A_parallel_real)
-
-        M = 10
-        state = KRMHDState(
-            z_plus=phi_k + A_parallel_k,
-            z_minus=phi_k - A_parallel_k,
-            B_parallel=jnp.zeros_like(phi_k),
-            g=jnp.zeros((Nz, Ny, Nx // 2 + 1, M + 1), dtype=complex),
-            M=M,
-            beta_i=1.0,
+        state = initialize_orszag_tang(
+            grid=grid,
+            M=10,
+            B0=B0,
             v_th=1.0,
+            beta_i=1.0,
             nu=0.01,
             Lambda=1.0,
-            time=0.0,
-            grid=grid,
         )
 
         E = compute_energy(state)

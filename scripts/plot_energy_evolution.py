@@ -7,38 +7,35 @@ publication-quality plots showing the time evolution of total, kinetic,
 and magnetic energies.
 
 Usage:
-    python scripts/plot_energy_evolution.py [--run-simulation]
+    uv run python scripts/plot_energy_evolution.py [--run-simulation]
 
 Options:
     --run-simulation : Run the Orszag-Tang simulation first before plotting
     --output FILE    : Output filename (default: orszag_tang_energy.png)
     --normalize-time : Normalize time by Alfvén time τ_A = L/v_A
+
+Note:
+    This script must be run with 'uv run' to ensure the krmhd package is
+    available in the Python path.
 """
 
-import sys
 from pathlib import Path
 import argparse
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 
 def run_orszag_tang_simulation(save_file: str = "orszag_tang_history.pkl"):
     """Run Orszag-Tang simulation and save energy history."""
     print("Running Orszag-Tang simulation...")
 
-    import jax.numpy as jnp
     from krmhd import (
         SpectralGrid3D,
-        KRMHDState,
+        initialize_orszag_tang,
         gandalf_step,
         compute_cfl_timestep,
-        energy as compute_energy,
     )
-    from krmhd.spectral import rfftn_forward
     from krmhd.diagnostics import EnergyHistory
 
     # Grid and parameters (matching examples/orszag_tang.py)
@@ -52,39 +49,16 @@ def run_orszag_tang_simulation(save_file: str = "orszag_tang_history.pkl"):
     t_final = 1.0
     save_interval = 0.1
 
-    # Initialize grid
+    # Initialize grid and state using shared function
     grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
-
-    # Create coordinate arrays
-    x = jnp.linspace(0, grid.Lx, grid.Nx, endpoint=False)
-    y = jnp.linspace(0, grid.Ly, grid.Ny, endpoint=False)
-    z = jnp.linspace(-grid.Lz / 2, grid.Lz / 2, grid.Nz, endpoint=False)
-    Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
-
-    # Orszag-Tang initial conditions
-    phi_real = (jnp.cos(2 * np.pi * X / Lx) + jnp.cos(2 * np.pi * Y / Ly)) / (2 * np.pi)
-    A_parallel_real = B0 * (
-        jnp.cos(4 * np.pi * X / Lx) / (4 * np.pi) +
-        jnp.cos(2 * np.pi * Y / Ly) / (2 * np.pi)
-    )
-
-    # Transform to Fourier space
-    phi_k = rfftn_forward(phi_real)
-    A_parallel_k = rfftn_forward(A_parallel_real)
-
-    # Create state
-    state = KRMHDState(
-        z_plus=phi_k + A_parallel_k,
-        z_minus=phi_k - A_parallel_k,
-        B_parallel=jnp.zeros_like(phi_k),
-        g=jnp.zeros((Nz, Ny, Nx // 2 + 1, 11), dtype=complex),
+    state = initialize_orszag_tang(
+        grid=grid,
         M=10,
-        beta_i=1.0,
+        B0=B0,
         v_th=1.0,
+        beta_i=1.0,
         nu=0.01,
         Lambda=1.0,
-        time=0.0,
-        grid=grid,
     )
 
     # Time evolution
