@@ -82,6 +82,13 @@ from krmhd.diagnostics import (
     plot_energy_spectrum,
 )
 
+from krmhd.forcing import (
+    gaussian_white_noise_fourier,
+    force_alfven_modes,
+    force_slow_modes,
+    compute_energy_injection_rate,
+)
+
 __all__ = [
     "__version__",
     # Spectral infrastructure
@@ -129,4 +136,9 @@ __all__ = [
     "plot_state",
     "plot_energy_history",
     "plot_energy_spectrum",
+    # Forcing
+    "gaussian_white_noise_fourier",
+    "force_alfven_modes",
+    "force_slow_modes",
+    "compute_energy_injection_rate",
 ]
