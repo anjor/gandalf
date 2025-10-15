@@ -180,7 +180,6 @@ print(f"    ✓ Saved to {output_dir / 'field_line_trajectories.png'}")
 print("  Plotting parallel spectrum comparison...")
 plot_parallel_spectrum_comparison(
     state,
-    n_fieldlines=n_fieldlines,
     padding_factor=padding_factor,
     filename=str(output_dir / "parallel_spectrum_comparison.png"),
     show=False,

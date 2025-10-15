@@ -445,11 +445,10 @@ def spectral_pad_and_ifft(
         )
 
     # Inverse FFT to real space
-    # Need to account for scaling: irfftn normalizes by 1/N
-    # When we pad, we increase N, so we need to rescale
+    # JAX's irfftn normalizes by 1/(Nz_pad * Ny_pad * Nx_pad)
+    # But the original forward FFT normalized by 1/(Nz * Ny * Nx)
+    # So we need to rescale by (N_pad/N)³ = padding_factor³ to preserve field values
     field_real_fine = jnp.fft.irfftn(field_padded, s=(Nz_pad, Ny_pad, Nx_pad))
-
-    # Rescale to preserve energy: padding_factor³ accounts for the increased grid points
     field_real_fine = field_real_fine * (padding_factor ** 3)
 
     return field_real_fine
@@ -587,16 +586,15 @@ def compute_magnetic_field_components(
     Bx_fourier = derivative_y(Psi, grid.ky)
     By_fourier = -derivative_x(Psi, grid.kx)
 
-    # Parallel component: Bz = B₀ + δB∥
-    # In normalized units, B₀ is implicit. For field line following,
-    # we need the full field. Assume B₀ = 1 in code units.
-    # Convert B_parallel to 3D array if needed
-    Bz_fourier = state.B_parallel + 1.0  # B₀ = 1 in normalized units
-
-    # Pad and transform to real space
+    # Pad and transform perpendicular components to real space
     Bx_fine = spectral_pad_and_ifft(Bx_fourier, padding_factor)
     By_fine = spectral_pad_and_ifft(By_fourier, padding_factor)
-    Bz_fine = spectral_pad_and_ifft(Bz_fourier, padding_factor)
+
+    # Parallel component: Bz = B₀ + δB∥
+    # Transform δB∥ to real space, then add B₀ = 1 (in normalized units)
+    # Note: Cannot add constant in Fourier space (only affects k=0 mode)
+    dBz_fine = spectral_pad_and_ifft(state.B_parallel, padding_factor)
+    Bz_fine = 1.0 + dBz_fine  # B₀ = 1 in code units
 
     return {
         'Bx': Bx_fine,
@@ -648,6 +646,17 @@ def follow_field_line(
 
         Wandering amplitude: δr⊥ ~ (δB⊥/B₀) × Lz
 
+    Limitations:
+        - Step size uses dz (z-direction) rather than arc length ds along field line
+        - In strong turbulence where Bz → 0, the actual arc length can be much larger
+          than dz, potentially causing accuracy issues or step size limitations
+        - For production use in strong turbulence, consider:
+          * Adaptive step size based on |b̂·ẑ|
+          * Arc-length parameterization: ds = dz/|b̂·ẑ|
+          * Smaller fixed dz for safety (at cost of more steps)
+        - Current implementation uses Python loop (not JIT-optimized)
+          For performance-critical applications, rewrite using jax.lax.scan
+
     Performance:
         - One-time cost: Compute B_fine (3 × spectral_pad_and_ifft)
         - Per-step cost: 3 trilinear interpolations
@@ -689,7 +698,14 @@ def follow_field_line(
 
         B = jnp.array([Bx, By, Bz])
         B_magnitude = jnp.linalg.norm(B)
-        b_hat = B / (B_magnitude + 1e-10)  # Avoid division by zero
+
+        # Avoid division by zero: if |B| is very small, use z-direction (mean field)
+        # This handles magnetic null points gracefully
+        b_hat = jnp.where(
+            B_magnitude > 1e-8,
+            B / B_magnitude,
+            jnp.array([0.0, 0.0, 1.0])  # Default to z-direction
+        )
 
         # RK2 predictor: half-step
         pos_half = pos + 0.5 * dz * b_hat
@@ -705,7 +721,13 @@ def follow_field_line(
 
         B_half = jnp.array([Bx_half, By_half, Bz_half])
         B_half_magnitude = jnp.linalg.norm(B_half)
-        b_hat_half = B_half / (B_half_magnitude + 1e-10)
+
+        # Avoid division by zero at midpoint
+        b_hat_half = jnp.where(
+            B_half_magnitude > 1e-8,
+            B_half / B_half_magnitude,
+            jnp.array([0.0, 0.0, 1.0])  # Default to z-direction
+        )
 
         # RK2 corrector: full step with midpoint slope
         pos_new = pos + dz * b_hat_half
@@ -1182,7 +1204,6 @@ def plot_field_lines(
 
 def plot_parallel_spectrum_comparison(
     state: KRMHDState,
-    n_fieldlines: int = 50,
     padding_factor: int = 2,
     figsize: Tuple[float, float] = (12, 5),
     filename: Optional[str] = None,
@@ -1196,7 +1217,6 @@ def plot_parallel_spectrum_comparison(
 
     Args:
         state: KRMHD state to analyze
-        n_fieldlines: Number of field lines for ensemble average
         padding_factor: Fine grid resolution (default: 2)
         figsize: Figure size in inches (width, height)
         filename: If provided, save figure to this path
