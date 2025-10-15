@@ -356,7 +356,6 @@ def energy_spectrum_parallel(
 @partial(jax.jit, static_argnames=['padding_factor'])
 def spectral_pad_and_ifft(
     field_fourier: Array,
-    grid: "SpectralGrid3D",
     padding_factor: int = 2,
 ) -> Array:
     """
@@ -368,7 +367,6 @@ def spectral_pad_and_ifft(
 
     Args:
         field_fourier: Field in Fourier space, shape [Nz, Ny, Nx//2+1]
-        grid: SpectralGrid3D object
         padding_factor: Factor to increase resolution (default: 2 for 2× resolution)
 
     Returns:
@@ -381,7 +379,7 @@ def spectral_pad_and_ifft(
         3. Result is band-limited to original k_max but on finer grid
 
     Example:
-        >>> B_fine = spectral_pad_and_ifft(B_fourier, grid, padding_factor=2)
+        >>> B_fine = spectral_pad_and_ifft(B_fourier, padding_factor=2)
         >>> # B_fine is now 2× resolution in each dimension
 
     Physics:
@@ -461,7 +459,9 @@ def spectral_pad_and_ifft(
 def interpolate_on_fine_grid(
     field_fine: Array,
     position: Array,
-    grid: "SpectralGrid3D",
+    Lx: float,
+    Ly: float,
+    Lz: float,
     padding_factor: int = 2,
 ) -> Array:
     """
@@ -475,7 +475,7 @@ def interpolate_on_fine_grid(
         field_fine: Fine grid field from spectral_pad_and_ifft()
                    Shape: [Nz*padding_factor, Ny*padding_factor, Nx*padding_factor]
         position: Physical position [x, y, z] to interpolate at
-        grid: SpectralGrid3D object with domain sizes
+        Lx, Ly, Lz: Domain sizes in physical units
         padding_factor: Padding factor used (must match field_fine)
 
     Returns:
@@ -488,7 +488,8 @@ def interpolate_on_fine_grid(
         4. Handle periodic boundaries
 
     Example:
-        >>> value = interpolate_on_fine_grid(B_fine, jnp.array([1.2, 3.4, 5.6]), grid)
+        >>> value = interpolate_on_fine_grid(B_fine, jnp.array([1.2, 3.4, 5.6]),
+        ...                                   Lx=2*np.pi, Ly=2*np.pi, Lz=2*np.pi)
 
     Notes:
         - Handles periodic boundaries automatically
@@ -498,9 +499,9 @@ def interpolate_on_fine_grid(
     Nz_fine, Ny_fine, Nx_fine = field_fine.shape
 
     # Convert physical position to grid indices (periodic)
-    ix_float = (position[0] % grid.Lx) / grid.Lx * Nx_fine
-    iy_float = (position[1] % grid.Ly) / grid.Ly * Ny_fine
-    iz_float = (position[2] % grid.Lz) / grid.Lz * Nz_fine
+    ix_float = (position[0] % Lx) / Lx * Nx_fine
+    iy_float = (position[1] % Ly) / Ly * Ny_fine
+    iz_float = (position[2] % Lz) / Lz * Nz_fine
 
     # Get integer indices and fractional parts
     ix0 = jnp.floor(ix_float).astype(int) % Nx_fine
@@ -593,9 +594,9 @@ def compute_magnetic_field_components(
     Bz_fourier = state.B_parallel + 1.0  # B₀ = 1 in normalized units
 
     # Pad and transform to real space
-    Bx_fine = spectral_pad_and_ifft(Bx_fourier, grid, padding_factor)
-    By_fine = spectral_pad_and_ifft(By_fourier, grid, padding_factor)
-    Bz_fine = spectral_pad_and_ifft(Bz_fourier, grid, padding_factor)
+    Bx_fine = spectral_pad_and_ifft(Bx_fourier, padding_factor)
+    By_fine = spectral_pad_and_ifft(By_fourier, padding_factor)
+    Bz_fine = spectral_pad_and_ifft(Bz_fourier, padding_factor)
 
     return {
         'Bx': Bx_fine,
@@ -682,9 +683,9 @@ def follow_field_line(
             break
 
         # Interpolate B at current position
-        Bx = interpolate_on_fine_grid(Bx_fine, pos, grid, padding_factor)
-        By = interpolate_on_fine_grid(By_fine, pos, grid, padding_factor)
-        Bz = interpolate_on_fine_grid(Bz_fine, pos, grid, padding_factor)
+        Bx = interpolate_on_fine_grid(Bx_fine, pos, grid.Lx, grid.Ly, grid.Lz, padding_factor)
+        By = interpolate_on_fine_grid(By_fine, pos, grid.Lx, grid.Ly, grid.Lz, padding_factor)
+        Bz = interpolate_on_fine_grid(Bz_fine, pos, grid.Lx, grid.Ly, grid.Lz, padding_factor)
 
         B = jnp.array([Bx, By, Bz])
         B_magnitude = jnp.linalg.norm(B)
@@ -698,9 +699,9 @@ def follow_field_line(
         pos_half = pos_half.at[1].set(pos_half[1] % grid.Ly)
 
         # Interpolate B at half-step
-        Bx_half = interpolate_on_fine_grid(Bx_fine, pos_half, grid, padding_factor)
-        By_half = interpolate_on_fine_grid(By_fine, pos_half, grid, padding_factor)
-        Bz_half = interpolate_on_fine_grid(Bz_fine, pos_half, grid, padding_factor)
+        Bx_half = interpolate_on_fine_grid(Bx_fine, pos_half, grid.Lx, grid.Ly, grid.Lz, padding_factor)
+        By_half = interpolate_on_fine_grid(By_fine, pos_half, grid.Lx, grid.Ly, grid.Lz, padding_factor)
+        Bz_half = interpolate_on_fine_grid(Bz_fine, pos_half, grid.Lx, grid.Ly, grid.Lz, padding_factor)
 
         B_half = jnp.array([Bx_half, By_half, Bz_half])
         B_half_magnitude = jnp.linalg.norm(B_half)
