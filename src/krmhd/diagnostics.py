@@ -362,8 +362,11 @@ def spectral_pad_and_ifft(
     Pad Fourier modes and inverse FFT to get high-resolution real-space field.
 
     Uses spectral interpolation via zero-padding in Fourier space to achieve
-    sub-grid accuracy. This maintains spectral accuracy (limited only by the
-    original band limit) when interpolating to arbitrary positions.
+    high-resolution representation of band-limited fields. The resulting fine
+    grid has spectral accuracy at grid points. When combined with trilinear
+    interpolation (see interpolate_on_fine_grid), achieves O(h²/padding_factor²)
+    sub-grid accuracy - not pure spectral accuracy, but much better than
+    direct trilinear interpolation on the coarse grid.
 
     Args:
         field_fourier: Field in Fourier space, shape [Nz, Ny, Nx//2+1]
@@ -453,6 +456,10 @@ def spectral_pad_and_ifft(
     # enforces the conjugate relationship f(-kx,-ky,-kz) = f*(kx,ky,kz).
     # Since we only copy modes (no modification), and the input has correct
     # Hermitian symmetry from rfftn, the output is guaranteed to be real.
+    #
+    # Note: Nyquist frequencies (kx=Nx//2, ky=Ny//2, kz=Nz//2) are automatically
+    # handled correctly by JAX's irfftn. For even grid sizes, the Nyquist mode
+    # is real-valued and irfftn enforces this constraint internally.
     field_real_fine = jnp.fft.irfftn(field_padded, s=(Nz_pad, Ny_pad, Nx_pad))
     field_real_fine = field_real_fine * (padding_factor ** 3)
 
@@ -471,9 +478,10 @@ def interpolate_on_fine_grid(
     """
     Interpolate field value at arbitrary position using fine grid.
 
-    Uses trilinear interpolation on the spectrally-padded grid. Since the fine
-    grid has padding_factor× resolution, trilinear interpolation achieves
-    near-spectral accuracy.
+    Uses trilinear interpolation on the spectrally-padded grid. This achieves
+    O(h²/padding_factor²) sub-grid accuracy, where h is the coarse grid spacing.
+    Not pure spectral accuracy (which would be O(machine precision)), but
+    significantly better than trilinear on the coarse grid (O(h²)).
 
     Args:
         field_fine: Fine grid field from spectral_pad_and_ifft()
@@ -690,9 +698,12 @@ def follow_field_line(
     # Integration loop
     # Note: Can't use jax.lax.while_loop easily because of trajectory accumulation
     # For now, use Python loop (can optimize later with fixed-step scan)
-    # Safety margin: +10 steps accounts for field line wandering and numerical rounding
-    # (actual arc length can exceed Lz in strong turbulence where field lines curve)
-    n_steps_max = int(jnp.ceil(grid.Lz / dz)) + 10
+    #
+    # CRITICAL: Safety margin must be multiplicative, not additive!
+    # In strong turbulence (Bz → 0), field lines can spiral extensively in (x,y)
+    # with minimal z-progress. Arc length can be >> Lz.
+    # Factor of 10 allows for field lines up to 10× longer than straight path.
+    n_steps_max = int(jnp.ceil(grid.Lz / dz)) * 10
 
     for step in range(n_steps_max):
         if pos[2] >= grid.Lz / 2:
@@ -745,6 +756,19 @@ def follow_field_line(
 
         pos = pos_new
         trajectory_list.append(pos.copy())
+
+    # Check for incomplete trajectory (hit step limit before reaching z_max)
+    if pos[2] < grid.Lz / 2:
+        import warnings
+        warnings.warn(
+            f"Field line integration incomplete: stopped at z={float(pos[2]):.3f} "
+            f"< z_max={grid.Lz/2:.3f} after {n_steps_max} steps. "
+            f"Field line may be spiraling in strong turbulence (Bz → 0). "
+            f"Consider: (1) decreasing dz, (2) increasing safety margin, "
+            f"or (3) using adaptive step size.",
+            RuntimeWarning,
+            stacklevel=2
+        )
 
     # Convert list to array
     trajectory = jnp.array(trajectory_list)
@@ -1147,6 +1171,11 @@ def plot_field_lines(
         - Straight lines: Weak turbulence (δB⊥ << B₀)
         - Strong wandering: Strong turbulence (δB⊥ ~ B₀)
         - Random walk statistics: Field line diffusion
+
+    Performance Note:
+        INEFFICIENCY: Each follow_field_line() call recomputes B field components
+        (3× spectral padding + IFFT). For n_lines=20, this is 60 expensive operations.
+        TODO: Refactor to compute B_components once and pass to all traces (~20× speedup).
     """
     grid = state.grid
 
@@ -1160,10 +1189,12 @@ def plot_field_lines(
     ax2d = fig.add_subplot(122)
 
     # Trace field lines
+    # TODO: Optimize by computing B_components once and passing to all traces
     for i in range(n_lines):
         x0 = x_starts[i]
         y0 = y_starts[i]
 
+        # NOTE: This recomputes B field for each line (inefficient for n_lines > 1)
         trajectory = follow_field_line(state, x0, y0, padding_factor=padding_factor)
 
         # Convert to numpy for plotting
