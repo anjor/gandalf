@@ -19,6 +19,7 @@ Note:
     available in the Python path.
 """
 
+import sys
 from pathlib import Path
 import argparse
 import pickle

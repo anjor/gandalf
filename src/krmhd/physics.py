@@ -1514,6 +1514,11 @@ def initialize_orszag_tang(
     phi_k = rfftn_forward(phi_real)
     A_parallel_k = rfftn_forward(A_parallel_real)
 
+    # Note: Dealiasing not needed for smooth analytical ICs
+    # The cosine functions only populate discrete wavenumbers (kx, 2kx, ky)
+    # which are well-resolved on the grid. Dealiasing is only required AFTER
+    # nonlinear operations (Poisson brackets) to prevent aliasing errors.
+
     # Convert to Elsasser variables z± = φ ± A∥
     z_plus_k = phi_k + A_parallel_k
     z_minus_k = phi_k - A_parallel_k
