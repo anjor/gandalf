@@ -1084,3 +1084,182 @@ def plot_energy_spectrum(
         plt.close()  # Close figure after showing to prevent memory leak
     else:
         plt.close()
+
+
+def plot_field_lines(
+    state: KRMHDState,
+    n_lines: int = 10,
+    padding_factor: int = 2,
+    figsize: Tuple[float, float] = (14, 5),
+    filename: Optional[str] = None,
+    show: bool = True,
+) -> None:
+    """
+    Visualize magnetic field line trajectories in 3D.
+
+    Traces multiple field lines and shows their wandering in (x, y) plane
+    as a function of z. Creates side-by-side 3D and 2D projections.
+
+    Args:
+        state: KRMHD state to trace field lines from
+        n_lines: Number of field lines to trace (default: 10)
+        padding_factor: Fine grid resolution (default: 2)
+        figsize: Figure size in inches (width, height)
+        filename: If provided, save figure to this path
+        show: If True, display figure interactively
+
+    Example:
+        >>> plot_field_lines(state, n_lines=20)
+        >>> plot_field_lines(state, filename='field_lines.png', show=False)
+
+    Physics:
+        Field line wandering amplitude δr⊥ ~ (δB⊥/B₀) × Lz shows:
+        - Straight lines: Weak turbulence (δB⊥ << B₀)
+        - Strong wandering: Strong turbulence (δB⊥ ~ B₀)
+        - Random walk statistics: Field line diffusion
+    """
+    grid = state.grid
+
+    # Sample starting points uniformly
+    x_starts = np.linspace(0, grid.Lx, n_lines, endpoint=False)
+    y_starts = np.linspace(0, grid.Ly, n_lines, endpoint=False)
+
+    # Create figure with 3D and 2D views
+    fig = plt.figure(figsize=figsize)
+    ax3d = fig.add_subplot(121, projection='3d')
+    ax2d = fig.add_subplot(122)
+
+    # Trace field lines
+    for i in range(n_lines):
+        x0 = x_starts[i]
+        y0 = y_starts[i]
+
+        trajectory = follow_field_line(state, x0, y0, padding_factor=padding_factor)
+
+        # Convert to numpy for plotting
+        traj_np = np.array(trajectory)
+        x_traj = traj_np[:, 0]
+        y_traj = traj_np[:, 1]
+        z_traj = traj_np[:, 2]
+
+        # 3D plot
+        ax3d.plot(x_traj, y_traj, z_traj, alpha=0.7, linewidth=1)
+
+        # 2D projection (x-y plane)
+        ax2d.plot(x_traj, y_traj, alpha=0.7, linewidth=1)
+
+    # Format 3D plot
+    ax3d.set_xlabel('x')
+    ax3d.set_ylabel('y')
+    ax3d.set_zlabel('z')
+    ax3d.set_title('Field Line Trajectories (3D)')
+    ax3d.set_xlim(0, grid.Lx)
+    ax3d.set_ylim(0, grid.Ly)
+    ax3d.set_zlim(-grid.Lz/2, grid.Lz/2)
+
+    # Format 2D plot
+    ax2d.set_xlabel('x')
+    ax2d.set_ylabel('y')
+    ax2d.set_title('Field Line Wandering (x-y projection)')
+    ax2d.set_xlim(0, grid.Lx)
+    ax2d.set_ylim(0, grid.Ly)
+    ax2d.set_aspect('equal')
+    ax2d.grid(True, alpha=0.3)
+
+    plt.suptitle(f'Magnetic Field Lines at t = {state.time:.3f}', fontsize=14)
+    plt.tight_layout()
+
+    if filename:
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+
+    if show:
+        plt.show()
+        plt.close()
+    else:
+        plt.close()
+
+
+def plot_parallel_spectrum_comparison(
+    state: KRMHDState,
+    n_fieldlines: int = 50,
+    padding_factor: int = 2,
+    figsize: Tuple[float, float] = (12, 5),
+    filename: Optional[str] = None,
+    show: bool = True,
+) -> None:
+    """
+    Compare E(k∥) vs E(kz) spectra side-by-side.
+
+    Shows the difference between true field-line-following k∥ and simple kz.
+    In turbulent plasmas with δB⊥ ~ B₀, these can differ significantly.
+
+    Args:
+        state: KRMHD state to analyze
+        n_fieldlines: Number of field lines for ensemble average
+        padding_factor: Fine grid resolution (default: 2)
+        figsize: Figure size in inches (width, height)
+        filename: If provided, save figure to this path
+        show: If True, display figure interactively
+
+    Example:
+        >>> plot_parallel_spectrum_comparison(state)
+
+    Physics:
+        - E(kz): Energy vs wavenumber in z-direction
+        - E(k∥): Energy vs wavenumber along curved field lines
+        - Difference: Measures effect of field line curvature
+        - Expected: E(k∥) < E(kz) for passive scalars (no parallel cascade)
+
+    Note:
+        This function requires the true k∥ spectrum diagnostic, which needs
+        to be implemented. For now, we'll just plot the kz spectrum twice
+        as a placeholder.
+    """
+    grid = state.grid
+
+    # Compute kz spectrum (simple)
+    kz, E_kz = energy_spectrum_parallel(state)  # This is actually E(kz)
+
+    # TODO: Implement true field-line k∥ spectrum
+    # For now, use placeholder
+    k_parallel = kz
+    E_parallel = E_kz
+
+    # Create side-by-side plots
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    # Convert to numpy
+    kz = np.array(kz)
+    E_kz = np.array(E_kz)
+    k_parallel = np.array(k_parallel)
+    E_parallel = np.array(E_parallel)
+
+    # Filter positive values for log scale
+    valid_kz = (kz > 0) & (E_kz > 0)
+    valid_kpar = (k_parallel > 0) & (E_parallel > 0)
+
+    # Plot E(kz)
+    axes[0].semilogy(kz[valid_kz], E_kz[valid_kz], 'b-', linewidth=2)
+    axes[0].set_xlabel('kz', fontsize=12)
+    axes[0].set_ylabel('E(kz)', fontsize=12)
+    axes[0].set_title('Simple kz Spectrum', fontsize=13)
+    axes[0].grid(True, alpha=0.3)
+
+    # Plot E(k∥)
+    axes[1].semilogy(k_parallel[valid_kpar], E_parallel[valid_kpar], 'r-', linewidth=2)
+    axes[1].set_xlabel('k∥ (field-line)', fontsize=12)
+    axes[1].set_ylabel('E(k∥)', fontsize=12)
+    axes[1].set_title('True Field-Line k∥ Spectrum', fontsize=13)
+    axes[1].grid(True, alpha=0.3)
+
+    plt.suptitle(f'Parallel Spectrum Comparison at t = {state.time:.3f}', fontsize=14)
+    plt.tight_layout()
+
+    if filename:
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+
+    if show:
+        plt.show()
+        plt.close()
+    else:
+        plt.close()
