@@ -1532,7 +1532,12 @@ def _compute_rfft_weighted_energy(
 
     # Determine which axis corresponds to kx
     # Assume kx is axis 2 for shapes like [Nz, Ny, Nx//2+1, ...]
+    # This assumption relies on the rfft convention: rfft(x-axis) → kx
     kx_axis = 2
+
+    # Validate dimensionality assumption
+    assert field_squared.ndim >= 3, \
+        f"Expected at least 3D array for rfft weighting, got {field_squared.ndim}D"
 
     # Energy from kx=0 plane (always counted once)
     energy_kx0 = jnp.sum(
@@ -1669,6 +1674,12 @@ def phase_mixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = True
         - Returns energy at moment m, not the flux itself
         - Complementary to phase_unmixing_energy()
         - Together they partition E_m into mixing/unmixing components
+
+    Performance:
+        If computing both phase_mixing_energy() and phase_unmixing_energy()
+        for the same moment, consider computing hermite_flux() once and
+        implementing a custom function that uses the cached flux to avoid
+        redundant computation.
     """
     # Compute flux at moment transition m → m+1
     flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]
@@ -1744,6 +1755,12 @@ def phase_unmixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = Tr
         - Complementary to phase_mixing_energy()
         - Together: E_m = E_mixing(m) + E_unmixing(m)
         - Sign convention: Γₘ,ₖ < 0 means flux from m+1 → m
+
+    Performance:
+        If computing both phase_mixing_energy() and phase_unmixing_energy()
+        for the same moment, consider computing hermite_flux() once and
+        implementing a custom function that uses the cached flux to avoid
+        redundant computation.
     """
     # Compute flux at moment transition m → m+1
     flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]

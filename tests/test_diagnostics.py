@@ -993,6 +993,10 @@ class TestHermiteFlux:
         # This test checks the formula is implemented correctly, not that the physics
         # is in equilibrium. Tighter conservation (~1e-10) is achieved during time evolution
         # with forcing and collisions (tested in Issue #27: Kinetic FDT validation).
+        #
+        # TODO (Issue #27): Add dedicated test with time-evolved state showing tight
+        # flux conservation (~1e-10 relative error) once forcing/damping balance is
+        # established. This will validate the physics, not just the formula.
         assert relative_error < 1.0, \
             f"Flux conservation violated: relative error = {relative_error}"
 
