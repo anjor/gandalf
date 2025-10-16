@@ -33,7 +33,7 @@ distribution and enables efficient moment truncation.
 """
 
 from functools import partial
-from typing import Optional
+from typing import Optional, Any
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -507,7 +507,7 @@ def check_hermite_convergence(
     g: Array,
     threshold: float = 1e-3,
     account_for_rfft: bool = True
-) -> dict[str, any]:
+) -> dict[str, Any]:
     """
     Check convergence of truncated Hermite hierarchy.
 
@@ -565,16 +565,18 @@ def check_hermite_convergence(
     if account_for_rfft:
         # rfft format: kx=0 plane counted once, kx>0 counted twice
         # g has shape [Nz, Ny, Nx//2+1, M+1]
-        energy_per_moment = jnp.zeros(M + 1, dtype=jnp.float32)
 
-        for m in range(M + 1):
-            # Energy from kx=0 plane (counted once)
-            energy_kx0 = jnp.sum(jnp.abs(g[:, :, 0, m])**2)
+        # Vectorized calculation: compute |g|² for all moments at once
+        g_squared = jnp.abs(g) ** 2
 
-            # Energy from kx>0 planes (counted twice due to conjugate symmetry)
-            energy_kx_pos = jnp.sum(jnp.abs(g[:, :, 1:, m])**2)
+        # Energy from kx=0 plane (counted once): sum over (z, y) for each moment
+        energy_kx0 = jnp.sum(g_squared[:, :, 0, :], axis=(0, 1))
 
-            energy_per_moment = energy_per_moment.at[m].set(energy_kx0 + 2.0 * energy_kx_pos)
+        # Energy from kx>0 planes (counted twice): sum over (z, y, kx>0) for each moment
+        energy_kx_pos = jnp.sum(g_squared[:, :, 1:, :], axis=(0, 1, 2))
+
+        # Combine with proper weighting
+        energy_per_moment = energy_kx0 + 2.0 * energy_kx_pos
     else:
         # Simple sum without rfft correction (for testing or debug)
         energy_per_moment = jnp.sum(jnp.abs(g)**2, axis=(0, 1, 2))

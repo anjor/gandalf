@@ -334,14 +334,22 @@ class TestClosurePhysicsValidation:
         assert rhs_M.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
 
     def test_closure_convergence_with_strong_collisions(self):
-        """Test that collision damping increases with moment index."""
+        """Test that collision damping in gm_rhs scales correctly with moment index.
+
+        This test isolates the collision term -νm·gₘ by setting:
+        - z_plus = z_minus = 0 (no perpendicular advection, field line coupling)
+        - gₘ = 1 with all neighbors zero (no parallel streaming coupling)
+
+        This makes gm_rhs return purely the collision damping term -νm·gₘ.
+        The test verifies the damping scales correctly: RHS(m=5) / RHS(m=2) = 5/2.
+        """
         from krmhd.physics import gm_rhs
 
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         M = 10
 
-        # To isolate collision damping, set gₘ = 1 with all neighbors = 0
-        # This makes RHS = -νm·gₘ purely
+        # Isolate collision damping: set gₘ = 1 with all neighbors = 0
+        # This makes RHS = -νm·gₘ purely (no other coupling terms)
         z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
         z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
 
