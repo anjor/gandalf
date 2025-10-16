@@ -1389,3 +1389,571 @@ def plot_parallel_spectrum_comparison(
         plt.close()
     else:
         plt.close()
+
+
+# =============================================================================
+# Phase Mixing Diagnostics (Hermite Moment Flux)
+# =============================================================================
+
+
+def hermite_flux(state: KRMHDState) -> Array:
+    """
+    Compute Hermite moment flux Γₘ,ₖ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ].
+
+    The Hermite flux measures energy transfer between adjacent moments in
+    velocity space. It diagnoses phase mixing (fine-scale generation in v∥)
+    versus phase unmixing (coarse-graining in v∥).
+
+    Args:
+        state: KRMHD state with Hermite moments g[Nz, Ny, Nx//2+1, M+1]
+
+    Returns:
+        flux: Hermite flux array, shape [Nz, Ny, Nx//2+1, M]
+              flux[:,:,:,m] is the energy flux from moment m to m+1
+              Positive flux → phase mixing (energy flows to higher m)
+              Negative flux → phase unmixing (energy flows back to lower m)
+
+    Physics:
+        The Hermite flux appears in the energy conservation equation for
+        each moment (Thesis §2.5.3, Eq 2.30):
+
+            ∂|gₘ|²/∂t = ... + (Γₘ₋₁ - Γₘ) + ...
+
+        where Γₘ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ] is the flux from m to m+1.
+
+        Conservation: In the absence of external sources/sinks,
+        ∑ₖ Γₘ,ₖ = 0 for each m (energy flows through moment space).
+
+        Phase mixing cascade:
+        - Positive Γₘ: Energy flows from m → m+1 (fine-scale generation)
+        - Negative Γₘ: Energy flows from m+1 → m (coarse-graining)
+        - Net direction determined by competition between:
+          * Phase mixing: Landau damping, free streaming
+          * Phase unmixing: Nonlinear advection, "anti-phase-mixing"
+
+    Example:
+        >>> flux = hermite_flux(state)
+        >>> # Total flux at each moment transition
+        >>> flux_total = jnp.sum(jnp.abs(flux)**2, axis=(0,1,2))  # [M]
+        >>> # Flux should be real (imaginary part of complex product)
+        >>> assert jnp.isrealobj(flux)
+
+    References:
+        - Thesis §2.5.3, Eq 2.30 - Hermite moment flux definition
+        - Schekochihin et al. (2016) J. Plasma Phys. 82:905820212
+          "Phase mixing versus nonlinear advection in drift-kinetic turbulence"
+        - Adkins & Schekochihin (2018) J. Plasma Phys. 84:905840107
+          "A solvable model of Vlasov-kinetic plasma turbulence"
+
+    Note:
+        - Uses k∥ = kz (simple parallel wavenumber in z-direction)
+        - For curved field lines, k∥ should be computed along field lines
+          (Issue #25 infrastructure available, future enhancement)
+        - Flux is real-valued (imaginary part of gₘ₊₁·g*ₘ)
+        - Shape: [Nz, Ny, Nx//2+1, M] for M moment transitions
+    """
+    grid = state.grid
+    M = state.M  # Number of moments (g has shape [..., M+1])
+
+    # Get parallel wavenumber k∥ = kz
+    # Shape: [Nz] → broadcast to [Nz, 1, 1, 1]
+    k_parallel = grid.kz[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
+
+    # Initialize flux array: shape [Nz, Ny, Nx//2+1, M]
+    flux = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M), dtype=float)
+
+    # Compute flux for each moment transition m → m+1
+    # Γₘ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ]
+    for m in range(M):
+        # Extract moments m and m+1
+        g_m = state.g[:, :, :, m]       # Shape: [Nz, Ny, Nx//2+1]
+        g_m_plus_1 = state.g[:, :, :, m + 1]  # Shape: [Nz, Ny, Nx//2+1]
+
+        # Compute coupling factor √(2(m+1))
+        coupling = jnp.sqrt(2.0 * (m + 1))
+
+        # Compute complex product gₘ₊₁·g*ₘ
+        product = g_m_plus_1 * jnp.conj(g_m)
+
+        # Extract imaginary part: Im[gₘ₊₁·g*ₘ]
+        im_product = jnp.imag(product)
+
+        # Compute flux: Γₘ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ]
+        flux_m = -k_parallel[:, :, :, 0] * coupling * im_product
+
+        # Store in flux array
+        flux = flux.at[:, :, :, m].set(flux_m)
+
+    return flux
+
+
+def hermite_moment_energy(state: KRMHDState, account_for_rfft: bool = True) -> Array:
+    """
+    Compute energy in each Hermite moment: Eₘ = ∑ₖ |gₘ,ₖ|².
+
+    Returns the energy distribution across Hermite moments, showing how
+    energy is distributed in velocity space.
+
+    Args:
+        state: KRMHD state with Hermite moments g[Nz, Ny, Nx//2+1, M+1]
+        account_for_rfft: If True, properly weight rfft modes (default: True)
+
+    Returns:
+        energy: Array of shape [M+1] containing energy in each moment
+                energy[m] = ∑ₖ |gₘ,ₖ|² (summed over all k-space)
+
+    Physics:
+        The energy in each Hermite moment represents the amplitude of
+        velocity-space structure at scale m:
+        - m=0: Density fluctuations (v-independent)
+        - m=1: Parallel velocity fluctuations
+        - m≥2: Higher-order velocity-space structure
+
+        In kinetic turbulence:
+        - Phase mixing cascade: Energy flows to high m
+        - Collision damping: High m are exponentially damped
+        - Convergence: E_M << E_0 ensures valid truncation
+
+    Example:
+        >>> E_m = hermite_moment_energy(state)
+        >>> # Plot energy vs moment
+        >>> plt.semilogy(range(state.M+1), E_m)
+        >>> plt.xlabel('Hermite moment m')
+        >>> plt.ylabel('Energy E_m')
+
+    Note:
+        Uses same rfft accounting as check_hermite_convergence():
+        - kx=0 plane counted once (real modes)
+        - kx>0 planes counted twice (complex conjugate pairs)
+        - Ensures proper Parseval's theorem: ∑Eₘ = E_total
+    """
+    M = state.M
+    g = state.g  # Shape: [Nz, Ny, Nx//2+1, M+1]
+
+    # Compute |gₘ|² for all moments
+    g_squared = jnp.abs(g) ** 2  # Shape: [Nz, Ny, Nx//2+1, M+1]
+
+    if account_for_rfft:
+        # rfft format: kx=0 plane counted once, kx>0 counted twice
+        # Energy from kx=0 plane (counted once): sum over (z, y) for each moment
+        energy_kx0 = jnp.sum(g_squared[:, :, 0, :], axis=(0, 1))  # Shape: [M+1]
+
+        # Energy from kx>0 planes (counted twice): sum over (z, y, kx>0) for each moment
+        energy_kx_pos = jnp.sum(g_squared[:, :, 1:, :], axis=(0, 1, 2))  # Shape: [M+1]
+
+        # Combine with proper weighting
+        energy = energy_kx0 + 2.0 * energy_kx_pos  # Shape: [M+1]
+    else:
+        # Simple sum without rfft correction (for testing/debugging)
+        energy = jnp.sum(g_squared, axis=(0, 1, 2))  # Shape: [M+1]
+
+    return energy
+
+
+def phase_mixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = True) -> float:
+    """
+    Compute energy in phase-mixing modes at moment m.
+
+    Phase-mixing modes are k-space modes where Γₘ,ₖ > 0, indicating
+    energy flow from moment m to m+1 (fine-scale generation in v∥).
+
+    Args:
+        state: KRMHD state with Hermite moments
+        m: Hermite moment index (0 ≤ m < M)
+        account_for_rfft: If True, properly weight rfft modes (default: True)
+
+    Returns:
+        E_mixing: Total energy in modes where Γₘ,ₖ > 0
+
+    Physics:
+        Phase mixing occurs when:
+        - Landau resonance: particles at v∥ ~ ω/k∥ resonate with waves
+        - Free streaming: particles with different v∥ dephase
+        - Result: Energy cascades to higher m (finer velocity scales)
+
+        Positive flux Γₘ,ₖ > 0 identifies modes undergoing phase mixing.
+
+    Example:
+        >>> E_mix = [phase_mixing_energy(state, m) for m in range(state.M)]
+        >>> E_unmix = [phase_unmixing_energy(state, m) for m in range(state.M)]
+        >>> # Total energy should equal sum
+        >>> E_total = hermite_moment_energy(state)
+        >>> assert jnp.allclose(E_mix + E_unmix, E_total[:-1])
+
+    Note:
+        - Returns energy at moment m, not the flux itself
+        - Complementary to phase_unmixing_energy()
+        - Together they partition E_m into mixing/unmixing components
+    """
+    if m >= state.M:
+        raise ValueError(f"Moment index m={m} must be < M={state.M}")
+
+    # Compute flux at moment transition m → m+1
+    flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]
+    flux_m = flux[:, :, :, m]   # Shape: [Nz, Ny, Nx//2+1]
+
+    # Identify phase-mixing modes: Γₘ,ₖ > 0
+    mixing_mask = flux_m > 0.0  # Boolean mask: [Nz, Ny, Nx//2+1]
+
+    # Extract energy at moment m for these modes
+    g_m = state.g[:, :, :, m]  # Shape: [Nz, Ny, Nx//2+1]
+    g_m_squared = jnp.abs(g_m) ** 2
+
+    if account_for_rfft:
+        # Apply rfft weighting
+        # kx=0 plane: weight = 1
+        energy_kx0 = jnp.sum(g_m_squared[:, :, 0] * mixing_mask[:, :, 0])
+
+        # kx>0 planes: weight = 2
+        energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:] * mixing_mask[:, :, 1:])
+
+        E_mixing = float(energy_kx0 + 2.0 * energy_kx_pos)
+    else:
+        # Simple sum
+        E_mixing = float(jnp.sum(g_m_squared * mixing_mask))
+
+    return E_mixing
+
+
+def phase_unmixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = True) -> float:
+    """
+    Compute energy in phase-unmixing modes at moment m.
+
+    Phase-unmixing modes are k-space modes where Γₘ,ₖ < 0, indicating
+    energy flow from moment m+1 back to m (coarse-graining in v∥).
+
+    Args:
+        state: KRMHD state with Hermite moments
+        m: Hermite moment index (0 ≤ m < M)
+        account_for_rfft: If True, properly weight rfft modes (default: True)
+
+    Returns:
+        E_unmixing: Total energy in modes where Γₘ,ₖ < 0
+
+    Physics:
+        Phase unmixing (or "anti-phase-mixing") occurs when:
+        - Nonlinear advection: E×B drifts couple velocity moments
+        - Plasma echo: coherent particle response to stochastic forcing
+        - Result: Energy returns to lower m (coarser velocity scales)
+
+        Negative flux Γₘ,ₖ < 0 identifies modes undergoing phase unmixing.
+
+        Competition: In steady-state turbulence, phase mixing and unmixing
+        balance, creating a stationary spectrum |gₘ|² vs m.
+
+    Example:
+        >>> # Analyze phase mixing vs unmixing
+        >>> for m in range(state.M):
+        ...     E_mix = phase_mixing_energy(state, m)
+        ...     E_unmix = phase_unmixing_energy(state, m)
+        ...     ratio = E_mix / (E_mix + E_unmix)
+        ...     print(f"m={m}: {ratio:.2%} mixing, {1-ratio:.2%} unmixing")
+
+    References:
+        - Schekochihin et al. (2016) - "Anti-phase-mixing" and plasma echo
+        - Adkins & Schekochihin (2018) - Flux suppression in solvable model
+
+    Note:
+        - Complementary to phase_mixing_energy()
+        - Together: E_m = E_mixing(m) + E_unmixing(m)
+        - Sign convention: Γₘ,ₖ < 0 means flux from m+1 → m
+    """
+    if m >= state.M:
+        raise ValueError(f"Moment index m={m} must be < M={state.M}")
+
+    # Compute flux at moment transition m → m+1
+    flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]
+    flux_m = flux[:, :, :, m]   # Shape: [Nz, Ny, Nx//2+1]
+
+    # Identify phase-unmixing modes: Γₘ,ₖ < 0
+    unmixing_mask = flux_m < 0.0  # Boolean mask: [Nz, Ny, Nx//2+1]
+
+    # Extract energy at moment m for these modes
+    g_m = state.g[:, :, :, m]  # Shape: [Nz, Ny, Nx//2+1]
+    g_m_squared = jnp.abs(g_m) ** 2
+
+    if account_for_rfft:
+        # Apply rfft weighting
+        # kx=0 plane: weight = 1
+        energy_kx0 = jnp.sum(g_m_squared[:, :, 0] * unmixing_mask[:, :, 0])
+
+        # kx>0 planes: weight = 2
+        energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:] * unmixing_mask[:, :, 1:])
+
+        E_unmixing = float(energy_kx0 + 2.0 * energy_kx_pos)
+    else:
+        # Simple sum
+        E_unmixing = float(jnp.sum(g_m_squared * unmixing_mask))
+
+    return E_unmixing
+
+
+# =============================================================================
+# Phase Mixing Visualization Functions
+# =============================================================================
+
+
+def plot_hermite_flux_spectrum(
+    state: KRMHDState,
+    figsize: Tuple[float, float] = (10, 6),
+    filename: Optional[str] = None,
+    show: bool = True,
+) -> None:
+    """
+    Plot total Hermite flux vs moment transition m → m+1.
+
+    Shows the net energy flux through each moment transition, summed over
+    all k-space modes. Positive flux indicates net phase mixing (energy
+    flows to higher m), negative indicates net phase unmixing.
+
+    Args:
+        state: KRMHD state with Hermite moments
+        figsize: Figure size in inches (width, height)
+        filename: If provided, save figure to this path
+        show: If True, display figure interactively
+
+    Example:
+        >>> plot_hermite_flux_spectrum(state)
+        >>> # Should show flux pattern characteristic of kinetic cascade
+
+    Physics:
+        The total flux Γ_total(m) = ∑ₖ |Γₘ,ₖ| shows the strength of
+        phase mixing at each moment transition:
+        - Large positive: Strong phase mixing (cascade to high m)
+        - Near zero: Balance between mixing and unmixing
+        - Large negative: Strong phase unmixing (return to low m)
+
+        In steady-state turbulence, flux may show:
+        - Positive at low m (energy injection)
+        - Negative at high m (collision damping)
+        - Oscillations (competition between physics)
+    """
+    # Compute flux
+    flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]
+    M = state.M
+
+    # Sum flux over k-space for each moment transition
+    # Note: Flux can be positive or negative, so we sum (not abs)
+    flux_total = jnp.sum(flux, axis=(0, 1, 2))  # Shape: [M]
+
+    # Convert to numpy for plotting
+    flux_total = np.array(flux_total)
+    moments = np.arange(M)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Plot total flux
+    ax.plot(moments, flux_total, 'b-o', linewidth=2, markersize=6, label='Total flux')
+    ax.axhline(0, color='k', linestyle='--', linewidth=1, alpha=0.5)
+
+    ax.set_xlabel('Moment transition (m → m+1)', fontsize=12)
+    ax.set_ylabel('Total flux Γₘ', fontsize=12)
+    ax.set_title(f'Hermite Moment Flux at t = {state.time:.3f}', fontsize=14)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    # Add annotation explaining sign
+    ax.text(0.02, 0.98, 'Positive: phase mixing (m → m+1)\nNegative: phase unmixing (m+1 → m)',
+            transform=ax.transAxes, fontsize=9, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+    plt.tight_layout()
+
+    if filename:
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+
+    if show:
+        plt.show()
+        plt.close()
+    else:
+        plt.close()
+
+
+def plot_hermite_moment_energy(
+    state: KRMHDState,
+    figsize: Tuple[float, float] = (10, 6),
+    filename: Optional[str] = None,
+    show: bool = True,
+) -> None:
+    """
+    Plot energy distribution across Hermite moments.
+
+    Shows how energy is distributed in velocity space, decomposed into
+    phase-mixing and phase-unmixing components.
+
+    Args:
+        state: KRMHD state with Hermite moments
+        figsize: Figure size in inches (width, height)
+        filename: If provided, save figure to this path
+        show: If True, display figure interactively
+
+    Example:
+        >>> plot_hermite_moment_energy(state)
+        >>> # Should show exponential decay at high m (collision damping)
+
+    Physics:
+        The energy spectrum E_m vs m characterizes velocity-space structure:
+        - E_0: Density fluctuations (v-independent)
+        - E_1: Parallel velocity fluctuations
+        - E_m (m≥2): Higher-order velocity structure
+
+        Expected features:
+        - Power-law at low m: E_m ∝ m^(-α) (kinetic cascade)
+        - Exponential decay at high m: collision damping
+        - Convergence: E_M << E_0 (valid truncation)
+
+        Decomposition:
+        - E_mixing: Energy in modes with positive flux
+        - E_unmixing: Energy in modes with negative flux
+        - E_total = E_mixing + E_unmixing
+    """
+    M = state.M
+    moments = np.arange(M + 1)
+
+    # Compute total energy per moment
+    E_total = hermite_moment_energy(state)
+    E_total = np.array(E_total)
+
+    # Compute mixing/unmixing energies
+    E_mixing = np.array([phase_mixing_energy(state, m) for m in range(M)])
+    E_unmixing = np.array([phase_unmixing_energy(state, m) for m in range(M)])
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Plot energy spectra on log scale
+    ax.semilogy(moments, E_total, 'k-o', linewidth=2, markersize=6, label='Total E_m')
+    ax.semilogy(moments[:-1], E_mixing, 'b-s', linewidth=1.5, markersize=5,
+                alpha=0.7, label='Mixing modes')
+    ax.semilogy(moments[:-1], E_unmixing, 'r-^', linewidth=1.5, markersize=5,
+                alpha=0.7, label='Unmixing modes')
+
+    ax.set_xlabel('Hermite moment m', fontsize=12)
+    ax.set_ylabel('Energy E_m', fontsize=12)
+    ax.set_title(f'Hermite Moment Energy Spectrum at t = {state.time:.3f}', fontsize=14)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3, which='both')
+
+    # Add convergence check
+    if M >= 2:
+        convergence_ratio = E_total[M] / E_total[0]
+        ax.text(0.98, 0.02, f'Convergence: E_{M}/E_0 = {convergence_ratio:.2e}',
+                transform=ax.transAxes, fontsize=9, ha='right',
+                bbox=dict(boxstyle='round', facecolor='lightgreen' if convergence_ratio < 1e-3 else 'yellow', alpha=0.5))
+
+    plt.tight_layout()
+
+    if filename:
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+
+    if show:
+        plt.show()
+        plt.close()
+    else:
+        plt.close()
+
+
+def plot_phase_mixing_2d(
+    state: KRMHDState,
+    m: int,
+    kz_index: int = 0,
+    figsize: Tuple[float, float] = (10, 8),
+    filename: Optional[str] = None,
+    show: bool = True,
+) -> None:
+    """
+    Plot 2D map of Hermite flux in (kx, ky) plane at fixed kz and moment m.
+
+    Visualizes the spatial structure of phase mixing in perpendicular
+    wavenumber space. Shows which k⊥ modes are undergoing phase mixing
+    (positive flux) vs phase unmixing (negative flux).
+
+    Args:
+        state: KRMHD state with Hermite moments
+        m: Moment transition to visualize (0 ≤ m < M)
+        kz_index: Index of kz plane to plot (default: 0, which is kz=0 if centered)
+        figsize: Figure size in inches (width, height)
+        filename: If provided, save figure to this path
+        show: If True, display figure interactively
+
+    Example:
+        >>> # Plot flux at first moment transition, kz=0 plane
+        >>> plot_phase_mixing_2d(state, m=0, kz_index=state.grid.Nz//2)
+
+    Physics:
+        The 2D flux map Γₘ(kx, ky) at fixed kz shows:
+        - Red/positive: Modes with phase mixing (energy to higher m)
+        - Blue/negative: Modes with phase unmixing (energy to lower m)
+        - Spatial patterns: May show anisotropy, resonances, or structures
+
+        Physical interpretation:
+        - Uniform sign: Coherent phase mixing/unmixing
+        - Checkerboard: Competition between processes
+        - Radial dependence: Scale-dependent cascade
+    """
+    if m >= state.M:
+        raise ValueError(f"Moment index m={m} must be < M={state.M}")
+
+    grid = state.grid
+
+    # Compute flux
+    flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]
+    flux_2d = flux[kz_index, :, :, m]  # Shape: [Ny, Nx//2+1]
+
+    # Convert to numpy for plotting
+    flux_2d = np.array(flux_2d)
+
+    # Create kx, ky meshgrid for plotting
+    # Note: rfft format means kx only goes to Nx//2+1
+    kx = np.array(grid.kx)
+    ky = np.array(grid.ky)
+    KX, KY = np.meshgrid(kx, ky)
+
+    # Create figure
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+
+    # Plot 2D flux map
+    vmax = np.max(np.abs(flux_2d))
+    im1 = ax1.pcolormesh(KX, KY, flux_2d, cmap='RdBu_r', shading='auto',
+                         vmin=-vmax, vmax=vmax)
+    ax1.set_xlabel('kx', fontsize=12)
+    ax1.set_ylabel('ky', fontsize=12)
+    ax1.set_title(f'Flux Γ_{m}(kx, ky) at kz={grid.kz[kz_index]:.2f}', fontsize=13)
+    ax1.set_aspect('equal')
+    plt.colorbar(im1, ax=ax1, label='Flux Γₘ')
+
+    # Plot 1D radial profile: Γ(k⊥) averaged in shells
+    # Compute k⊥ = √(kx² + ky²)
+    k_perp = np.sqrt(KX**2 + KY**2)
+    k_perp_max = np.max(k_perp)
+    n_bins = min(32, grid.Nx // 4)
+    k_perp_bins = np.linspace(0, k_perp_max, n_bins + 1)
+    k_perp_centers = 0.5 * (k_perp_bins[:-1] + k_perp_bins[1:])
+
+    # Bin flux by k⊥
+    flux_radial = np.zeros(n_bins)
+    for i in range(n_bins):
+        mask = (k_perp >= k_perp_bins[i]) & (k_perp < k_perp_bins[i + 1])
+        if np.any(mask):
+            flux_radial[i] = np.mean(flux_2d[mask])
+
+    ax2.plot(k_perp_centers, flux_radial, 'b-o', linewidth=2, markersize=5)
+    ax2.axhline(0, color='k', linestyle='--', linewidth=1, alpha=0.5)
+    ax2.set_xlabel('k⊥', fontsize=12)
+    ax2.set_ylabel('Radially averaged Γₘ', fontsize=12)
+    ax2.set_title(f'Radial Profile at kz={grid.kz[kz_index]:.2f}', fontsize=13)
+    ax2.grid(True, alpha=0.3)
+
+    plt.suptitle(f'Phase Mixing Flux: Moment {m} → {m+1} at t = {state.time:.3f}',
+                 fontsize=14)
+    plt.tight_layout()
+
+    if filename:
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+
+    if show:
+        plt.show()
+        plt.close()
+    else:
+        plt.close()
