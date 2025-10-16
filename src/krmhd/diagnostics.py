@@ -53,6 +53,7 @@ import numpy as np
 
 from krmhd.physics import KRMHDState, energy as compute_energy
 from krmhd.spectral import (
+    SpectralGrid3D,
     rfftn_inverse,
     derivative_x,
     derivative_y,
@@ -1395,6 +1396,20 @@ def plot_parallel_spectrum_comparison(
 # Phase Mixing Diagnostics (Hermite Moment Flux)
 # =============================================================================
 
+# Note on JIT Compilation:
+# These diagnostic functions are NOT explicitly decorated with @jax.jit because
+# KRMHDState is a Pydantic model, not a JAX pytree. Attempting to JIT-compile
+# functions that take Pydantic models as arguments causes runtime errors:
+#   "TypeError: Error interpreting argument as an abstract array"
+#
+# However, performance is still excellent because:
+# 1. The implementations are fully vectorized (no Python loops)
+# 2. JAX will JIT-compile these functions at runtime after the first call
+# 3. All internal computations use pure JAX operations
+#
+# Future: If performance profiling shows JIT decoration is critical, KRMHDState
+# could be registered as a JAX pytree (requires changes to physics.py).
+
 
 def hermite_flux(state: KRMHDState) -> Array:
     """
@@ -1484,6 +1499,79 @@ def hermite_flux(state: KRMHDState) -> Array:
     return flux
 
 
+def _compute_rfft_weighted_energy(
+    field_squared: Array,
+    mask: Optional[Array],
+    grid: SpectralGrid3D,
+    sum_axes: tuple,
+) -> Array:
+    """
+    Helper function to compute energy with proper rfft mode weighting.
+
+    Handles the correct accounting for rfft format where:
+    - kx=0 plane: counted once (real modes)
+    - kx=Nyquist plane: counted once (for even Nx, it's real)
+    - kx>0 (non-Nyquist): counted twice (complex conjugate pairs)
+
+    Args:
+        field_squared: |field|² array, shape [..., Nx//2+1, ...]
+        mask: Optional boolean mask to select subset of modes
+        grid: Spectral grid for Nx information
+        sum_axes: Axes to sum over (e.g., (0, 1) for z, y)
+
+    Returns:
+        Properly weighted energy sum
+
+    Note:
+        This helper reduces code duplication across hermite_moment_energy(),
+        phase_mixing_energy(), and phase_unmixing_energy().
+    """
+    # Apply mask if provided
+    if mask is not None:
+        field_squared = field_squared * mask
+
+    # Determine which axis corresponds to kx
+    # Assume kx is axis 2 for shapes like [Nz, Ny, Nx//2+1, ...]
+    kx_axis = 2
+
+    # Energy from kx=0 plane (always counted once)
+    energy_kx0 = jnp.sum(
+        jnp.take(field_squared, 0, axis=kx_axis),
+        axis=sum_axes
+    )
+
+    if grid.Nx % 2 == 0:
+        # Even Nx: Nyquist mode at kx=Nx/2 (last index), counted once
+        energy_kx_nyquist = jnp.sum(
+            jnp.take(field_squared, -1, axis=kx_axis),
+            axis=sum_axes
+        )
+
+        # kx>0 (excluding Nyquist): counted twice
+        # Need to slice along kx axis and sum over it plus other axes
+        slices = [slice(None)] * field_squared.ndim
+        slices[kx_axis] = slice(1, -1)
+        field_squared_middle = field_squared[tuple(slices)]
+
+        # Sum over kx and other specified axes
+        sum_axes_with_kx = tuple(ax if ax < kx_axis else ax for ax in sum_axes) + (kx_axis,)
+        energy_kx_pos = jnp.sum(field_squared_middle, axis=sum_axes_with_kx)
+
+        energy = energy_kx0 + 2.0 * energy_kx_pos + energy_kx_nyquist
+    else:
+        # Odd Nx: No Nyquist mode, kx>0 all counted twice
+        slices = [slice(None)] * field_squared.ndim
+        slices[kx_axis] = slice(1, None)
+        field_squared_pos = field_squared[tuple(slices)]
+
+        sum_axes_with_kx = tuple(ax if ax < kx_axis else ax for ax in sum_axes) + (kx_axis,)
+        energy_kx_pos = jnp.sum(field_squared_pos, axis=sum_axes_with_kx)
+
+        energy = energy_kx0 + 2.0 * energy_kx_pos
+
+    return energy
+
+
 def hermite_moment_energy(state: KRMHDState, account_for_rfft: bool = True) -> Array:
     """
     Compute energy in each Hermite moment: Eₘ = ∑ₖ |gₘ,ₖ|².
@@ -1533,27 +1621,13 @@ def hermite_moment_energy(state: KRMHDState, account_for_rfft: bool = True) -> A
     g_squared = jnp.abs(g) ** 2  # Shape: [Nz, Ny, Nx//2+1, M+1]
 
     if account_for_rfft:
-        # rfft format: kx=0 plane counted once, kx>0 counted twice
-        # BUT: for even Nx, Nyquist mode (kx=Nx/2) is also real, counted once
-
-        # Energy from kx=0 plane (always counted once)
-        energy_kx0 = jnp.sum(g_squared[:, :, 0, :], axis=(0, 1))  # Shape: [M+1]
-
-        if grid.Nx % 2 == 0:
-            # Even Nx: Nyquist mode exists at kx=Nx/2 (last index)
-            # This mode is real, so count it once
-            energy_kx_nyquist = jnp.sum(g_squared[:, :, -1, :], axis=(0, 1))  # Shape: [M+1]
-
-            # Energy from kx>0 (excluding Nyquist): counted twice
-            energy_kx_pos = jnp.sum(g_squared[:, :, 1:-1, :], axis=(0, 1, 2))  # Shape: [M+1]
-
-            energy = energy_kx0 + 2.0 * energy_kx_pos + energy_kx_nyquist
-        else:
-            # Odd Nx: No Nyquist mode
-            # Energy from kx>0 planes: counted twice
-            energy_kx_pos = jnp.sum(g_squared[:, :, 1:, :], axis=(0, 1, 2))  # Shape: [M+1]
-
-            energy = energy_kx0 + 2.0 * energy_kx_pos
+        # Use helper function for proper rfft mode weighting
+        energy = _compute_rfft_weighted_energy(
+            g_squared,
+            mask=None,  # No mask - sum all modes
+            grid=grid,
+            sum_axes=(0, 1),  # Sum over z, y (keep moment axis)
+        )
     else:
         # Simple sum without rfft correction (for testing/debugging)
         energy = jnp.sum(g_squared, axis=(0, 1, 2))  # Shape: [M+1]
@@ -1608,24 +1682,19 @@ def phase_mixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = True
     g_m_squared = jnp.abs(g_m) ** 2
 
     if account_for_rfft:
-        # Apply rfft weighting with proper Nyquist handling
-        # kx=0 plane: weight = 1
-        energy_kx0 = jnp.sum(g_m_squared[:, :, 0] * mixing_mask[:, :, 0])
+        # Add a dummy axis to make it 4D for the helper: [Nz, Ny, Nx//2+1, 1]
+        g_m_squared_4d = g_m_squared[:, :, :, jnp.newaxis]
+        mixing_mask_4d = mixing_mask[:, :, :, jnp.newaxis]
 
-        grid = state.grid
-        if grid.Nx % 2 == 0:
-            # Even Nx: Nyquist mode at kx=Nx/2 (last index), weight = 1
-            energy_kx_nyquist = jnp.sum(g_m_squared[:, :, -1] * mixing_mask[:, :, -1])
-
-            # kx>0 (excluding Nyquist): weight = 2
-            energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:-1] * mixing_mask[:, :, 1:-1])
-
-            E_mixing = float(energy_kx0 + 2.0 * energy_kx_pos + energy_kx_nyquist)
-        else:
-            # Odd Nx: no Nyquist mode, kx>0 all weighted by 2
-            energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:] * mixing_mask[:, :, 1:])
-
-            E_mixing = float(energy_kx0 + 2.0 * energy_kx_pos)
+        # Use helper function for proper rfft mode weighting
+        energy_array = _compute_rfft_weighted_energy(
+            g_m_squared_4d,
+            mask=mixing_mask_4d,
+            grid=state.grid,
+            sum_axes=(0, 1),  # Sum over z, y (keep dummy moment axis)
+        )
+        # Extract scalar from [1] array
+        E_mixing = float(energy_array[0])
     else:
         # Simple sum
         E_mixing = float(jnp.sum(g_m_squared * mixing_mask))
@@ -1688,24 +1757,19 @@ def phase_unmixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = Tr
     g_m_squared = jnp.abs(g_m) ** 2
 
     if account_for_rfft:
-        # Apply rfft weighting with proper Nyquist handling
-        # kx=0 plane: weight = 1
-        energy_kx0 = jnp.sum(g_m_squared[:, :, 0] * unmixing_mask[:, :, 0])
+        # Add a dummy axis to make it 4D for the helper: [Nz, Ny, Nx//2+1, 1]
+        g_m_squared_4d = g_m_squared[:, :, :, jnp.newaxis]
+        unmixing_mask_4d = unmixing_mask[:, :, :, jnp.newaxis]
 
-        grid = state.grid
-        if grid.Nx % 2 == 0:
-            # Even Nx: Nyquist mode at kx=Nx/2 (last index), weight = 1
-            energy_kx_nyquist = jnp.sum(g_m_squared[:, :, -1] * unmixing_mask[:, :, -1])
-
-            # kx>0 (excluding Nyquist): weight = 2
-            energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:-1] * unmixing_mask[:, :, 1:-1])
-
-            E_unmixing = float(energy_kx0 + 2.0 * energy_kx_pos + energy_kx_nyquist)
-        else:
-            # Odd Nx: no Nyquist mode, kx>0 all weighted by 2
-            energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:] * unmixing_mask[:, :, 1:])
-
-            E_unmixing = float(energy_kx0 + 2.0 * energy_kx_pos)
+        # Use helper function for proper rfft mode weighting
+        energy_array = _compute_rfft_weighted_energy(
+            g_m_squared_4d,
+            mask=unmixing_mask_4d,
+            grid=state.grid,
+            sum_axes=(0, 1),  # Sum over z, y (keep dummy moment axis)
+        )
+        # Extract scalar from [1] array
+        E_unmixing = float(energy_array[0])
     else:
         # Simple sum
         E_unmixing = float(jnp.sum(g_m_squared * unmixing_mask))
