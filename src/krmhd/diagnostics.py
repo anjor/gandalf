@@ -1518,6 +1518,10 @@ def _compute_rfft_weighted_energy(
         mask: Optional boolean mask to select subset of modes
         grid: Spectral grid for Nx information
         sum_axes: Axes to sum over (e.g., (0, 1) for z, y)
+                  IMPORTANT: Must NOT include kx axis (axis 2). This function
+                  handles the kx summation separately to properly weight rfft modes.
+                  Typical usage: sum_axes=(0, 1) to sum over z and y dimensions,
+                  leaving the moment dimension (if present) and handling kx internally.
 
     Returns:
         Properly weighted energy sum
@@ -1681,6 +1685,10 @@ def phase_mixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = True
         implementing a custom function that uses the cached flux to avoid
         redundant computation.
     """
+    # Validate moment index
+    if m >= state.M:
+        raise ValueError(f"Moment index m={m} must be < M={state.M}")
+
     # Compute flux at moment transition m → m+1
     flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]
     flux_m = flux[:, :, :, m]   # Shape: [Nz, Ny, Nx//2+1]
@@ -1762,6 +1770,10 @@ def phase_unmixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = Tr
         implementing a custom function that uses the cached flux to avoid
         redundant computation.
     """
+    # Validate moment index
+    if m >= state.M:
+        raise ValueError(f"Moment index m={m} must be < M={state.M}")
+
     # Compute flux at moment transition m → m+1
     flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]
     flux_m = flux[:, :, :, m]   # Shape: [Nz, Ny, Nx//2+1]
@@ -1921,9 +1933,39 @@ def plot_hermite_moment_energy(
     E_total = hermite_moment_energy(state)
     E_total = np.array(E_total)
 
-    # Compute mixing/unmixing energies
-    E_mixing = np.array([phase_mixing_energy(state, m) for m in range(M)])
-    E_unmixing = np.array([phase_unmixing_energy(state, m) for m in range(M)])
+    # Compute flux once for efficiency (avoid 2M redundant computations)
+    flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]
+
+    # Compute mixing/unmixing energies using cached flux
+    E_mixing = np.zeros(M)
+    E_unmixing = np.zeros(M)
+    for m in range(M):
+        flux_m = flux[:, :, :, m]
+        g_m = state.g[:, :, :, m]
+        g_m_squared = jnp.abs(g_m) ** 2
+
+        # Mixing: flux > 0
+        mixing_mask = flux_m > 0.0
+        g_m_squared_4d = g_m_squared[:, :, :, jnp.newaxis]
+        mixing_mask_4d = mixing_mask[:, :, :, jnp.newaxis]
+        energy_array = _compute_rfft_weighted_energy(
+            g_m_squared_4d,
+            mask=mixing_mask_4d,
+            grid=state.grid,
+            sum_axes=(0, 1),
+        )
+        E_mixing[m] = float(energy_array[0])
+
+        # Unmixing: flux < 0
+        unmixing_mask = flux_m < 0.0
+        unmixing_mask_4d = unmixing_mask[:, :, :, jnp.newaxis]
+        energy_array = _compute_rfft_weighted_energy(
+            g_m_squared_4d,
+            mask=unmixing_mask_4d,
+            grid=state.grid,
+            sum_axes=(0, 1),
+        )
+        E_unmixing[m] = float(energy_array[0])
 
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
@@ -1942,7 +1984,7 @@ def plot_hermite_moment_energy(
     ax.grid(True, alpha=0.3, which='both')
 
     # Add convergence check
-    if M >= 2:
+    if M >= 2 and E_total[0] > 0:
         convergence_ratio = E_total[M] / E_total[0]
         ax.text(0.98, 0.02, f'Convergence: E_{M}/E_0 = {convergence_ratio:.2e}',
                 transform=ax.transAxes, fontsize=9, ha='right',
