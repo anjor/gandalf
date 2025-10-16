@@ -69,7 +69,9 @@ B_MAGNITUDE_MIN = 1e-8
 
 # Safety factor for maximum integration steps
 # Multiplicative margin: allows field lines up to N× longer than straight path
-# In strong turbulence (Bz → 0), arc length can be >> Lz due to spiraling
+# When Bz locally small (due to δB∥ fluctuations), field lines become nearly horizontal
+# (b̂_z ≈ 0), causing slow z-progress. Arc length can be >> Lz in such regions.
+# This is a numerical concern, independent of overall ε ~ δB⊥/B₀ amplitude.
 FIELD_LINE_SAFETY_FACTOR = 10
 
 
@@ -683,8 +685,8 @@ def _follow_field_line_from_B(
     # For now, use Python loop (can optimize later with fixed-step scan)
     #
     # CRITICAL: Safety margin must be multiplicative, not additive!
-    # In strong turbulence (Bz → 0), field lines can spiral extensively in (x,y)
-    # with minimal z-progress. Arc length can be >> Lz.
+    # When Bz becomes locally small, field lines spiral in (x,y) with minimal z-progress.
+    # Arc length can be >> Lz even in RMHD-valid regimes (ε << 1).
     n_steps_max = int(jnp.ceil(grid.Lz / dz)) * FIELD_LINE_SAFETY_FACTOR
 
     for step in range(n_steps_max):
@@ -744,9 +746,9 @@ def _follow_field_line_from_B(
         warnings.warn(
             f"Field line integration incomplete: stopped at z={float(pos[2]):.3f} "
             f"< z_max={grid.Lz/2:.3f} after {n_steps_max} steps. "
-            f"Field line may be spiraling in strong turbulence (Bz → 0). "
+            f"Field line likely spiraling due to locally small Bz (nearly horizontal b̂). "
             f"Consider: (1) decreasing dz, (2) increasing safety margin, "
-            f"or (3) using adaptive step size.",
+            f"or (3) using adaptive step size ds = dz / max(|b̂_z|, 0.1).",
             RuntimeWarning,
             stacklevel=2
         )
@@ -798,13 +800,16 @@ def follow_field_line(
         In straight field limit (B = B₀ẑ), this gives straight vertical lines.
         With turbulent δB⊥, field lines wander in (x, y) plane.
 
-        Wandering amplitude: δr⊥ ~ (δB⊥/B₀) × Lz
+        Wandering amplitude: δr⊥ ~ ε × Lz, where ε ~ δB⊥/B₀ is the RMHD
+        expansion parameter (ε << 1 required for RMHD validity)
 
     Limitations:
-        1. **Step size (IMPORTANT for strong turbulence):**
+        1. **Step size (numerical concern when Bz locally small):**
            - Uses fixed dz in z-direction, not adaptive arc-length ds
-           - When Bz → 0, field lines spiral with minimal z-progress
-           - Current safety factor (10×) may fail in extreme turbulence
+           - When Bz → 0 locally (due to δB∥ fluctuations), field lines become
+             nearly horizontal (b̂_z ≈ 0), causing minimal z-progress and spiraling
+           - This can occur even in RMHD-valid regimes (ε << 1)
+           - Current safety factor (10×) handles typical cases
            - **Recommended for production:** Adaptive step size
              ds = dz / max(|b̂_z|, 0.1) to account for field line direction
            - Alternative: Smaller fixed dz (more steps but safer)

@@ -11,7 +11,12 @@ This example demonstrates:
 Physics:
     Field lines in turbulent plasmas wander perpendicular to the mean field
     due to perpendicular magnetic perturbations δB⊥. The wandering amplitude
-    scales as δr⊥ ~ (δB⊥/B₀) × Lz.
+    scales as δr⊥ ~ ε × Lz, where ε ~ δB⊥/B₀ is the RMHD expansion parameter.
+
+    RMHD ordering requires ε << 1:
+    - ε ~ 0.01: Very weak perturbations, nearly straight field lines
+    - ε ~ 0.1-0.3: Moderate perturbations, visible wandering
+    - ε > 0.5: RMHD ordering breaks down (invalid regime)
 
     For passive scalars (slow modes, Hermite moments), structures that are
     constant along curved field lines have k∥ = 0 in field-line coordinates,
@@ -19,8 +24,8 @@ Physics:
     curvature.
 
 Expected results:
-    - Weak turbulence (δB⊥/B₀ << 1): Nearly straight field lines
-    - Strong turbulence (δB⊥/B₀ ~ 1): Significant wandering
+    - Weak perturbations (ε ~ 0.01): Nearly straight field lines
+    - Moderate perturbations (ε ~ 0.1-0.3): Visible wandering, still within RMHD
     - E(k∥) ≠ E(kz) when field lines are curved
 
 Runtime: ~30 seconds on M1 Pro for 64³ resolution with 10 field lines
@@ -107,17 +112,22 @@ print(f"  Initial energy: E_total = {initial_energies['total']:.6e}")
 phi = (state.z_plus + state.z_minus) / 2.0
 A_parallel = (state.z_plus - state.z_minus) / 2.0
 
-# Estimate δB⊥/B₀ from A_parallel (rough approximation)
-# In normalized units, B₀ ~ 1, and δB⊥ ~ k⊥ |A∥|
-# For rough estimate: δB⊥/B₀ ~ sqrt(<|A∥|²>)
-A_rms = float(jnp.sqrt(jnp.mean(jnp.abs(A_parallel) ** 2)))
-print(f"  Estimated δB⊥/B₀ ~ {A_rms:.3f} (turbulence strength)")
-if A_rms < 0.1:
-    print(f"  → Weak turbulence: field lines should be nearly straight")
-elif A_rms < 0.5:
-    print(f"  → Moderate turbulence: some field line wandering expected")
+# Estimate ε ~ δB⊥/B₀ from A_parallel (rough approximation)
+# In normalized units, B₀ = 1, and δB⊥ ~ k⊥ |A∥|
+# For rough estimate: ε ~ sqrt(<|A∥|²>)
+epsilon = float(jnp.sqrt(jnp.mean(jnp.abs(A_parallel) ** 2)))
+print(f"  Estimated ε ~ δB⊥/B₀ ~ {epsilon:.3f}")
+
+# Check RMHD validity
+if epsilon < 0.05:
+    print(f"  → Very weak perturbations: field lines nearly straight")
+elif epsilon < 0.2:
+    print(f"  → Moderate perturbations: some field line wandering expected")
+elif epsilon < 0.4:
+    print(f"  → Strong perturbations: significant wandering (approaching RMHD limits)")
 else:
-    print(f"  → Strong turbulence: significant field line wandering expected")
+    print(f"  ⚠️  WARNING: ε ~ {epsilon:.3f} may violate RMHD ordering (requires ε << 1)")
+    print(f"      Consider reducing amplitude or changing spectral slope")
 
 # ==========================================================================
 # Field Line Tracing
@@ -152,7 +162,7 @@ for i in range(min(5, n_fieldlines)):  # Just show first 5
 
 avg_wandering = np.mean(wandering_distances)
 print(f"  Average wandering: {avg_wandering:.4f}")
-print(f"  Theory estimate: δr⊥ ~ {A_rms * Lz:.4f}")
+print(f"  Theory estimate: δr⊥ ~ ε × Lz ~ {epsilon * Lz:.4f}")
 
 # ==========================================================================
 # Visualization
@@ -218,7 +228,7 @@ print("Summary")
 print("=" * 70)
 print(f"✓ Traced {n_fieldlines} field lines through turbulent state")
 print(f"✓ Average perpendicular wandering: {avg_wandering:.4f} Lx")
-print(f"✓ Turbulence strength: δB⊥/B₀ ~ {A_rms:.3f}")
+print(f"✓ RMHD expansion parameter: ε ~ {epsilon:.3f}")
 print(f"✓ Generated visualizations in {output_dir}/")
 print("=" * 70)
 
@@ -227,7 +237,7 @@ print(f"  - {output_dir / 'field_line_trajectories.png'}")
 print(f"  - {output_dir / 'parallel_spectrum_comparison.png'}")
 
 print("\nNext steps:")
-print("  - Adjust turbulence strength by changing amplitude or alpha")
+print("  - Adjust ε (perturbation amplitude) by changing amplitude or alpha")
 print("  - Increase n_fieldlines for better statistics")
 print("  - Compare different time snapshots to see field line evolution")
 print("  - Use true k∥ spectrum diagnostic when implemented (Issue #25, #26, #27)")

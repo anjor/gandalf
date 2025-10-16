@@ -34,6 +34,33 @@ where {f,g} = ẑ·(∇f × ∇g) is the Poisson bracket.
 - Implemented via Hermite representation in v∥ or closure approximation
 - Critical for proper damping at k∥v_te ~ ω
 
+### RMHD Ordering and Validity
+
+RMHD is an asymptotic expansion in the small parameter ε:
+```
+ε ~ δB⊥/B₀ ~ ρᵢ/L  << 1
+```
+
+**Ordering hierarchy:**
+- δB ~ ε B₀ (magnetic perturbations, first order)
+- k∥/k⊥ ~ ε (anisotropic cascade favoring k⊥ >> k∥)
+
+**Validity constraints:**
+- **MUST HAVE**: ε << 1 for RMHD to be valid
+- **Typical range**: ε ~ 0.01–0.3
+  - ε ~ 0.01: Very weak perturbations, nearly straight field lines
+  - ε ~ 0.1: Moderate perturbations, visible field line wandering
+  - ε ~ 0.3: Strong perturbations, approaching RMHD breakdown
+- **Beyond ε ~ 0.5**: RMHD ordering breaks down, need full MHD
+- **k_max ρᵢ << 1**: Valid only at scales larger than ion gyroradius
+
+**Physical consequences:**
+- Field line wandering: δr⊥ ~ ε Lz (always << Lz in valid RMHD)
+- Critical balance: k∥ ~ k⊥^(2/3) in turbulent cascade
+
+**IMPORTANT**: Code comments or documentation referring to "strong turbulence" with
+δB⊥/B₀ ~ 1 are **physically incorrect** - such regimes violate RMHD validity.
+
 ### Normalization Convention
 - **Mean field**: B₀ = 1 in code units (normalized Alfvén velocity v_A = 1)
 - **Magnetic field**: B = B₀ẑ + δB where δB comes from perturbations
