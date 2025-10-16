@@ -415,3 +415,214 @@ def check_orthogonality(
         'relative_error': float(rel_error),
         'is_orthogonal': bool(rel_error < rtol)
     }
+
+
+# ============================================================================
+# Hermite Hierarchy Closures (Thesis §2.4)
+# ============================================================================
+
+
+@partial(jax.jit, static_argnames=['M'])
+def closure_zero(g: Array, M: int) -> Array:
+    """
+    Simple truncation closure: gₘ₊₁ = 0.
+
+    This is the simplest closure for the Hermite hierarchy, setting the
+    (M+1)-th moment to zero. Valid when collision damping ensures gₘ is
+    negligible (use check_hermite_convergence to verify).
+
+    This closure is what's currently hardcoded in gm_rhs() for the highest
+    retained moment. With finite collisions ν > 0, high moments are damped,
+    making this closure reasonable for sufficiently large M.
+
+    Args:
+        g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
+        M: Maximum moment index (highest retained moment)
+
+    Returns:
+        gₘ₊₁ = 0 with shape [Nz, Ny, Nx//2+1]
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        >>> g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, 11), dtype=complex)
+        >>> g_M_plus_1 = closure_zero(g, M=10)
+        >>> jnp.all(g_M_plus_1 == 0.0)
+        True
+
+    Reference:
+        Thesis §2.4 - Hermite hierarchy truncation and closure schemes
+    """
+    # Return zeros with correct shape
+    return jnp.zeros_like(g[:, :, :, 0])
+
+
+@partial(jax.jit, static_argnames=['M'])
+def closure_symmetric(g: Array, M: int) -> Array:
+    """
+    Symmetric closure: gₘ₊₁ = gₘ₋₁.
+
+    This closure assumes symmetry in the Hermite hierarchy, setting the
+    (M+1)-th moment equal to the (M-1)-th moment. Generally provides better
+    convergence properties than simple truncation.
+
+    With finite collisions ν > 0 and sufficiently large M, results should be
+    independent of closure choice (use check_hermite_convergence to verify).
+
+    Physical motivation: In the Hermite recurrence relation, each moment couples
+    to its neighbors. The symmetric closure preserves this coupling structure
+    better than truncation.
+
+    Args:
+        g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
+            Must contain at least M-1 moments (M ≥ 2)
+        M: Maximum moment index (highest retained moment, must be ≥ 2)
+
+    Returns:
+        gₘ₊₁ = gₘ₋₁ with shape [Nz, Ny, Nx//2+1]
+
+    Raises:
+        ValueError: If M < 2 (need at least 3 moments for symmetric closure)
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        >>> g = jax.random.normal(jax.random.PRNGKey(42),
+        ...                       (grid.Nz, grid.Ny, grid.Nx//2+1, 11), dtype=complex)
+        >>> g_M_plus_1 = closure_symmetric(g, M=10)
+        >>> jnp.allclose(g_M_plus_1, g[:, :, :, 9])
+        True
+
+    Reference:
+        Thesis §2.4 - Symmetric closure for improved convergence
+    """
+    if M < 2:
+        raise ValueError(
+            f"Symmetric closure requires M ≥ 2 (need gₘ₋₁ for gₘ₊₁ = gₘ₋₁), got M={M}"
+        )
+
+    # Return gₘ₋₁ as the closure for gₘ₊₁
+    return g[:, :, :, M - 1]
+
+
+def check_hermite_convergence(
+    g: Array,
+    threshold: float = 1e-3,
+    account_for_rfft: bool = True
+) -> dict[str, any]:
+    """
+    Check convergence of truncated Hermite hierarchy.
+
+    Verifies that energy in the highest retained moment gₘ is negligible
+    compared to total moment energy. If not converged, increasing M or
+    collision frequency ν is recommended.
+
+    Convergence criterion:
+        E_M / E_total < threshold
+
+    where E_M = |gₘ|² and E_total = Σ|gₙ|² over all moments.
+
+    The energy calculation accounts for rfft format: modes with kx > 0 are
+    counted twice (complex conjugate pairs), while kx = 0 is counted once.
+
+    Args:
+        g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
+        threshold: Convergence threshold (default: 1e-3 = 0.1%)
+        account_for_rfft: If True, properly weight rfft modes (default: True)
+
+    Returns:
+        Dictionary with keys:
+            - 'is_converged': bool, True if E_M / E_total < threshold
+            - 'energy_fraction': float, actual E_M / E_total ratio
+            - 'max_moment_index': int, M (highest moment index)
+            - 'energy_highest_moment': float, E_M
+            - 'energy_total': float, E_total = Σ|gₙ|²
+            - 'recommendation': str, human-readable guidance
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        >>> # Converged case: exponentially decaying moments
+        >>> g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, 11), dtype=complex)
+        >>> for m in range(11):
+        ...     g = g.at[:, :, :, m].set(jnp.exp(-m) * (1 + 0j))
+        >>> result = check_hermite_convergence(g)
+        >>> result['is_converged']
+        True
+        >>> # Not converged case: uniform moments
+        >>> g_uniform = jnp.ones_like(g)
+        >>> result_bad = check_hermite_convergence(g_uniform)
+        >>> result_bad['is_converged']
+        False
+
+    Reference:
+        Thesis §2.4 - Convergence requirements for Hermite truncation
+    """
+    M = g.shape[3] - 1  # Maximum moment index
+
+    if M < 1:
+        raise ValueError(f"Need at least 2 moments (M ≥ 1) for convergence check, got M={M}")
+
+    # Compute energy in each moment: |gₙ|² summed over spatial modes
+    # Shape: [M+1]
+    if account_for_rfft:
+        # rfft format: kx=0 plane counted once, kx>0 counted twice
+        # g has shape [Nz, Ny, Nx//2+1, M+1]
+        energy_per_moment = jnp.zeros(M + 1, dtype=jnp.float32)
+
+        for m in range(M + 1):
+            # Energy from kx=0 plane (counted once)
+            energy_kx0 = jnp.sum(jnp.abs(g[:, :, 0, m])**2)
+
+            # Energy from kx>0 planes (counted twice due to conjugate symmetry)
+            energy_kx_pos = jnp.sum(jnp.abs(g[:, :, 1:, m])**2)
+
+            energy_per_moment = energy_per_moment.at[m].set(energy_kx0 + 2.0 * energy_kx_pos)
+    else:
+        # Simple sum without rfft correction (for testing or debug)
+        energy_per_moment = jnp.sum(jnp.abs(g)**2, axis=(0, 1, 2))
+
+    # Total energy and highest moment energy
+    energy_total = jnp.sum(energy_per_moment)
+    energy_highest = energy_per_moment[M]
+
+    # Avoid division by zero
+    if energy_total == 0:
+        return {
+            'is_converged': True,
+            'energy_fraction': 0.0,
+            'max_moment_index': M,
+            'energy_highest_moment': 0.0,
+            'energy_total': 0.0,
+            'recommendation': 'All moments are zero - trivially converged.'
+        }
+
+    # Compute energy fraction
+    energy_fraction = energy_highest / energy_total
+
+    # Check convergence
+    is_converged = energy_fraction < threshold
+
+    # Generate recommendation
+    if is_converged:
+        recommendation = (
+            f"✓ Converged: Energy in g_{M} is {100*energy_fraction:.2f}% of total "
+            f"(< {100*threshold:.2f}% threshold). Truncation at M={M} is valid."
+        )
+    else:
+        # Estimate required M for convergence (assuming exponential decay)
+        # E_m ~ exp(-α·m), want E_M / E_total < threshold
+        # Very rough estimate: increase M by ~10-20% typically helps
+        suggested_M = int(M * 1.2)
+        recommendation = (
+            f"✗ Not converged: Energy in g_{M} is {100*energy_fraction:.2f}% of total "
+            f"(≥ {100*threshold:.2f}% threshold). "
+            f"Recommendations: (1) Increase M to ~{suggested_M}, or "
+            f"(2) Increase collision frequency ν to damp high moments."
+        )
+
+    return {
+        'is_converged': bool(is_converged),
+        'energy_fraction': float(energy_fraction),
+        'max_moment_index': int(M),
+        'energy_highest_moment': float(energy_highest),
+        'energy_total': float(energy_total),
+        'recommendation': recommendation
+    }
