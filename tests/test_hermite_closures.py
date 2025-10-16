@@ -518,16 +518,22 @@ class TestClosureIntegration:
         )
 
         # "Evolve" by applying collision damping
-        g_evolved = g_init.copy()
+        # JAX arrays are immutable, so we can assign directly
+        g_evolved = g_init
 
         # Apply collision damping manually for moments m ≥ 2
         # (in real timestepping this happens in gm_rhs)
         nu = 0.1  # Collision frequency
         dt = 0.01
 
-        for m in range(2, M + 1):
-            damping_factor = jnp.exp(-nu * m * dt)
-            g_evolved = g_evolved.at[:, :, :, m].multiply(damping_factor)
+        # Vectorized damping: apply to all moments m ≥ 2 at once
+        m_indices = jnp.arange(2, M + 1)
+        damping_factors = jnp.exp(-nu * m_indices * dt)
+
+        # Apply damping using broadcasting: shape (M-1,) → (1, 1, 1, M-1)
+        g_evolved = g_evolved.at[:, :, :, 2:].multiply(
+            damping_factors[None, None, None, :]
+        )
 
         # Check convergence on both states
         result_init = check_hermite_convergence(g_init)
