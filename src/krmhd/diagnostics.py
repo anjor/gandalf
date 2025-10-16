@@ -1451,38 +1451,35 @@ def hermite_flux(state: KRMHDState) -> Array:
           (Issue #25 infrastructure available, future enhancement)
         - Flux is real-valued (imaginary part of gₘ₊₁·g*ₘ)
         - Shape: [Nz, Ny, Nx//2+1, M] for M moment transitions
+        - Vectorized implementation for JIT compilation performance
     """
     grid = state.grid
     M = state.M  # Number of moments (g has shape [..., M+1])
 
     # Get parallel wavenumber k∥ = kz
-    # Shape: [Nz] → broadcast to [Nz, 1, 1, 1]
+    # Shape: [Nz, 1, 1, 1] for broadcasting
     k_parallel = grid.kz[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
 
-    # Initialize flux array: shape [Nz, Ny, Nx//2+1, M]
-    flux = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M), dtype=float)
+    # Vectorized computation over all moments
+    # Extract all adjacent moment pairs using slicing
+    g_m = state.g[:, :, :, :-1]       # Shape: [Nz, Ny, Nx//2+1, M]
+    g_m_plus_1 = state.g[:, :, :, 1:]  # Shape: [Nz, Ny, Nx//2+1, M]
 
-    # Compute flux for each moment transition m → m+1
-    # Γₘ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ]
-    for m in range(M):
-        # Extract moments m and m+1
-        g_m = state.g[:, :, :, m]       # Shape: [Nz, Ny, Nx//2+1]
-        g_m_plus_1 = state.g[:, :, :, m + 1]  # Shape: [Nz, Ny, Nx//2+1]
+    # Compute coupling factors for all moments: √(2(m+1))
+    m_indices = jnp.arange(M)  # Shape: [M]
+    coupling = jnp.sqrt(2.0 * (m_indices + 1))  # Shape: [M]
 
-        # Compute coupling factor √(2(m+1))
-        coupling = jnp.sqrt(2.0 * (m + 1))
+    # Broadcast coupling to match flux shape: [1, 1, 1, M]
+    coupling = coupling[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
 
-        # Compute complex product gₘ₊₁·g*ₘ
-        product = g_m_plus_1 * jnp.conj(g_m)
+    # Compute complex product gₘ₊₁·g*ₘ for all moments
+    product = g_m_plus_1 * jnp.conj(g_m)  # Shape: [Nz, Ny, Nx//2+1, M]
 
-        # Extract imaginary part: Im[gₘ₊₁·g*ₘ]
-        im_product = jnp.imag(product)
+    # Extract imaginary part: Im[gₘ₊₁·g*ₘ]
+    im_product = jnp.imag(product)
 
-        # Compute flux: Γₘ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ]
-        flux_m = -k_parallel[:, :, :, 0] * coupling * im_product
-
-        # Store in flux array
-        flux = flux.at[:, :, :, m].set(flux_m)
+    # Compute flux for all moments: Γₘ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ]
+    flux = -k_parallel * coupling * im_product  # Shape: [Nz, Ny, Nx//2+1, M]
 
     return flux
 
@@ -1522,27 +1519,41 @@ def hermite_moment_energy(state: KRMHDState, account_for_rfft: bool = True) -> A
         >>> plt.ylabel('Energy E_m')
 
     Note:
-        Uses same rfft accounting as check_hermite_convergence():
+        Uses proper rfft accounting:
         - kx=0 plane counted once (real modes)
-        - kx>0 planes counted twice (complex conjugate pairs)
+        - kx=Nyquist plane counted once (for even Nx, it's real)
+        - kx>0 (non-Nyquist) planes counted twice (complex conjugate pairs)
         - Ensures proper Parseval's theorem: ∑Eₘ = E_total
     """
     M = state.M
     g = state.g  # Shape: [Nz, Ny, Nx//2+1, M+1]
+    grid = state.grid
 
     # Compute |gₘ|² for all moments
     g_squared = jnp.abs(g) ** 2  # Shape: [Nz, Ny, Nx//2+1, M+1]
 
     if account_for_rfft:
         # rfft format: kx=0 plane counted once, kx>0 counted twice
-        # Energy from kx=0 plane (counted once): sum over (z, y) for each moment
+        # BUT: for even Nx, Nyquist mode (kx=Nx/2) is also real, counted once
+
+        # Energy from kx=0 plane (always counted once)
         energy_kx0 = jnp.sum(g_squared[:, :, 0, :], axis=(0, 1))  # Shape: [M+1]
 
-        # Energy from kx>0 planes (counted twice): sum over (z, y, kx>0) for each moment
-        energy_kx_pos = jnp.sum(g_squared[:, :, 1:, :], axis=(0, 1, 2))  # Shape: [M+1]
+        if grid.Nx % 2 == 0:
+            # Even Nx: Nyquist mode exists at kx=Nx/2 (last index)
+            # This mode is real, so count it once
+            energy_kx_nyquist = jnp.sum(g_squared[:, :, -1, :], axis=(0, 1))  # Shape: [M+1]
 
-        # Combine with proper weighting
-        energy = energy_kx0 + 2.0 * energy_kx_pos  # Shape: [M+1]
+            # Energy from kx>0 (excluding Nyquist): counted twice
+            energy_kx_pos = jnp.sum(g_squared[:, :, 1:-1, :], axis=(0, 1, 2))  # Shape: [M+1]
+
+            energy = energy_kx0 + 2.0 * energy_kx_pos + energy_kx_nyquist
+        else:
+            # Odd Nx: No Nyquist mode
+            # Energy from kx>0 planes: counted twice
+            energy_kx_pos = jnp.sum(g_squared[:, :, 1:, :], axis=(0, 1, 2))  # Shape: [M+1]
+
+            energy = energy_kx0 + 2.0 * energy_kx_pos
     else:
         # Simple sum without rfft correction (for testing/debugging)
         energy = jnp.sum(g_squared, axis=(0, 1, 2))  # Shape: [M+1]
@@ -1585,9 +1596,6 @@ def phase_mixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = True
         - Complementary to phase_unmixing_energy()
         - Together they partition E_m into mixing/unmixing components
     """
-    if m >= state.M:
-        raise ValueError(f"Moment index m={m} must be < M={state.M}")
-
     # Compute flux at moment transition m → m+1
     flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]
     flux_m = flux[:, :, :, m]   # Shape: [Nz, Ny, Nx//2+1]
@@ -1600,14 +1608,24 @@ def phase_mixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = True
     g_m_squared = jnp.abs(g_m) ** 2
 
     if account_for_rfft:
-        # Apply rfft weighting
+        # Apply rfft weighting with proper Nyquist handling
         # kx=0 plane: weight = 1
         energy_kx0 = jnp.sum(g_m_squared[:, :, 0] * mixing_mask[:, :, 0])
 
-        # kx>0 planes: weight = 2
-        energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:] * mixing_mask[:, :, 1:])
+        grid = state.grid
+        if grid.Nx % 2 == 0:
+            # Even Nx: Nyquist mode at kx=Nx/2 (last index), weight = 1
+            energy_kx_nyquist = jnp.sum(g_m_squared[:, :, -1] * mixing_mask[:, :, -1])
 
-        E_mixing = float(energy_kx0 + 2.0 * energy_kx_pos)
+            # kx>0 (excluding Nyquist): weight = 2
+            energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:-1] * mixing_mask[:, :, 1:-1])
+
+            E_mixing = float(energy_kx0 + 2.0 * energy_kx_pos + energy_kx_nyquist)
+        else:
+            # Odd Nx: no Nyquist mode, kx>0 all weighted by 2
+            energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:] * mixing_mask[:, :, 1:])
+
+            E_mixing = float(energy_kx0 + 2.0 * energy_kx_pos)
     else:
         # Simple sum
         E_mixing = float(jnp.sum(g_m_squared * mixing_mask))
@@ -1658,9 +1676,6 @@ def phase_unmixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = Tr
         - Together: E_m = E_mixing(m) + E_unmixing(m)
         - Sign convention: Γₘ,ₖ < 0 means flux from m+1 → m
     """
-    if m >= state.M:
-        raise ValueError(f"Moment index m={m} must be < M={state.M}")
-
     # Compute flux at moment transition m → m+1
     flux = hermite_flux(state)  # Shape: [Nz, Ny, Nx//2+1, M]
     flux_m = flux[:, :, :, m]   # Shape: [Nz, Ny, Nx//2+1]
@@ -1673,14 +1688,24 @@ def phase_unmixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = Tr
     g_m_squared = jnp.abs(g_m) ** 2
 
     if account_for_rfft:
-        # Apply rfft weighting
+        # Apply rfft weighting with proper Nyquist handling
         # kx=0 plane: weight = 1
         energy_kx0 = jnp.sum(g_m_squared[:, :, 0] * unmixing_mask[:, :, 0])
 
-        # kx>0 planes: weight = 2
-        energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:] * unmixing_mask[:, :, 1:])
+        grid = state.grid
+        if grid.Nx % 2 == 0:
+            # Even Nx: Nyquist mode at kx=Nx/2 (last index), weight = 1
+            energy_kx_nyquist = jnp.sum(g_m_squared[:, :, -1] * unmixing_mask[:, :, -1])
 
-        E_unmixing = float(energy_kx0 + 2.0 * energy_kx_pos)
+            # kx>0 (excluding Nyquist): weight = 2
+            energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:-1] * unmixing_mask[:, :, 1:-1])
+
+            E_unmixing = float(energy_kx0 + 2.0 * energy_kx_pos + energy_kx_nyquist)
+        else:
+            # Odd Nx: no Nyquist mode, kx>0 all weighted by 2
+            energy_kx_pos = jnp.sum(g_m_squared[:, :, 1:] * unmixing_mask[:, :, 1:])
+
+            E_unmixing = float(energy_kx0 + 2.0 * energy_kx_pos)
     else:
         # Simple sum
         E_unmixing = float(jnp.sum(g_m_squared * unmixing_mask))
