@@ -896,7 +896,13 @@ def gm_rhs(
     Warning:
         For m = M (highest retained moment), gₘ₊₁ is assumed zero (truncation closure).
         This is only valid when collision damping ensures gₘ is negligible.
-        For production runs, implement proper closure (Issue #24: gₘ₊₁ = 0 or gₘ₊₁ = gₘ₋₁).
+
+        Alternative closures are available (Issue #24):
+        - krmhd.hermite.closure_zero(g, M): Returns gₘ₊₁ = 0 (current default)
+        - krmhd.hermite.closure_symmetric(g, M): Returns gₘ₊₁ = gₘ₋₁ (better convergence)
+        - krmhd.hermite.check_hermite_convergence(g): Verify truncation is valid
+
+        TODO: Add runtime closure selection parameter to gm_rhs()
 
     Reference:
         Thesis §2.2, Eq. 2.9
