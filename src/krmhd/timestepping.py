@@ -443,6 +443,8 @@ def _gandalf_step_jit(
     )  # Shape: [M+1]
 
     # Apply BOTH dissipation mechanisms: resistive (all m) AND collisional (m≥2)
+    # Note: Multiplicative dissipation operators preserve reality condition f(-k) = f*(k)
+    # since exp(-rate·dt) is real and applied uniformly to all modes
     g_new = g_new * g_resistive_damp[:, :, :, jnp.newaxis]  # (1) Resistive dissipation
     g_new = g_new * collision_factors[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (2) Collisional damping
 
@@ -544,13 +546,13 @@ def gandalf_step(
     if hyper_r not in [1, 2, 4, 8]:
         raise ValueError(
             f"hyper_r must be 1, 2, 4, or 8 (got {hyper_r}). "
-            "Use r=1 for standard dissipation, r=8 for production hyper-dissipation."
+            "Use r=1 for standard dissipation, r=2 for typical turbulence studies."
         )
 
     if hyper_n not in [1, 2, 4]:
         raise ValueError(
             f"hyper_n must be 1, 2, or 4 (got {hyper_n}). "
-            "Use n=1 for standard collisions, n=4 for production hyper-collisions."
+            "Use n=1 for standard collisions, n=2 for typical turbulence studies."
         )
 
     # Safety check for hyper-collision overflow (HIGH PRIORITY)
@@ -581,10 +583,11 @@ def gandalf_step(
     # Safety check for hyper-resistivity overflow
     if hyper_r > 1:
         grid = state.grid
-        # Estimate k_max from grid
+        # Estimate k_perp_max from grid (diagonal corner of k-space)
+        # This is the worst-case perpendicular wavenumber for dissipation
         kx_max = grid.kx[-1]  # Nyquist in x
         ky_max = max(abs(grid.ky[0]), abs(grid.ky[-1]))  # Nyquist in y
-        k_perp_max_squared = kx_max**2 + ky_max**2
+        k_perp_max_squared = kx_max**2 + ky_max**2  # Pythagorean sum (diagonal corner)
 
         # Check for potential numerical precision issues in k_perp^(2r) calculation
         # For r=8, k_max=64: k_max^16 ≈ 10^28 (still safe, but approaching precision limits)

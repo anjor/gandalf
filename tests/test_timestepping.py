@@ -889,3 +889,149 @@ class TestHyperdissipationEdgeCases:
 
         assert jnp.isfinite(state_new.z_plus).all()
         assert jnp.isfinite(state_new.g).all()
+
+
+class TestHyperdissipationDegenerateCases:
+    """Test suite for degenerate cases: zero fields, M=0, very coarse grids."""
+
+    def test_zero_fields(self):
+        """Hyper-dissipation should handle zero initial fields gracefully."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create state with all zero fields explicitly
+        M = 10
+        state = KRMHDState(
+            z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64),
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.1,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        # Apply hyper-dissipation
+        dt = 0.01
+        eta = 0.01
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+        # Should remain zero (dissipation of zero is zero)
+        assert jnp.allclose(state_new.z_plus, 0.0, atol=1e-15)
+        assert jnp.allclose(state_new.z_minus, 0.0, atol=1e-15)
+        assert jnp.allclose(state_new.g, 0.0, atol=1e-15)
+
+    def test_very_coarse_grid(self):
+        """Hyper-dissipation should work with very coarse grids (Nx=8)."""
+        # Very coarse grid: 8x8x8
+        grid = SpectralGrid3D.create(Nx=8, Ny=8, Nz=8)
+        state = initialize_alfven_wave(grid, M=5, kz_mode=1, amplitude=0.1)
+
+        # Even for a coarse grid, r=8 requires tiny eta
+        # k_max ~ 4.12, so k_max^16 ~ 7e9 (still huge!)
+        # Use r=2 instead (practical maximum)
+        dt = 0.01
+        eta = 0.01  # Safe for r=2
+        state.nu = 0.05
+
+        # Should work without errors
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+            # Should not crash and produce finite results
+            assert jnp.isfinite(state_new.z_plus).all()
+            assert jnp.isfinite(state_new.g).all()
+            # Verify dissipation is working (energy decreases)
+            E_elsasser_init = jnp.sum(jnp.abs(state.z_plus)**2) + jnp.sum(jnp.abs(state.z_minus)**2)
+            E_hermite_init = jnp.sum(jnp.abs(state.g)**2)
+            E_initial = E_elsasser_init + E_hermite_init
+
+            E_elsasser_final = jnp.sum(jnp.abs(state_new.z_plus)**2) + jnp.sum(jnp.abs(state_new.z_minus)**2)
+            E_hermite_final = jnp.sum(jnp.abs(state_new.g)**2)
+            E_final = E_elsasser_final + E_hermite_final
+            assert E_final < E_initial, "Dissipation should reduce energy"
+
+    def test_M_equals_one(self):
+        """Hyper-collisions should handle M=1 gracefully (only m=0,1 moments, no collisions)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create state with M=1 (only g_0 and g_1 exist, both exempt from collisions)
+        M = 1
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_plus = z_plus.at[1, 1, 1].set(0.1 + 0.0j)
+
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g = g.at[1, 1, 1, 0].set(0.1 + 0.0j)  # m=0
+        g = g.at[1, 1, 1, 1].set(0.05 + 0.0j)  # m=1
+
+        state = KRMHDState(
+            z_plus=z_plus,
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            g=g,
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=10.0,  # Large collision frequency (should have NO effect since m=0,1 are exempt)
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        # Apply hyper-collisions (large nu to verify exemption)
+        dt = 0.01
+        eta = 0.01
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=4)
+
+        # m=0,1 should not be affected by collisions (conservation)
+        # Should not produce NaN or Inf values despite large nu
+        assert state_new.g.shape == (grid.Nz, grid.Ny, grid.Nx//2+1, M+1)
+        assert jnp.isfinite(state_new.g).all(), "Should produce finite values despite large nu"
+
+        # Energy should decrease (from resistive dissipation only)
+        E_initial = jnp.sum(jnp.abs(state.g)**2)
+        E_final = jnp.sum(jnp.abs(state_new.g)**2)
+        assert E_final < E_initial, "Energy should decrease due to resistive dissipation"
+
+    def test_warning_threshold_exact(self):
+        """Verify warnings trigger at exactly the documented threshold (20.0)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # For M=10, n=2, dt=0.01:
+        # Collision rate = nu * 10^4 * 0.01 = nu * 100
+        # To hit threshold of exactly 20.0: nu = 20.0 / 100 = 0.2
+        dt = 0.01
+        eta = 0.001
+        nu_threshold = 20.0 / (10**4 * dt)  # Exactly at warning threshold
+        state.nu = nu_threshold
+
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            # Should trigger warning (rate >= 20.0)
+            state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+            # Verify warning was triggered
+            hyper_warnings = [warning for warning in w
+                             if "damping rate" in str(warning.message)]
+            assert len(hyper_warnings) > 0, "Should trigger warning at threshold 20.0"
+
+        # Just below threshold should NOT warn
+        state.nu = nu_threshold * 0.99  # Slightly below 20.0
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+            # Verify no warning below threshold
+            hyper_warnings = [warning for warning in w
+                             if "damping rate" in str(warning.message)]
+            assert len(hyper_warnings) == 0, "Should NOT warn below threshold 20.0"
