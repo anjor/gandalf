@@ -20,6 +20,7 @@ References:
     - Issue #27 - Implementation details
 """
 
+from typing import Dict, Tuple, Any
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -173,7 +174,12 @@ def analytical_phase_unmixing_spectrum(
     alpha = 0.5
 
     # k∥ dependence (small k∥ enhances phase unmixing)
-    k_ratio_factor = (k_perp / (k_parallel + 1e-3))**0.5
+    # Explicit handling for k_parallel ≈ 0 case
+    if abs(k_parallel) < 1e-6:
+        # Pure perpendicular mode: phase unmixing saturates
+        k_ratio_factor = (k_perp * 1000.0)**0.5
+    else:
+        k_ratio_factor = (k_perp / k_parallel)**0.5
 
     # Analytical spectrum
     spectrum = amplitude * k_ratio_factor * (m_array + 1.0)**(-alpha) * np.exp(-m_array / m_crit)
@@ -250,10 +256,10 @@ def run_forced_single_mode(
     n_steps: int = 500,
     n_warmup: int = 300,
     steady_state_window: int = 50,
-    grid_size: tuple = (32, 32, 16),
+    grid_size: Tuple[int, int, int] = (32, 32, 16),
     cfl_safety: float = 0.3,
     seed: int = 42,
-) -> dict:
+) -> Dict[str, Any]:
     """
     Run forced single-mode simulation to steady state and measure spectrum.
 
@@ -367,7 +373,12 @@ def run_forced_single_mode(
             n_samples += 1
 
     # Compute time-averaged spectrum
-    spectrum_avg = spectrum_sum / n_samples if n_samples > 0 else spectrum_sum
+    if n_samples == 0:
+        raise ValueError(
+            f"No samples collected for time-averaging! n_warmup={n_warmup} >= n_steps={n_steps}. "
+            f"Increase n_steps or decrease n_warmup."
+        )
+    spectrum_avg = spectrum_sum / n_samples
 
     # Check if steady state was reached
     if len(history.E_total) >= steady_state_window:
@@ -399,7 +410,11 @@ def run_forced_single_mode(
 # ============================================================================
 
 
-def plot_fdt_comparison(result: dict, analytical_spectrum: np.ndarray, title: str = ""):
+def plot_fdt_comparison(
+    result: Dict[str, Any],
+    analytical_spectrum: np.ndarray,
+    title: str = ""
+) -> Any:  # matplotlib.figure.Figure, but avoid hard dependency in type hint
     """
     Plot numerical vs analytical spectrum comparison.
 
@@ -414,8 +429,13 @@ def plot_fdt_comparison(result: dict, analytical_spectrum: np.ndarray, title: st
     m_array = np.arange(M + 1)
 
     # Normalize both spectra
-    spec_num = result['spectrum'] / (result['spectrum'][0] + 1e-10)
-    spec_ana = analytical_spectrum / (analytical_spectrum[0] + 1e-10)
+    if result['spectrum'][0] < 1e-15:
+        raise ValueError(f"Numerical spectrum m=0 too small for normalization: {result['spectrum'][0]}")
+    if analytical_spectrum[0] < 1e-15:
+        raise ValueError(f"Analytical spectrum m=0 too small for normalization: {analytical_spectrum[0]}")
+
+    spec_num = result['spectrum'] / result['spectrum'][0]
+    spec_ana = analytical_spectrum / analytical_spectrum[0]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 

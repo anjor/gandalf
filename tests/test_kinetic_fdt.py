@@ -134,7 +134,8 @@ class TestKineticFDT:
         spectrum_analytical_norm = spectrum_analytical / spectrum_analytical[0]
 
         # Compare (skip m=0 which is normalized to 1)
-        # Focus on m=1 to m=10 where signal is strong
+        # Focus on m=1 to m=10 where signal is strong (requires M >= 10 for full range)
+        # For M < 10, tests all available moments
         m_test_range = slice(1, min(11, M+1))
         relative_error = np.abs(
             spectrum_numerical_norm[m_test_range] - spectrum_analytical_norm[m_test_range]
