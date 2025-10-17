@@ -422,6 +422,11 @@ def hyperdiffusion(
         compared to standard diffusion to avoid over-damping. Rule of thumb:
         η_hyper ~ η_standard / k_max^(2(r-1))
 
+        **Dealiasing:** The hyperdiffusion operator is linear, so it does NOT require
+        dealiasing. However, if the result is subsequently used in nonlinear operations
+        (e.g., Poisson brackets, multiplications), those operations MUST be dealiased
+        to prevent aliasing errors from contaminating the simulation.
+
     Reference:
         - Thesis §2.5.2: Hyper-dissipation for inertial range studies
         - Frisch (1995) "Turbulence": Hyperviscosity discussion

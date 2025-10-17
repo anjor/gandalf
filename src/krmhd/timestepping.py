@@ -578,7 +578,19 @@ def gandalf_step(
         kx_max = grid.kx[-1]  # Nyquist in x
         ky_max = max(abs(grid.ky[0]), abs(grid.ky[-1]))  # Nyquist in y
         k_perp_max_squared = kx_max**2 + ky_max**2
-        max_resistivity_rate = eta * (k_perp_max_squared ** hyper_r) * dt
+
+        # Check for potential numerical precision issues in k_perp^(2r) calculation
+        # For r=8, k_max=64: k_max^16 ≈ 10^28 (still safe, but approaching precision limits)
+        # Warn if k_perp_max^(2r) > 10^20 to alert user to potential issues
+        k_perp_power = k_perp_max_squared ** hyper_r
+        if k_perp_power > 1e20:
+            warnings.warn(
+                f"Very large wavenumber power: k_max^(2r) = {k_perp_max_squared**0.5:.1f}^{2*hyper_r} = {k_perp_power:.2e}. "
+                f"This may cause numerical precision issues. Consider using lower r or smaller grid.",
+                RuntimeWarning
+            )
+
+        max_resistivity_rate = eta * k_perp_power * dt
 
         if max_resistivity_rate >= 50.0:
             safe_eta = 50.0 / ((k_perp_max_squared ** hyper_r) * dt)

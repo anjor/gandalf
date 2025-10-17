@@ -611,6 +611,43 @@ class TestHyperdissipation:
         assert jnp.allclose(state_default.g, state_explicit.g, atol=1e-10), \
             "hyper_n=1 should match default behavior"
 
+    def test_hermite_moments_dual_dissipation(self):
+        """Hermite moments should receive BOTH resistive dissipation AND collision damping."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+
+        # Initialize state with non-zero Hermite moments (M=10 for reasonable test time)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Use moderate parameters with both mechanisms at comparable strength
+        dt = 0.01
+        eta = 0.01  # Smaller resistivity (safe for r=2, k_max~16)
+        nu = 0.1    # Moderate collision frequency (safe for n=2, M=10: nu < 0.5)
+        state.nu = nu
+        v_A = 1.0
+
+        # Evolve with BOTH hyper-resistivity (r=2) and hyper-collisions (n=2)
+        state_dual = rk4_step(state, dt, eta=eta, v_A=v_A, hyper_r=2, hyper_n=2)
+
+        # Also evolve with ONLY resistivity (n=1) for comparison
+        state_resist_only = rk4_step(state, dt, eta=eta, v_A=v_A, hyper_r=2, hyper_n=1)
+
+        # Also evolve with ONLY collisions (r=1) for comparison
+        state_collide_only = rk4_step(state, dt, eta=eta, v_A=v_A, hyper_r=1, hyper_n=2)
+
+        # Compute Hermite moment energy (excluding m=0,1 which are conserved by collisions)
+        # Sum over m >= 2 to see the effect of collision damping
+        E_dual_high = jnp.sum(jnp.abs(state_dual.g[2:, :, :, :])**2)
+        E_resist_only_high = jnp.sum(jnp.abs(state_resist_only.g[2:, :, :, :])**2)
+        E_collide_only_high = jnp.sum(jnp.abs(state_collide_only.g[2:, :, :, :])**2)
+
+        # With both mechanisms, high-m energy should be lower than either mechanism alone
+        # Collision damping primarily affects m >= 2 moments
+        # Resistivity affects all moments through coupling to z±
+        assert E_dual_high < E_resist_only_high, \
+            "Dual dissipation should remove more high-m energy than resistivity alone"
+        assert E_dual_high < E_collide_only_high, \
+            "Dual dissipation should remove more high-m energy than collisions alone"
+
     # NOTE: Tests for r=4, r=8, and n=4 are omitted here because safe parameters
     # (required to avoid overflow) result in negligible dissipation that cannot be
     # reliably measured. The validation tests (TestHyperdissipationValidation) ensure
