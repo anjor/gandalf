@@ -426,9 +426,12 @@ def _gandalf_step_jit(
     g_resistive_damp = jnp.exp(-eta * k_perp_2r * dt)  # Shape: [Nz, Ny, Nx//2+1]
 
     # (2) Collisional damping factors (moment-dependent)
-    # Physics: Lenard-Bernstein collision operator C[g_m] = -νmg_m (thesis Eq. 2.5)
-    # Standard (n=1): g_m → g_m * exp(-νm·δt)
-    # Hyper (n>1): g_m → g_m * exp(-νm^(2n)·δt)
+    # Physics: Lenard-Bernstein collision operator (thesis Eq. 2.5)
+    #   Standard (n=1): C[g_m] = -νm·g_m
+    #   Hyper (n>1):    C[g_m] = -ν·m^(2n)·g_m
+    # Time evolution:
+    #   Standard (n=1): g_m → g_m * exp(-νm·δt)
+    #   Hyper (n>1):    g_m → g_m * exp(-νm^(2n)·δt)
     # Conservation: m=0 (particle number) and m=1 (momentum) are exempt from collisions
     moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
     # For hyper-collisions: ν_m = νm^(2n)
