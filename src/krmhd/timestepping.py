@@ -276,7 +276,7 @@ def krmhd_rhs(
 # =============================================================================
 
 
-@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M"])
+@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n"])
 def _gandalf_step_jit(
     fields: KRMHDFields,
     dt: float,
@@ -293,6 +293,8 @@ def _gandalf_step_jit(
     Nz: int,
     Ny: int,
     Nx: int,
+    hyper_r: int = 1,
+    hyper_n: int = 1,
 ) -> KRMHDFields:
     """
     JIT-compiled GANDALF integrating factor + RK2 timestepper.
@@ -312,9 +314,20 @@ def _gandalf_step_jit(
         dt: Timestep
         kx, ky, kz: Wavenumbers
         dealias_mask: 2/3 dealiasing mask
-        eta: Resistivity
+        eta: Resistivity (or hyper-resistivity coefficient)
         v_A: Alfvén velocity
-        Nz, Ny, Nx: Grid dimensions
+        beta_i: Ion plasma beta
+        nu: Collision frequency (or hyper-collision coefficient)
+        Lambda: Kinetic closure parameter
+        M: Number of Hermite moments
+        Nz, Ny, Nx: Grid dimensions (static)
+        hyper_r: Hyper-resistivity order (default: 1)
+            - r=1: Standard resistivity -ηk⊥²
+            - r=4: Hyper-resistivity -ηk⊥⁸
+            - r=8: Hyper-resistivity -ηk⊥¹⁶ (production default)
+        hyper_n: Hyper-collision order (default: 1)
+            - n=1: Standard collision -νm
+            - n=4: Hyper-collision -νm⁸ (production default)
 
     Returns:
         Updated KRMHDFields after full timestep
@@ -391,25 +404,30 @@ def _gandalf_step_jit(
     # Step 4: Apply dissipation using exponential factors (thesis Eq. 2.23-2.25)
     # =========================================================================
 
-    # Elsasser dissipation uses k_perp² (perpendicular only, thesis Eq. 2.23)
-    # ξ± → ξ± * exp(-η k⊥² Δt)
-    perp_dissipation_factor = jnp.exp(-eta * k_perp_squared * dt)
+    # Elsasser dissipation uses k_perp^(2r) (perpendicular only, thesis Eq. 2.23)
+    # Standard (r=1): ξ± → ξ± * exp(-η k⊥² Δt)
+    # Hyper (r>1): ξ± → ξ± * exp(-η k⊥^(2r) Δt)
+    k_perp_2r = k_perp_squared ** hyper_r
+    perp_dissipation_factor = jnp.exp(-eta * k_perp_2r * dt)
     z_plus_new = z_plus_new * perp_dissipation_factor
     z_minus_new = z_minus_new * perp_dissipation_factor
 
     # Hermite moment dissipation (thesis Eq. 2.24-2.25)
-    # All moments: g → g * exp(-η k⊥² δt)
-    # Plus collisions for m≥2: g_m → g_m * exp(-νm δt)
-    g_dissipation = jnp.exp(-eta * k_perp_squared * dt)  # Shape: [Nz, Ny, Nx//2+1]
+    # All moments: g → g * exp(-η k⊥^(2r) δt)
+    # Plus collisions for m≥2: g_m → g_m * exp(-νm^(2n) δt)
+    g_dissipation = jnp.exp(-eta * k_perp_2r * dt)  # Shape: [Nz, Ny, Nx//2+1]
 
     # Create moment-dependent collision factors using vectorized operations
     # Physics: Lenard-Bernstein collision operator C[g_m] = -νmg_m (thesis Eq. 2.5)
-    # Integrated analytically: g_m → g_m * exp(-νm·δt)
+    # Standard (n=1): g_m → g_m * exp(-νm·δt)
+    # Hyper (n>1): g_m → g_m * exp(-νm^(2n)·δt)
     # Conservation: m=0 (particle number) and m=1 (momentum) are exempt from collisions
     moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
+    # For hyper-collisions: ν_m = νm^(2n)
+    collision_damping_rate = nu * (moment_indices ** (2 * hyper_n))
     collision_factors = jnp.where(
         moment_indices >= 2,
-        jnp.exp(-nu * moment_indices * dt),  # m≥2: collision damping ν_m = νm
+        jnp.exp(-collision_damping_rate * dt),  # m≥2: hyper-collision damping
         1.0,  # m=0,1: no collision (conserves particles and momentum)
     )  # Shape: [M+1]
 
@@ -431,6 +449,8 @@ def gandalf_step(
     dt: float,
     eta: float,
     v_A: float,
+    hyper_r: int = 1,
+    hyper_n: int = 1,
 ) -> KRMHDState:
     """
     Advance KRMHD state using GANDALF integrating factor + RK2 method.
@@ -446,17 +466,30 @@ def gandalf_step(
     Args:
         state: Current KRMHD state at time t
         dt: Timestep size (should satisfy CFL for nonlinear terms)
-        eta: Resistivity coefficient
+        eta: Resistivity coefficient (or hyper-resistivity if hyper_r > 1)
         v_A: Alfvén velocity
+        hyper_r: Hyper-resistivity order (default: 1)
+            - r=1: Standard resistivity -ηk⊥² (default, backward compatible)
+            - r=4: Hyper-resistivity -ηk⊥⁸ (moderate concentration at high k)
+            - r=8: Hyper-resistivity -ηk⊥¹⁶ (sharp cutoff, production default)
+        hyper_n: Hyper-collision order (default: 1)
+            - n=1: Standard collision -νm (default, backward compatible)
+            - n=4: Hyper-collision -νm⁸ (production default)
 
     Returns:
         New KRMHDState at time t + dt
 
     Example:
+        >>> # Standard dissipation (backward compatible)
         >>> state_new = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0)
-        >>> # Or in a loop:
+        >>>
+        >>> # Hyper-dissipation for turbulence studies
+        >>> state_new = gandalf_step(state, dt=0.01, eta=0.001, v_A=1.0,
+        ...                          hyper_r=8, hyper_n=4)
+        >>>
+        >>> # In a loop:
         >>> for i in range(n_steps):
-        ...     state = gandalf_step(state, dt, eta, v_A)
+        ...     state = gandalf_step(state, dt, eta, v_A, hyper_r=8, hyper_n=4)
 
     Physics:
         - Linear propagation: Handled exactly (unconditionally stable)
@@ -465,9 +498,14 @@ def gandalf_step(
         - Overall: O(dt²) convergence
         - Energy conservation: Excellent in inviscid limit
 
+        Hyper-dissipation (r>1) concentrates dissipation at small scales:
+        - Standard (r=1): All scales affected equally ∝ k⊥²
+        - Hyper (r=8): Sharp cutoff, negligible below k_max/2
+
     Reference:
         - Thesis Chapter 2, §2.4 - GANDALF Algorithm
         - Eqs. 2.13-2.25 - Integrating factor + RK2 implementation
+        - Thesis §2.5.2 - Hyper-dissipation for inertial range studies
     """
     grid = state.grid
     fields = _fields_from_state(state)
@@ -489,6 +527,8 @@ def gandalf_step(
         grid.Nz,
         grid.Ny,
         grid.Nx,
+        hyper_r,
+        hyper_n,
     )
 
     # Convert back to KRMHDState (Pydantic validation at boundary)
