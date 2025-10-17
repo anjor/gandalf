@@ -924,6 +924,55 @@ class TestHyperdissipationDegenerateCases:
         assert jnp.allclose(state_new.z_minus, 0.0, atol=1e-15)
         assert jnp.allclose(state_new.g, 0.0, atol=1e-15)
 
+    def test_zero_field_integration_multiple_steps(self):
+        """Integration test: Zero fields should remain zero over multiple timesteps (no spurious modes)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create state with all zero fields
+        M = 10
+        state = KRMHDState(
+            z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64),
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.1,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        # Run multiple timesteps with both standard and hyper-dissipation
+        dt = 0.01
+        n_steps = 10
+
+        # Test with standard dissipation (r=1, n=1)
+        state_r1 = state
+        for _ in range(n_steps):
+            state_r1 = rk4_step(state_r1, dt, eta=0.01, v_A=1.0, hyper_r=1, hyper_n=1)
+
+        # Verify no spurious modes generated
+        assert jnp.allclose(state_r1.z_plus, 0.0, atol=1e-15), "Spurious modes in z_plus (r=1)"
+        assert jnp.allclose(state_r1.z_minus, 0.0, atol=1e-15), "Spurious modes in z_minus (r=1)"
+        assert jnp.allclose(state_r1.g, 0.0, atol=1e-15), "Spurious modes in g (r=1)"
+
+        # Test with hyper-dissipation (r=2, n=2)
+        state_r2 = state
+        for _ in range(n_steps):
+            state_r2 = rk4_step(state_r2, dt, eta=0.0001, v_A=1.0, hyper_r=2, hyper_n=2)
+
+        # Verify no spurious modes generated
+        assert jnp.allclose(state_r2.z_plus, 0.0, atol=1e-15), "Spurious modes in z_plus (r=2)"
+        assert jnp.allclose(state_r2.z_minus, 0.0, atol=1e-15), "Spurious modes in z_minus (r=2)"
+        assert jnp.allclose(state_r2.g, 0.0, atol=1e-15), "Spurious modes in g (r=2)"
+
+        # Explicitly verify all Fourier modes remain zero (no single-mode excitation)
+        assert jnp.max(jnp.abs(state_r2.z_plus)) == 0.0, "Non-zero Fourier mode in z_plus"
+        assert jnp.max(jnp.abs(state_r2.z_minus)) == 0.0, "Non-zero Fourier mode in z_minus"
+        assert jnp.max(jnp.abs(state_r2.g)) == 0.0, "Non-zero Fourier mode in g"
+
     def test_very_coarse_grid(self):
         """Hyper-dissipation should work with very coarse grids (Nx=8)."""
         # Very coarse grid: 8x8x8

@@ -596,11 +596,11 @@ def gandalf_step(
     # Safety check for hyper-resistivity overflow
     if hyper_r > 1:
         grid = state.grid
-        # Estimate k_perp_max from grid (diagonal corner of k-space)
+        # Estimate k_perp_max from grid (maximum perpendicular wavenumber at Nyquist corner)
         # This is the worst-case perpendicular wavenumber for dissipation
         kx_max = grid.kx[-1]  # Nyquist in x
         ky_max = max(abs(grid.ky[0]), abs(grid.ky[-1]))  # Nyquist in y
-        k_perp_max_squared = kx_max**2 + ky_max**2  # Pythagorean sum (diagonal corner)
+        k_perp_max_squared = kx_max**2 + ky_max**2  # Pythagorean sum at corner of k-space
 
         # Check for potential numerical precision issues in k_perp^(2r) calculation
         # For r=8, k_max=64: k_max^16 ≈ 10^28 (still safe, but approaching precision limits)
