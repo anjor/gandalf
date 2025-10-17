@@ -31,7 +31,6 @@ from krmhd import (
     gandalf_step,
     compute_cfl_timestep,
     force_alfven_modes,
-    energy as compute_energy,
 )
 from krmhd.diagnostics import (
     hermite_moment_energy,
@@ -47,6 +46,13 @@ from krmhd.diagnostics import (
 FORCING_BAND_MIN_ABSOLUTE = 0.1  # Minimum k_min to avoid k=0 mode
 FORCING_BAND_LOWER_FACTOR = 0.9  # k_min = k_target * 0.9
 FORCING_BAND_UPPER_FACTOR = 1.1  # k_max = k_target * 1.1
+
+# Numerical thresholds
+K_PARALLEL_ZERO_THRESHOLD = 1e-6  # Consider k∥ ≈ 0 below this value
+COLLISION_FREQ_ZERO_THRESHOLD = 1e-6  # Consider ν ≈ 0 below this value (collisionless limit)
+SPECTRUM_NORMALIZATION_THRESHOLD = 1e-15  # Minimum |g_0|² for safe normalization
+STEADY_STATE_FLUCTUATION_THRESHOLD = 0.1  # 10% energy fluctuation criterion
+COLLISIONLESS_M_CRIT = 1000.0  # Effective m_crit for collisionless limit (ν → 0)
 
 
 # ============================================================================
@@ -102,8 +108,8 @@ def analytical_phase_mixing_spectrum(
     """
     # Phase mixing scale: critical moment where collisions balance mixing
     # In collisionless limit (nu → 0), cascade extends to high m (set large m_crit)
-    if nu < 1e-6:
-        m_crit = 1000.0  # Effectively infinite for collisionless case
+    if nu < COLLISION_FREQ_ZERO_THRESHOLD:
+        m_crit = COLLISIONLESS_M_CRIT  # Effectively infinite for collisionless case
     else:
         m_crit = k_parallel * v_th / nu
 
@@ -112,15 +118,22 @@ def analytical_phase_mixing_spectrum(
     alpha = 1.5
 
     # k⊥ dependence (perpendicular structure affects spectrum normalization)
-    k_perp_factor = 1.0 / (1.0 + (k_perp / k_parallel)**2)
+    # Explicit handling for k_parallel ≈ 0 case
+    if abs(k_parallel) < K_PARALLEL_ZERO_THRESHOLD:
+        # Pure perpendicular mode: phase mixing suppressed
+        k_perp_factor = 1.0
+    else:
+        k_perp_factor = 1.0 / (1.0 + (k_perp / k_parallel)**2)
 
     # Analytical spectrum: power law × exponential cutoff
     spectrum = amplitude * k_perp_factor * (m_array + 1.0)**(-alpha) * np.exp(-m_array / m_crit)
 
     # Normalize by m=0 value for relative comparison
-    if spectrum[0] < 1e-15:
-        # Spectrum is essentially zero - return unnormalized or raise error
-        raise ValueError(f"Spectrum m=0 value too small for normalization: {spectrum[0]}")
+    if spectrum[0] < SPECTRUM_NORMALIZATION_THRESHOLD:
+        raise ValueError(
+            f"Phase mixing spectrum m=0 too small for normalization: {spectrum[0]} "
+            f"< {SPECTRUM_NORMALIZATION_THRESHOLD}"
+        )
     spectrum = spectrum / spectrum[0]
 
     return spectrum
@@ -165,8 +178,8 @@ def analytical_phase_unmixing_spectrum(
     """
     # Phase unmixing is weaker than phase mixing
     # In collisionless limit (nu → 0), unmixing is weak (set large m_crit)
-    if nu < 1e-6:
-        m_crit = 1000.0  # Effectively infinite for collisionless case
+    if nu < COLLISION_FREQ_ZERO_THRESHOLD:
+        m_crit = COLLISIONLESS_M_CRIT  # Effectively infinite for collisionless case
     else:
         m_crit = k_perp * v_th / nu
 
@@ -175,9 +188,9 @@ def analytical_phase_unmixing_spectrum(
 
     # k∥ dependence (small k∥ enhances phase unmixing)
     # Explicit handling for k_parallel ≈ 0 case
-    if abs(k_parallel) < 1e-6:
+    if abs(k_parallel) < K_PARALLEL_ZERO_THRESHOLD:
         # Pure perpendicular mode: phase unmixing saturates
-        k_ratio_factor = (k_perp * 1000.0)**0.5
+        k_ratio_factor = (k_perp * COLLISIONLESS_M_CRIT)**0.5
     else:
         k_ratio_factor = (k_perp / k_parallel)**0.5
 
@@ -185,9 +198,11 @@ def analytical_phase_unmixing_spectrum(
     spectrum = amplitude * k_ratio_factor * (m_array + 1.0)**(-alpha) * np.exp(-m_array / m_crit)
 
     # Normalize
-    if spectrum[0] < 1e-15:
-        # Spectrum is essentially zero - return unnormalized or raise error
-        raise ValueError(f"Spectrum m=0 value too small for normalization: {spectrum[0]}")
+    if spectrum[0] < SPECTRUM_NORMALIZATION_THRESHOLD:
+        raise ValueError(
+            f"Phase unmixing spectrum m=0 too small for normalization: {spectrum[0]} "
+            f"< {SPECTRUM_NORMALIZATION_THRESHOLD}"
+        )
     spectrum = spectrum / spectrum[0]
 
     return spectrum
@@ -385,8 +400,18 @@ def run_forced_single_mode(
         energy_window = history.E_total[-steady_state_window:]
         mean_energy = np.mean(energy_window)
         std_energy = np.std(energy_window)
-        relative_fluctuation = std_energy / (mean_energy + 1e-10)
-        steady_state_reached = relative_fluctuation < 0.1  # 10% threshold
+
+        # Warn if energy is suspiciously small (possible dissipation-dominated regime)
+        if mean_energy < SPECTRUM_NORMALIZATION_THRESHOLD:
+            import warnings
+            warnings.warn(
+                f"Mean energy extremely small ({mean_energy:.2e}). "
+                f"Possible dissipation-dominated regime or insufficient forcing.",
+                RuntimeWarning
+            )
+
+        relative_fluctuation = std_energy / (mean_energy + SPECTRUM_NORMALIZATION_THRESHOLD)
+        steady_state_reached = relative_fluctuation < STEADY_STATE_FLUCTUATION_THRESHOLD
     else:
         relative_fluctuation = 1.0
         steady_state_reached = False
@@ -429,10 +454,16 @@ def plot_fdt_comparison(
     m_array = np.arange(M + 1)
 
     # Normalize both spectra
-    if result['spectrum'][0] < 1e-15:
-        raise ValueError(f"Numerical spectrum m=0 too small for normalization: {result['spectrum'][0]}")
-    if analytical_spectrum[0] < 1e-15:
-        raise ValueError(f"Analytical spectrum m=0 too small for normalization: {analytical_spectrum[0]}")
+    if result['spectrum'][0] < SPECTRUM_NORMALIZATION_THRESHOLD:
+        raise ValueError(
+            f"Numerical spectrum m=0 too small for normalization: {result['spectrum'][0]} "
+            f"< {SPECTRUM_NORMALIZATION_THRESHOLD}"
+        )
+    if analytical_spectrum[0] < SPECTRUM_NORMALIZATION_THRESHOLD:
+        raise ValueError(
+            f"Analytical spectrum m=0 too small for normalization: {analytical_spectrum[0]} "
+            f"< {SPECTRUM_NORMALIZATION_THRESHOLD}"
+        )
 
     spec_num = result['spectrum'] / result['spectrum'][0]
     spec_ana = analytical_spectrum / analytical_spectrum[0]
