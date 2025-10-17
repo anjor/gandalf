@@ -25,7 +25,9 @@ Physics context:
 Implementation:
     - Thesis Eq 3.37: Phase mixing spectrum (large k∥, m^(-3/2) decay)
     - Thesis Eq 3.58: Phase unmixing spectrum (small k∥, m^(-1/2) decay)
-    - Exact expressions enable 10% quantitative validation criterion
+    - Plasma dispersion function Z(ζ) and Bessel functions I_m(b) implemented exactly
+    - **Limitation**: Response function uses phenomenological approximation (see kinetic_response_function)
+    - Quantitative 10% validation requires exact KRMHD dispersion relation (future work)
 
 References:
     - Thesis §2.6.1 - FDT for kinetic turbulence
@@ -73,6 +75,7 @@ COLLISIONLESS_M_CRIT = 1000.0  # Effective m_crit for collisionless limit (ν �
 
 # Plasma physics parameters
 CAUSALITY_EPSILON = 1e-3  # Small imaginary part for causality in plasma dispersion function
+PHASE_UNMIXING_FREQUENCY_FACTOR = 0.1  # Reduced frequency for perpendicular modes (ω ~ 0.1 k⊥ v_A)
 
 
 # ============================================================================
@@ -149,7 +152,7 @@ def modified_bessel_ratio(m: int, x: float) -> float:
     The exponential factor prevents overflow for large arguments.
 
     Args:
-        m: Order of Bessel function (Hermite moment index)
+        m: Order of Bessel function (Hermite moment index, must be non-negative integer)
         x: Argument (typically b = k⊥²ρ_s² / 2)
 
     Returns:
@@ -164,6 +167,11 @@ def modified_bessel_ratio(m: int, x: float) -> float:
         scipy.special.iv(m, x) computes I_m(x) directly.
         We multiply by exp(-x) for numerical stability.
     """
+    # Type safety: ensure m is non-negative integer
+    m = int(m)
+    if m < 0:
+        raise ValueError(f"Bessel order m must be non-negative, got m={m}")
+
     if x < 1e-10:
         # Small argument expansion: I_m(x) ≈ (x/2)^m / m!
         # For m=0: I_0(x) ≈ 1, so I_0(x)exp(-x) ≈ 1 - x + O(x²)
@@ -193,39 +201,46 @@ def kinetic_response_function(
     v_A: float = 1.0,
 ) -> complex:
     """
-    Linear response function for kinetic Alfvén waves in KRMHD.
+    Simplified linear response function for kinetic Alfvén waves in KRMHD.
 
-    This computes the susceptibility/response function that appears in the
-    linear kinetic theory for Alfvén wave perturbations. The response involves
-    the plasma dispersion function Z(ζ) which captures Landau resonance and
-    damping.
+    **IMPORTANT LIMITATION**: This is a phenomenological approximation, NOT the exact
+    dispersion relation from KRMHD theory. The denominator (1 + |ζ|²)^(-1) provides
+    qualitatively correct resonance structure but lacks proper normalization and
+    k⊥ρ_s dependence from the full kinetic dispersion relation.
+
+    For quantitative FDT validation at 10% accuracy, this approximation may be
+    insufficient. The exact implementation would require solving the full KRMHD
+    dispersion relation D(k,ω) = 0 with FLR corrections (Howes et al. 2006 Eq. 14-15
+    or thesis Eq 3.37).
 
     Args:
         k_parallel: Parallel wavenumber k∥
         k_perp: Perpendicular wavenumber k⊥
         omega: Wave frequency ω (use ω ≈ k∥v_A for Alfvén branch)
         v_th: Thermal velocity
-        Lambda: Kinetic parameter (Λ, affects pressure coupling)
+        Lambda: Kinetic parameter (Λ = 1 + 1/β for kinetic corrections)
         nu: Collision frequency (default: 0, collisionless)
         beta_i: Ion plasma beta (default: 1.0)
         v_A: Alfvén velocity (default: 1.0)
 
     Returns:
-        Complex response function R(k, ω)
+        Complex response function R(k, ω) (approximate)
 
-    Physics:
-        The response function determines how the plasma responds to perturbations
-        at given k and ω. Key features:
-        - Plasma dispersion function Z(ζ) captures Landau resonance
+    Physics captured:
+        - Plasma dispersion function Z(ζ) for Landau resonance
         - ζ = (ω - iν) / (√2 k∥v_th): normalized frequency (with collisions)
         - Lambda parameter: Λ = 1 + 1/β gives kinetic corrections
         - For large |ζ|: Z(ζ) → -1/ζ (weak damping, fluid limit)
         - For ζ ~ 1: Strong Landau damping (kinetic effects)
 
-    Note:
-        This implements standard kinetic Alfvén wave response based on
-        gyrokinetic/KRMHD theory (Howes et al. 2006, Schekochihin et al. 2009).
-        The exact form from thesis Eq 3.37 may have additional factors.
+    Physics missing:
+        - Exact normalization from full dispersion relation
+        - Proper k⊥ρ_s dependence in resonance width
+        - FLR corrections to susceptibility
+
+    References:
+        - Howes et al. (2006) ApJ 651:590 Eq. 14-15: Full KRMHD dispersion relation
+        - Schekochihin et al. (2009) ApJS 182:310: Kinetic cascades
     """
     # Normalized frequency with collisional damping
     # ζ = (ω - iν) / (√2 k∥v_th)
@@ -385,8 +400,13 @@ def analytical_phase_mixing_spectrum(
 
         # Phase mixing power law from kinetic theory
         # Research shows m^(-3/2) for phase mixing (Adkins & Schekochihin 2017)
-        # Include (m+1) to avoid singularity at m=0
-        phase_mixing_factor = (m + 1.0)**(-1.5)
+        # Note: m^0 = 1, so no singularity at m=0 (unlike m^(-α) for α > 0 would be)
+        # Using m directly, not (m+1), to match theoretical prediction
+        # For m=0, this gives 0^(-1.5) = ∞, but spectrum[0] is normalized to 1 anyway
+        if m == 0:
+            phase_mixing_factor = 1.0  # Will be normalized to 1 below
+        else:
+            phase_mixing_factor = m**(-1.5)
 
         # Total spectrum
         spectrum[i] = (
@@ -461,10 +481,10 @@ def analytical_phase_unmixing_spectrum(
     rho_s = np.sqrt(beta_i) * v_th / v_A
 
     # Alfvén wave frequency: ω ≈ k∥ v_A (Alfvén branch)
-    # For pure perpendicular modes (k∥→0), use reduced frequency ω ~ 0.1 k⊥ v_A
-    # Factor 0.1 represents weak Alfvén character in phase unmixing regime
+    # For pure perpendicular modes (k∥→0), use reduced frequency
+    # PHASE_UNMIXING_FREQUENCY_FACTOR represents weak Alfvén character in phase unmixing regime
     # (perpendicular advection dominates, not wave propagation)
-    omega = abs(k_parallel) * v_A if abs(k_parallel) > K_PARALLEL_ZERO_THRESHOLD else k_perp * v_A * 0.1
+    omega = abs(k_parallel) * v_A if abs(k_parallel) > K_PARALLEL_ZERO_THRESHOLD else k_perp * v_A * PHASE_UNMIXING_FREQUENCY_FACTOR
 
     # Kinetic response function |R(k, ω)|²
     # Phase unmixing regime has weaker resonance than phase mixing
@@ -498,8 +518,12 @@ def analytical_phase_unmixing_spectrum(
 
         # Phase unmixing power law: shallower than phase mixing
         # Research shows m^(-1/2) for phase unmixing regime (Adkins & Schekochihin 2017)
-        # Include (m+1) to avoid singularity at m=0
-        phase_unmixing_factor = (m + 1.0)**(-0.5)
+        # Note: m^0 = 1, so no singularity at m=0
+        # Using m directly, not (m+1), to match theoretical prediction
+        if m == 0:
+            phase_unmixing_factor = 1.0  # Will be normalized to 1 below
+        else:
+            phase_unmixing_factor = m**(-0.5)
 
         # Total spectrum with k∥/k⊥ factor
         spectrum[i] = (
