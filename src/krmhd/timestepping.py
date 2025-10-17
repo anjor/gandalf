@@ -48,6 +48,19 @@ from krmhd.physics import (
 from krmhd.spectral import derivative_x, derivative_y, rfftn_inverse
 
 
+# =============================================================================
+# Module Constants
+# =============================================================================
+
+# Maximum safe damping rate threshold for exp() operations
+# Beyond this value, exp(-rate) underflows to zero (causes numerical issues)
+# Used for both hyper-resistivity and hyper-collision validation
+MAX_DAMPING_RATE_THRESHOLD = 50.0
+
+# Warning threshold for moderate damping rates (triggers RuntimeWarning)
+DAMPING_RATE_WARNING_THRESHOLD = 20.0
+
+
 class KRMHDFields(NamedTuple):
     """
     JAX-compatible lightweight container for KRMHD fields (hot path).
@@ -562,18 +575,18 @@ def gandalf_step(
         M = state.M
         max_collision_rate = state.nu * (M ** (2 * hyper_n)) * dt
 
-        if max_collision_rate >= 50.0:
-            safe_nu = 50.0 / ((M ** (2 * hyper_n)) * dt)
+        if max_collision_rate >= MAX_DAMPING_RATE_THRESHOLD:
+            safe_nu = MAX_DAMPING_RATE_THRESHOLD / ((M ** (2 * hyper_n)) * dt)
             raise ValueError(
                 f"Hyper-collision overflow risk detected!\n"
                 f"  Parameter: nu·M^(2n)·dt = {state.nu}·{M}^{2*hyper_n}·{dt} = {max_collision_rate:.2e}\n"
-                f"  Threshold: Must be < 50 to avoid exp() underflow\n"
+                f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
                 f"  Solution: Reduce nu to < {safe_nu:.2e} or reduce dt\n"
                 f"  For n={hyper_n}, M={M}: Recommended nu < {safe_nu:.2e} / dt"
             )
 
         # Warning for moderate risk (20-50)
-        if max_collision_rate >= 20.0:
+        if max_collision_rate >= DAMPING_RATE_WARNING_THRESHOLD:
             warnings.warn(
                 f"Hyper-collision damping rate is high: nu·M^(2n)·dt = {max_collision_rate:.2e}. "
                 f"Consider reducing nu or dt to improve numerical stability.",
@@ -602,18 +615,18 @@ def gandalf_step(
 
         max_resistivity_rate = eta * k_perp_power * dt
 
-        if max_resistivity_rate >= 50.0:
-            safe_eta = 50.0 / ((k_perp_max_squared ** hyper_r) * dt)
+        if max_resistivity_rate >= MAX_DAMPING_RATE_THRESHOLD:
+            safe_eta = MAX_DAMPING_RATE_THRESHOLD / ((k_perp_max_squared ** hyper_r) * dt)
             raise ValueError(
                 f"Hyper-resistivity overflow risk detected!\n"
                 f"  Parameter: eta·k_max^(2r)·dt = {eta}·{k_perp_max_squared**0.5:.2f}^{2*hyper_r}·{dt} = {max_resistivity_rate:.2e}\n"
-                f"  Threshold: Must be < 50 to avoid exp() underflow\n"
+                f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
                 f"  Solution: Reduce eta to < {safe_eta:.2e} or reduce dt\n"
                 f"  For r={hyper_r}, k_max={k_perp_max_squared**0.5:.2f}: Recommended eta < {safe_eta:.2e} / dt"
             )
 
         # Warning for moderate risk (20-50)
-        if max_resistivity_rate >= 20.0:
+        if max_resistivity_rate >= DAMPING_RATE_WARNING_THRESHOLD:
             warnings.warn(
                 f"Hyper-resistivity damping rate is high: eta·k_max^(2r)·dt = {max_resistivity_rate:.2e}. "
                 f"Consider reducing eta or dt to improve numerical stability.",
