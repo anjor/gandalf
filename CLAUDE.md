@@ -183,7 +183,7 @@ checkpoints to return to.
 
 ## Current Development Status
 
-**Test Coverage:** 241 passing tests across all modules (194 core + 28 forcing + 16 phase mixing + 3 FDT validation)
+**Test Coverage:** 275 passing tests across all modules
 
 ### Completed (Issues #1-3, #21)
 - [x] Basic spectral infrastructure (2D/3D, Issue #2)

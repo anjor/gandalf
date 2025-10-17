@@ -30,10 +30,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-# Import from test file (reuse infrastructure)
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
-from test_kinetic_fdt import (
+# Import from krmhd.validation module
+from krmhd.validation import (
     run_forced_single_mode,
     analytical_phase_mixing_spectrum,
     plot_fdt_comparison,

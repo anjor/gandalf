@@ -414,7 +414,7 @@ The code includes validation against:
   - **Kinetic FDT validation**: Drive single k-modes, measure |gₘ|² spectrum, compare with theory (Issue #27)
   - All with comprehensive diagnostics and visualization
 
-**Test Coverage:** 241 passing tests across all modules (194 core + 28 forcing + 16 phase mixing + 3 FDT)
+**Test Coverage:** 275 passing tests across all modules
 
 ### In Progress 🚧
 - **Extended validation** (Issue #10): Kinetic Alfven waves, Landau damping with exact dispersion
