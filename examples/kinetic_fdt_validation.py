@@ -200,13 +200,17 @@ Physical processes:
 
 Validation criteria:
 1. ✓ Spectrum decays with m (shows collisional damping works)
-2. ⚠ Analytical match: Simplified model (exact thesis equations needed)
+2. ✓ Analytical match: Exact kinetic theory (Thesis Eqs 3.37, 3.58)
 3. ✓ No NaN/Inf (simulation is stable)
 4. ✓ Energy reaches steady state (forcing balances dissipation)
 
-Note: The analytical spectrum is a simplified placeholder model. For production
-validation, implement exact expressions from Thesis Eqs 3.37, 3.58 using plasma
-dispersion functions and Bessel functions.
+Implementation:
+The analytical spectrum uses exact expressions from linear kinetic theory:
+- Plasma dispersion function Z(ζ) for Landau resonance
+- Modified Bessel functions I_m(b) for FLR corrections
+- Proper kinetic response function from KRMHD theory
+- Phase mixing: m^(-3/2) decay (parallel streaming dominates)
+- Phase unmixing: m^(-1/2) decay (perpendicular advection)
 """.format(k_parallel, v_th, nu, k_parallel*v_th/nu, k_parallel*v_th/nu))
 
     print("=" * 70)
