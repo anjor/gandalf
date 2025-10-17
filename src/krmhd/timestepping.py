@@ -479,6 +479,12 @@ def gandalf_step(
     Returns:
         New KRMHDState at time t + dt
 
+    Raises:
+        ValueError: If hyper_r not in [1, 2, 4, 8]
+        ValueError: If hyper_n not in [1, 2, 4]
+        ValueError: If hyper-collision overflow risk detected (nu·M^(2n)·dt >= 50)
+        ValueError: If hyper-resistivity overflow risk detected (eta·k_max^(2r)·dt >= 50)
+
     Example:
         >>> # Standard dissipation (backward compatible)
         >>> state_new = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0)
@@ -502,11 +508,92 @@ def gandalf_step(
         - Standard (r=1): All scales affected equally ∝ k⊥²
         - Hyper (r=8): Sharp cutoff, negligible below k_max/2
 
+    Safety Notes:
+        Hyper-collision overflow risk (n>1):
+        - For M moments, highest damping rate is nu·M^(2n)
+        - Must satisfy: nu·M^(2n)·dt < 50 to avoid underflow
+        - Safe ranges:
+            * n=1, M=20: nu < 2.5/dt (standard, very safe)
+            * n=4, M=10: nu < 5×10⁻⁸/dt (moderate risk)
+            * n=4, M=20: nu < 2×10⁻⁹/dt (high risk, use with caution!)
+
+        Hyper-resistivity overflow risk (r>1):
+        - For grid with k_max, highest damping rate is eta·k_max^(2r)
+        - Must satisfy: eta·k_max^(2r)·dt < 50 to avoid underflow
+        - k_max ≈ Nx/2 for typical grids
+
     Reference:
         - Thesis Chapter 2, §2.4 - GANDALF Algorithm
         - Eqs. 2.13-2.25 - Integrating factor + RK2 implementation
         - Thesis §2.5.2 - Hyper-dissipation for inertial range studies
     """
+    # Input validation for hyper parameters
+    if hyper_r not in [1, 2, 4, 8]:
+        raise ValueError(
+            f"hyper_r must be 1, 2, 4, or 8 (got {hyper_r}). "
+            "Use r=1 for standard dissipation, r=8 for production hyper-dissipation."
+        )
+
+    if hyper_n not in [1, 2, 4]:
+        raise ValueError(
+            f"hyper_n must be 1, 2, or 4 (got {hyper_n}). "
+            "Use n=1 for standard collisions, n=4 for production hyper-collisions."
+        )
+
+    # Safety check for hyper-collision overflow (HIGH PRIORITY)
+    # For n>1, the damping rate nu·m^(2n) grows extremely fast with m
+    # At m=M, we compute exp(-nu·M^(2n)·dt) which underflows if argument > ~50
+    if hyper_n > 1:
+        M = state.M
+        max_collision_rate = state.nu * (M ** (2 * hyper_n)) * dt
+
+        if max_collision_rate >= 50.0:
+            safe_nu = 50.0 / ((M ** (2 * hyper_n)) * dt)
+            raise ValueError(
+                f"Hyper-collision overflow risk detected!\n"
+                f"  Parameter: nu·M^(2n)·dt = {state.nu}·{M}^{2*hyper_n}·{dt} = {max_collision_rate:.2e}\n"
+                f"  Threshold: Must be < 50 to avoid exp() underflow\n"
+                f"  Solution: Reduce nu to < {safe_nu:.2e} or reduce dt\n"
+                f"  For n={hyper_n}, M={M}: Recommended nu < {safe_nu:.2e} / dt"
+            )
+
+        # Warning for moderate risk (20-50)
+        if max_collision_rate >= 20.0:
+            import warnings
+            warnings.warn(
+                f"Hyper-collision damping rate is high: nu·M^(2n)·dt = {max_collision_rate:.2e}. "
+                f"Consider reducing nu or dt to improve numerical stability.",
+                RuntimeWarning
+            )
+
+    # Safety check for hyper-resistivity overflow
+    if hyper_r > 1:
+        grid = state.grid
+        # Estimate k_max from grid
+        kx_max = grid.kx[-1]  # Nyquist in x
+        ky_max = max(abs(grid.ky[0]), abs(grid.ky[-1]))  # Nyquist in y
+        k_perp_max_squared = kx_max**2 + ky_max**2
+        max_resistivity_rate = eta * (k_perp_max_squared ** hyper_r) * dt
+
+        if max_resistivity_rate >= 50.0:
+            safe_eta = 50.0 / ((k_perp_max_squared ** hyper_r) * dt)
+            raise ValueError(
+                f"Hyper-resistivity overflow risk detected!\n"
+                f"  Parameter: eta·k_max^(2r)·dt = {eta}·{k_perp_max_squared**0.5:.2f}^{2*hyper_r}·{dt} = {max_resistivity_rate:.2e}\n"
+                f"  Threshold: Must be < 50 to avoid exp() underflow\n"
+                f"  Solution: Reduce eta to < {safe_eta:.2e} or reduce dt\n"
+                f"  For r={hyper_r}, k_max={k_perp_max_squared**0.5:.2f}: Recommended eta < {safe_eta:.2e} / dt"
+            )
+
+        # Warning for moderate risk (20-50)
+        if max_resistivity_rate >= 20.0:
+            import warnings
+            warnings.warn(
+                f"Hyper-resistivity damping rate is high: eta·k_max^(2r)·dt = {max_resistivity_rate:.2e}. "
+                f"Consider reducing eta or dt to improve numerical stability.",
+                RuntimeWarning
+            )
+
     grid = state.grid
     fields = _fields_from_state(state)
 
