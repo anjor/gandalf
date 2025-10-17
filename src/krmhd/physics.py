@@ -369,7 +369,7 @@ def poisson_bracket_3d(
 # =============================================================================
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=['r'])
 def hyperdiffusion(
     field: Array,
     kx: Array,
@@ -422,6 +422,12 @@ def hyperdiffusion(
         compared to standard diffusion to avoid over-damping. Rule of thumb:
         η_hyper ~ η_standard / k_max^(2(r-1))
 
+        **Numerical precision limits (r=8):** For r=8 with typical grids (k_max ~ 64),
+        k_max^16 ≈ 10^28. This requires η ~ 10^-27 to keep eta·k_max^16·dt < 50.
+        At such tiny values, dissipation becomes negligible due to float64 precision
+        limits (~10^-16). **Practical maximum: r=2 for typical grids (128^3 to 512^3).**
+        Use r=4 or r=8 only for small grids (k_max < 16) or as expert configurations.
+
         **Dealiasing:** The hyperdiffusion operator is linear, so it does NOT require
         dealiasing. However, if the result is subsequently used in nonlinear operations
         (e.g., Poisson brackets, multiplications), those operations MUST be dealiased
@@ -444,7 +450,7 @@ def hyperdiffusion(
     return hyperdiffusion_term
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=['r'])
 def hyperresistivity(
     field: Array,
     kx: Array,

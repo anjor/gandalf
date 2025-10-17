@@ -776,3 +776,116 @@ class TestHyperdissipationValidation:
             assert result.time > state.time
             assert jnp.isfinite(result.z_plus).all()
             assert jnp.isfinite(result.g).all()
+
+
+class TestHyperdissipationEdgeCases:
+    """Test suite for edge cases: non-square grids, non-2π domains, mixed parameters."""
+
+    def test_non_square_grid(self):
+        """Hyper-dissipation should work with non-square grids (Nx != Ny)."""
+        # Create rectangular grid: 64x32x16
+        grid = SpectralGrid3D.create(Nx=64, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Use moderate hyper-dissipation (eta scaled for larger k_max)
+        dt = 0.01
+        eta = 0.001  # Smaller for Nx=64: k_max~32
+        state.nu = 0.05
+
+        # Should work without errors
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+        # Verify shapes are preserved
+        assert state_new.z_plus.shape == (grid.Nz, grid.Ny, grid.Nx//2+1)
+        assert state_new.g.shape == (grid.Nz, grid.Ny, grid.Nx//2+1, state.M+1)
+        assert jnp.isfinite(state_new.z_plus).all()
+        assert jnp.isfinite(state_new.g).all()
+
+    def test_non_2pi_domain(self):
+        """Hyper-dissipation should work with non-2π domains."""
+        # Create grid with arbitrary domain size
+        Lx, Ly, Lz = 4.0, 6.0, 8.0
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=Lx, Ly=Ly, Lz=Lz)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Use moderate hyper-dissipation
+        dt = 0.01
+        eta = 0.01
+        state.nu = 0.05
+
+        # Should work without errors
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+        # Verify physics is correct
+        # k_max should be 2π/dx = 2π/(Lx/Nx) = 2πNx/Lx
+        kx_max_expected = jnp.pi * grid.Nx / Lx
+        kx_max_actual = grid.kx[-1]
+        assert jnp.allclose(kx_max_actual, kx_max_expected, rtol=1e-10)
+
+        assert jnp.isfinite(state_new.z_plus).all()
+        assert jnp.isfinite(state_new.g).all()
+
+    def test_mixed_hyper_parameters_r2_n4(self):
+        """Test mixed hyper parameters: r=2 (moderate resistivity), n=4 (strong collisions)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Mixed parameters: r=2 (easy to tune), n=4 (requires small nu)
+        dt = 0.01
+        eta = 0.02  # Safe for r=2
+        nu = 1e-7   # Safe for n=4, M=10: nu < 5e-7
+        state.nu = nu
+
+        # Should work without errors
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=4)
+
+        # Verify dual dissipation mechanisms active
+        # r=2: Moderate resistive dissipation
+        # n=4: Strong collision damping on high-m moments
+        E_initial = jnp.sum(jnp.abs(state.g)**2)
+        E_final = jnp.sum(jnp.abs(state_new.g)**2)
+        assert E_final < E_initial, "Energy should decrease with dual dissipation"
+
+    def test_mixed_hyper_parameters_r4_n2(self):
+        """Test mixed hyper parameters: r=4 (strong resistivity), n=2 (moderate collisions)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Mixed parameters: r=4 (requires VERY small eta), n=2 (easy to tune)
+        dt = 0.01
+        eta = 1e-7   # Tiny eta required for r=4, k_max~16 (demonstrates impracticality!)
+        nu = 0.1     # Safe for n=2, M=10
+        state.nu = nu
+
+        # Should work without errors
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=4, hyper_n=2)
+
+        # Verify dual dissipation mechanisms active
+        E_initial = jnp.sum(jnp.abs(state.g)**2)
+        E_final = jnp.sum(jnp.abs(state_new.g)**2)
+        assert E_final < E_initial, "Energy should decrease with dual dissipation"
+
+    def test_anisotropic_domain(self):
+        """Test with highly anisotropic domain (Lx >> Ly >> Lz)."""
+        # Anisotropic domain: long in x, short in z
+        grid = SpectralGrid3D.create(Nx=64, Ny=32, Nz=16,
+                                     Lx=8*jnp.pi, Ly=4*jnp.pi, Lz=2*jnp.pi)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Use moderate hyper-dissipation (eta scaled for grid)
+        dt = 0.01
+        eta = 0.001  # Smaller for Nx=64
+        state.nu = 0.05
+
+        # Should work without errors
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+        # Verify wavenumber grids are correctly scaled
+        # For Lx = 8π, kx grid should be denser (smaller dk)
+        # For Lz = 2π, kz grid should be coarser (larger dk)
+        dk_x = grid.kx[1] - grid.kx[0]
+        dk_z = grid.kz[1] - grid.kz[0]
+        assert dk_x < dk_z, "Longer domain should have finer k-spacing"
+
+        assert jnp.isfinite(state_new.z_plus).all()
+        assert jnp.isfinite(state_new.g).all()

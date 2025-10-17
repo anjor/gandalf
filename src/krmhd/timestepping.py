@@ -417,11 +417,15 @@ def _gandalf_step_jit(
     z_minus_new = z_minus_new * perp_dissipation_factor
 
     # Hermite moment dissipation (thesis Eq. 2.24-2.25)
-    # All moments: g → g * exp(-η k⊥^(2r) δt)
-    # Plus collisions for m≥2: g_m → g_m * exp(-νm^(2n) δt)
-    g_dissipation = jnp.exp(-eta * k_perp_2r * dt)  # Shape: [Nz, Ny, Nx//2+1]
+    # DUAL DISSIPATION MECHANISMS:
+    # 1. Resistive dissipation (all moments): g → g * exp(-η k⊥^(2r) δt)
+    # 2. Collisional damping (m≥2 only): g_m → g_m * exp(-νm^(2n) δt)
+    # Both mechanisms operate simultaneously on Hermite moments
 
-    # Create moment-dependent collision factors using vectorized operations
+    # (1) Resistive dissipation factor (from coupling to z± fields)
+    g_resistive_damp = jnp.exp(-eta * k_perp_2r * dt)  # Shape: [Nz, Ny, Nx//2+1]
+
+    # (2) Collisional damping factors (moment-dependent)
     # Physics: Lenard-Bernstein collision operator C[g_m] = -νmg_m (thesis Eq. 2.5)
     # Standard (n=1): g_m → g_m * exp(-νm·δt)
     # Hyper (n>1): g_m → g_m * exp(-νm^(2n)·δt)
@@ -435,9 +439,9 @@ def _gandalf_step_jit(
         1.0,  # m=0,1: no collision (conserves particles and momentum)
     )  # Shape: [M+1]
 
-    # Apply dissipation: broadcast over moment index
-    g_new = g_new * g_dissipation[:, :, :, jnp.newaxis]  # Resistive dissipation
-    g_new = g_new * collision_factors[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # Collisional damping
+    # Apply BOTH dissipation mechanisms: resistive (all m) AND collisional (m≥2)
+    g_new = g_new * g_resistive_damp[:, :, :, jnp.newaxis]  # (1) Resistive dissipation
+    g_new = g_new * collision_factors[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (2) Collisional damping
 
     return KRMHDFields(
         z_plus=z_plus_new,
