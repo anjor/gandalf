@@ -406,19 +406,19 @@ The code includes validation against:
   - force_slow_modes(): Independent forcing for δB∥
   - compute_energy_injection_rate(): Energy diagnostics for balance validation
   - Hermitian symmetry enforcement for rfft format (critical for direct Fourier operations)
-- **Validation examples** (Issues #11-12): Physics benchmarks
+- **Validation examples** (Issues #11-12, #27): Physics benchmarks
   - Orszag-Tang vortex: Nonlinear dynamics and current sheet formation
   - Decaying turbulence: Spectral cascade and selective decay
   - Driven turbulence: Forced steady-state with energy balance (ε_inj ≈ ε_diss)
   - Minimal forcing: 50-line example showing basic forcing workflow
+  - **Kinetic FDT validation**: Drive single k-modes, measure |gₘ|² spectrum, compare with theory (Issue #27)
   - All with comprehensive diagnostics and visualization
 
-**Test Coverage:** 222 passing tests across all modules (194 core + 28 forcing)
+**Test Coverage:** 241 passing tests across all modules (194 core + 28 forcing + 16 phase mixing + 3 FDT)
 
 ### In Progress 🚧
-- **Extended validation** (Issues #10, #27): Kinetic Alfven waves, Landau damping, FDT validation
-  - Issue #27 (Kinetic FDT validation) now unblocked by forcing implementation
-- **Advanced diagnostics** (Issues #25-26): Field line following, phase mixing analysis
+- **Extended validation** (Issue #10): Kinetic Alfven waves, Landau damping with exact dispersion
+- **Advanced diagnostics** (Issue #25): True k∥ spectra via FFT along curved field lines
 
 ### Planned 📋
 - **Production features** (Issues #13, #15, #28, #30): HDF5 I/O, hyper-dissipation, configuration files
