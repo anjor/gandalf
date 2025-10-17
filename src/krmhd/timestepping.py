@@ -31,6 +31,8 @@ References:
 
 from functools import partial
 from typing import Callable, Tuple, NamedTuple
+import warnings
+
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -44,6 +46,19 @@ from krmhd.physics import (
     gm_rhs,
 )
 from krmhd.spectral import derivative_x, derivative_y, rfftn_inverse
+
+
+# =============================================================================
+# Module Constants
+# =============================================================================
+
+# Maximum safe damping rate threshold for exp() operations
+# Beyond this value, exp(-rate) underflows to zero (causes numerical issues)
+# Used for both hyper-resistivity and hyper-collision validation
+MAX_DAMPING_RATE_THRESHOLD = 50.0
+
+# Warning threshold for moderate damping rates (triggers RuntimeWarning)
+DAMPING_RATE_WARNING_THRESHOLD = 20.0
 
 
 class KRMHDFields(NamedTuple):
@@ -276,7 +291,7 @@ def krmhd_rhs(
 # =============================================================================
 
 
-@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M"])
+@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n"])
 def _gandalf_step_jit(
     fields: KRMHDFields,
     dt: float,
@@ -293,6 +308,8 @@ def _gandalf_step_jit(
     Nz: int,
     Ny: int,
     Nx: int,
+    hyper_r: int = 1,
+    hyper_n: int = 1,
 ) -> KRMHDFields:
     """
     JIT-compiled GANDALF integrating factor + RK2 timestepper.
@@ -312,9 +329,22 @@ def _gandalf_step_jit(
         dt: Timestep
         kx, ky, kz: Wavenumbers
         dealias_mask: 2/3 dealiasing mask
-        eta: Resistivity
+        eta: Resistivity (or hyper-resistivity coefficient)
         v_A: Alfvén velocity
-        Nz, Ny, Nx: Grid dimensions
+        beta_i: Ion plasma beta
+        nu: Collision frequency (or hyper-collision coefficient)
+        Lambda: Kinetic closure parameter
+        M: Number of Hermite moments
+        Nz, Ny, Nx: Grid dimensions (static)
+        hyper_r: Hyper-resistivity order (default: 1)
+            - r=1: Standard resistivity -ηk⊥² (default, backward compatible)
+            - r=2: Moderate hyper-resistivity -ηk⊥⁴ (recommended for most cases)
+            - r=4: Strong hyper-resistivity -ηk⊥⁸ (expert use, requires small eta)
+            - r=8: Maximum hyper-resistivity -ηk⊥¹⁶ (expert use, requires tiny eta)
+        hyper_n: Hyper-collision order (default: 1)
+            - n=1: Standard collision -νm (default, backward compatible)
+            - n=2: Moderate hyper-collision -νm⁴ (recommended for most cases)
+            - n=4: Strong hyper-collision -νm⁸ (expert use, requires small nu)
 
     Returns:
         Updated KRMHDFields after full timestep
@@ -391,31 +421,45 @@ def _gandalf_step_jit(
     # Step 4: Apply dissipation using exponential factors (thesis Eq. 2.23-2.25)
     # =========================================================================
 
-    # Elsasser dissipation uses k_perp² (perpendicular only, thesis Eq. 2.23)
-    # ξ± → ξ± * exp(-η k⊥² Δt)
-    perp_dissipation_factor = jnp.exp(-eta * k_perp_squared * dt)
+    # Elsasser dissipation uses k_perp^(2r) (perpendicular only, thesis Eq. 2.23)
+    # Standard (r=1): ξ± → ξ± * exp(-η k⊥² Δt)
+    # Hyper (r>1): ξ± → ξ± * exp(-η k⊥^(2r) Δt)
+    k_perp_2r = k_perp_squared ** hyper_r
+    perp_dissipation_factor = jnp.exp(-eta * k_perp_2r * dt)
     z_plus_new = z_plus_new * perp_dissipation_factor
     z_minus_new = z_minus_new * perp_dissipation_factor
 
     # Hermite moment dissipation (thesis Eq. 2.24-2.25)
-    # All moments: g → g * exp(-η k⊥² δt)
-    # Plus collisions for m≥2: g_m → g_m * exp(-νm δt)
-    g_dissipation = jnp.exp(-eta * k_perp_squared * dt)  # Shape: [Nz, Ny, Nx//2+1]
+    # DUAL DISSIPATION MECHANISMS:
+    # 1. Resistive dissipation (all moments): g → g * exp(-η k⊥^(2r) δt)
+    # 2. Collisional damping (m≥2 only): g_m → g_m * exp(-νm^(2n) δt)
+    # Both mechanisms operate simultaneously on Hermite moments
 
-    # Create moment-dependent collision factors using vectorized operations
-    # Physics: Lenard-Bernstein collision operator C[g_m] = -νmg_m (thesis Eq. 2.5)
-    # Integrated analytically: g_m → g_m * exp(-νm·δt)
+    # (1) Resistive dissipation factor (from coupling to z± fields)
+    g_resistive_damp = jnp.exp(-eta * k_perp_2r * dt)  # Shape: [Nz, Ny, Nx//2+1]
+
+    # (2) Collisional damping factors (moment-dependent)
+    # Physics: Lenard-Bernstein collision operator (thesis Eq. 2.5)
+    #   Standard (n=1): C[g_m] = -νm·g_m
+    #   Hyper (n>1):    C[g_m] = -ν·m^(2n)·g_m
+    # Time evolution:
+    #   Standard (n=1): g_m → g_m * exp(-νm·δt)
+    #   Hyper (n>1):    g_m → g_m * exp(-νm^(2n)·δt)
     # Conservation: m=0 (particle number) and m=1 (momentum) are exempt from collisions
     moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
+    # For hyper-collisions: ν_m = νm^(2n)
+    collision_damping_rate = nu * (moment_indices ** (2 * hyper_n))
     collision_factors = jnp.where(
         moment_indices >= 2,
-        jnp.exp(-nu * moment_indices * dt),  # m≥2: collision damping ν_m = νm
+        jnp.exp(-collision_damping_rate * dt),  # m≥2: hyper-collision damping
         1.0,  # m=0,1: no collision (conserves particles and momentum)
     )  # Shape: [M+1]
 
-    # Apply dissipation: broadcast over moment index
-    g_new = g_new * g_dissipation[:, :, :, jnp.newaxis]  # Resistive dissipation
-    g_new = g_new * collision_factors[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # Collisional damping
+    # Apply BOTH dissipation mechanisms: resistive (all m) AND collisional (m≥2)
+    # Note: Multiplicative dissipation operators preserve reality condition f(-k) = f*(k)
+    # since exp(-rate·dt) is real and applied uniformly to all modes
+    g_new = g_new * g_resistive_damp[:, :, :, jnp.newaxis]  # (1) Resistive dissipation
+    g_new = g_new * collision_factors[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (2) Collisional damping
 
     return KRMHDFields(
         z_plus=z_plus_new,
@@ -431,6 +475,8 @@ def gandalf_step(
     dt: float,
     eta: float,
     v_A: float,
+    hyper_r: int = 1,
+    hyper_n: int = 1,
 ) -> KRMHDState:
     """
     Advance KRMHD state using GANDALF integrating factor + RK2 method.
@@ -446,17 +492,38 @@ def gandalf_step(
     Args:
         state: Current KRMHD state at time t
         dt: Timestep size (should satisfy CFL for nonlinear terms)
-        eta: Resistivity coefficient
+        eta: Resistivity coefficient (or hyper-resistivity if hyper_r > 1)
         v_A: Alfvén velocity
+        hyper_r: Hyper-resistivity order (default: 1)
+            - r=1: Standard resistivity -ηk⊥² (default, backward compatible)
+            - r=2: Moderate hyper-resistivity -ηk⊥⁴ (recommended for most cases)
+            - r=4: Strong hyper-resistivity -ηk⊥⁸ (expert use, requires small eta)
+            - r=8: Maximum hyper-resistivity -ηk⊥¹⁶ (expert use, requires tiny eta)
+        hyper_n: Hyper-collision order (default: 1)
+            - n=1: Standard collision -νm (default, backward compatible)
+            - n=2: Moderate hyper-collision -νm⁴ (recommended for most cases)
+            - n=4: Maximum hyper-collision -νm⁸ (expert use, requires tiny nu)
 
     Returns:
         New KRMHDState at time t + dt
 
+    Raises:
+        ValueError: If hyper_r not in [1, 2, 4, 8]
+        ValueError: If hyper_n not in [1, 2, 4]
+        ValueError: If hyper-collision overflow risk detected (nu·M^(2n)·dt >= 50)
+        ValueError: If hyper-resistivity overflow risk detected (eta·k_max^(2r)·dt >= 50)
+
     Example:
+        >>> # Standard dissipation (backward compatible)
         >>> state_new = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0)
-        >>> # Or in a loop:
+        >>>
+        >>> # Hyper-dissipation for turbulence studies
+        >>> state_new = gandalf_step(state, dt=0.01, eta=0.001, v_A=1.0,
+        ...                          hyper_r=8, hyper_n=4)
+        >>>
+        >>> # In a loop:
         >>> for i in range(n_steps):
-        ...     state = gandalf_step(state, dt, eta, v_A)
+        ...     state = gandalf_step(state, dt, eta, v_A, hyper_r=8, hyper_n=4)
 
     Physics:
         - Linear propagation: Handled exactly (unconditionally stable)
@@ -465,10 +532,107 @@ def gandalf_step(
         - Overall: O(dt²) convergence
         - Energy conservation: Excellent in inviscid limit
 
+        Hyper-dissipation (r>1) concentrates dissipation at small scales:
+        - Standard (r=1): All scales affected equally ∝ k⊥²
+        - Hyper (r=8): Sharp cutoff, negligible below k_max/2
+
+    Safety Notes:
+        Hyper-collision overflow risk (n>1):
+        - For M moments, highest damping rate is nu·M^(2n)
+        - Must satisfy: nu·M^(2n)·dt < 50 to avoid underflow
+        - Safe ranges:
+            * n=1, M=20: nu < 2.5/dt (standard, very safe)
+            * n=4, M=10: nu < 5×10⁻⁸/dt (moderate risk)
+            * n=4, M=20: nu < 2×10⁻⁹/dt (high risk, use with caution!)
+
+        Hyper-resistivity overflow risk (r>1):
+        - For grid with k_max, highest damping rate is eta·k_max^(2r)
+        - Must satisfy: eta·k_max^(2r)·dt < 50 to avoid underflow
+        - k_max ≈ Nx/2 for typical grids
+
     Reference:
         - Thesis Chapter 2, §2.4 - GANDALF Algorithm
         - Eqs. 2.13-2.25 - Integrating factor + RK2 implementation
+        - Thesis §2.5.2 - Hyper-dissipation for inertial range studies
     """
+    # Input validation for hyper parameters
+    if hyper_r not in [1, 2, 4, 8]:
+        raise ValueError(
+            f"hyper_r must be 1, 2, 4, or 8 (got {hyper_r}). "
+            "Use r=1 for standard dissipation, r=2 for typical turbulence studies."
+        )
+
+    if hyper_n not in [1, 2, 4]:
+        raise ValueError(
+            f"hyper_n must be 1, 2, or 4 (got {hyper_n}). "
+            "Use n=1 for standard collisions, n=2 for typical turbulence studies."
+        )
+
+    # Safety check for hyper-collision overflow (HIGH PRIORITY)
+    # For n>1, the damping rate nu·m^(2n) grows extremely fast with m
+    # At m=M, we compute exp(-nu·M^(2n)·dt) which underflows if argument > ~50
+    if hyper_n > 1:
+        M = state.M
+        max_collision_rate = state.nu * (M ** (2 * hyper_n)) * dt
+
+        if max_collision_rate >= MAX_DAMPING_RATE_THRESHOLD:
+            safe_nu = MAX_DAMPING_RATE_THRESHOLD / ((M ** (2 * hyper_n)) * dt)
+            raise ValueError(
+                f"Hyper-collision overflow risk detected!\n"
+                f"  Parameter: nu·M^(2n)·dt = {state.nu}·{M}^{2*hyper_n}·{dt} = {max_collision_rate:.2e}\n"
+                f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
+                f"  Solution: Reduce nu to < {safe_nu:.2e} or reduce dt\n"
+                f"  For n={hyper_n}, M={M}: Recommended nu < {safe_nu:.2e} / dt"
+            )
+
+        # Warning for moderate risk (20-50)
+        if max_collision_rate >= DAMPING_RATE_WARNING_THRESHOLD:
+            warnings.warn(
+                f"Hyper-collision damping rate is high: nu·M^(2n)·dt = {max_collision_rate:.2e}. "
+                f"Consider reducing nu or dt to improve numerical stability.",
+                RuntimeWarning
+            )
+
+    # Safety check for hyper-resistivity overflow
+    if hyper_r > 1:
+        grid = state.grid
+        # Estimate k_perp_max from grid (maximum perpendicular wavenumber at Nyquist corner)
+        # This is the worst-case perpendicular wavenumber for dissipation
+        kx_max = grid.kx[-1]  # Nyquist in x
+        ky_max = max(abs(grid.ky[0]), abs(grid.ky[-1]))  # Nyquist in y
+        k_perp_max_squared = kx_max**2 + ky_max**2  # Pythagorean sum at corner of k-space
+
+        # Check for potential numerical precision issues in k_perp^(2r) calculation
+        # For r=8, k_max=64: k_max^16 ≈ 10^28 (still safe, but approaching precision limits)
+        # Warn if k_perp_max^(2r) > 10^20 to alert user to potential issues
+        k_perp_power = k_perp_max_squared ** hyper_r
+        if k_perp_power > 1e20:
+            warnings.warn(
+                f"Very large wavenumber power: k_max^(2r) = {k_perp_max_squared**0.5:.1f}^{2*hyper_r} = {k_perp_power:.2e}. "
+                f"This may cause numerical precision issues. Consider using lower r or smaller grid.",
+                RuntimeWarning
+            )
+
+        max_resistivity_rate = eta * k_perp_power * dt
+
+        if max_resistivity_rate >= MAX_DAMPING_RATE_THRESHOLD:
+            safe_eta = MAX_DAMPING_RATE_THRESHOLD / ((k_perp_max_squared ** hyper_r) * dt)
+            raise ValueError(
+                f"Hyper-resistivity overflow risk detected!\n"
+                f"  Parameter: eta·k_max^(2r)·dt = {eta}·{k_perp_max_squared**0.5:.2f}^{2*hyper_r}·{dt} = {max_resistivity_rate:.2e}\n"
+                f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
+                f"  Solution: Reduce eta to < {safe_eta:.2e} or reduce dt\n"
+                f"  For r={hyper_r}, k_max={k_perp_max_squared**0.5:.2f}: Recommended eta < {safe_eta:.2e} / dt"
+            )
+
+        # Warning for moderate risk (20-50)
+        if max_resistivity_rate >= DAMPING_RATE_WARNING_THRESHOLD:
+            warnings.warn(
+                f"Hyper-resistivity damping rate is high: eta·k_max^(2r)·dt = {max_resistivity_rate:.2e}. "
+                f"Consider reducing eta or dt to improve numerical stability.",
+                RuntimeWarning
+            )
+
     grid = state.grid
     fields = _fields_from_state(state)
 
@@ -489,6 +653,8 @@ def gandalf_step(
         grid.Nz,
         grid.Ny,
         grid.Nx,
+        hyper_r,
+        hyper_n,
     )
 
     # Convert back to KRMHDState (Pydantic validation at boundary)

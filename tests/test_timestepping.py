@@ -580,3 +580,507 @@ class TestHermiteMomentIntegration:
 
         assert g0_rhs_norm > 1e-12, f"g0 RHS should be non-zero, got {g0_rhs_norm:.3e}"
         assert g1_rhs_norm > 1e-12, f"g1 RHS should be non-zero, got {g1_rhs_norm:.3e}"
+
+
+class TestHyperdissipation:
+    """Test suite for hyper-dissipation and hyper-collisions."""
+
+    def test_backward_compatibility_r1_n1(self):
+        """Default hyper_r=1, hyper_n=1 should match original behavior."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+
+        # Initialize same state
+        state = initialize_alfven_wave(grid, M=20, kz_mode=1, amplitude=0.1)
+
+        # Standard call (no hyper parameters)
+        dt = 0.01
+        eta = 0.01
+        v_A = 1.0
+
+        # Evolve with defaults (hyper_r=1, hyper_n=1)
+        state_default = rk4_step(state, dt, eta=eta, v_A=v_A)
+
+        # Evolve with explicit hyper_r=1, hyper_n=1 (should be identical)
+        state_explicit = rk4_step(state, dt, eta=eta, v_A=v_A, hyper_r=1, hyper_n=1)
+
+        # Should be exactly the same
+        assert jnp.allclose(state_default.z_plus, state_explicit.z_plus, atol=1e-10), \
+            "hyper_r=1 should match default behavior"
+        assert jnp.allclose(state_default.z_minus, state_explicit.z_minus, atol=1e-10), \
+            "hyper_r=1 should match default behavior"
+        assert jnp.allclose(state_default.g, state_explicit.g, atol=1e-10), \
+            "hyper_n=1 should match default behavior"
+
+    def test_hermite_moments_dual_dissipation(self):
+        """Hermite moments should receive BOTH resistive dissipation AND collision damping."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+
+        # Initialize state with non-zero Hermite moments (M=10 for reasonable test time)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Use moderate parameters with both mechanisms at comparable strength
+        dt = 0.01
+        eta = 0.01  # Smaller resistivity (safe for r=2, k_max~16)
+        nu = 0.1    # Moderate collision frequency (safe for n=2, M=10: nu < 0.5)
+        state.nu = nu
+        v_A = 1.0
+
+        # Evolve with BOTH hyper-resistivity (r=2) and hyper-collisions (n=2)
+        state_dual = rk4_step(state, dt, eta=eta, v_A=v_A, hyper_r=2, hyper_n=2)
+
+        # Also evolve with ONLY resistivity (n=1) for comparison
+        state_resist_only = rk4_step(state, dt, eta=eta, v_A=v_A, hyper_r=2, hyper_n=1)
+
+        # Also evolve with ONLY collisions (r=1) for comparison
+        state_collide_only = rk4_step(state, dt, eta=eta, v_A=v_A, hyper_r=1, hyper_n=2)
+
+        # Compute Hermite moment energy (excluding m=0,1 which are conserved by collisions)
+        # Sum over m >= 2 to see the effect of collision damping
+        E_dual_high = jnp.sum(jnp.abs(state_dual.g[2:, :, :, :])**2)
+        E_resist_only_high = jnp.sum(jnp.abs(state_resist_only.g[2:, :, :, :])**2)
+        E_collide_only_high = jnp.sum(jnp.abs(state_collide_only.g[2:, :, :, :])**2)
+
+        # With both mechanisms, high-m energy should be lower than either mechanism alone
+        # Collision damping primarily affects m >= 2 moments
+        # Resistivity affects all moments through coupling to z±
+        assert E_dual_high < E_resist_only_high, \
+            "Dual dissipation should remove more high-m energy than resistivity alone"
+        assert E_dual_high < E_collide_only_high, \
+            "Dual dissipation should remove more high-m energy than collisions alone"
+
+    # NOTE: Tests for r=4, r=8, and n=4 are omitted here because safe parameters
+    # (required to avoid overflow) result in negligible dissipation that cannot be
+    # reliably measured. The validation tests (TestHyperdissipationValidation) ensure
+    # these parameters are caught before use. In production, r=2 is the practical
+    # maximum for typical grid sizes, not r=8.
+
+
+class TestHyperdissipationValidation:
+    """Test suite for hyper-dissipation parameter validation and safety checks."""
+
+    def test_invalid_hyper_r(self):
+        """Invalid hyper_r should raise ValueError."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Invalid hyper_r values
+        invalid_r_values = [0, 3, 5, 6, 7, 9, 10]
+
+        for r in invalid_r_values:
+            with pytest.raises(ValueError, match="hyper_r must be 1, 2, 4, or 8"):
+                rk4_step(state, dt=0.01, eta=0.01, v_A=1.0, hyper_r=r)
+
+    def test_invalid_hyper_n(self):
+        """Invalid hyper_n should raise ValueError."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Invalid hyper_n values
+        invalid_n_values = [0, 3, 5, 6, 8]
+
+        for n in invalid_n_values:
+            with pytest.raises(ValueError, match="hyper_n must be 1, 2, or 4"):
+                rk4_step(state, dt=0.01, eta=0.01, v_A=1.0, hyper_n=n)
+
+    def test_hypercollision_overflow_error(self):
+        """Hyper-collision overflow risk should raise ValueError."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create state with parameters that will cause overflow
+        # For M=20, n=4, dt=0.1: 20^8 = 2.56e10
+        # Need nu * 2.56e10 * 0.1 >= 50 → nu >= 1.95e-8
+        # Use nu=2e-8 which is too large
+        state = initialize_alfven_wave(grid, M=20, kz_mode=1, amplitude=0.1)
+        state.nu = 2e-8  # Too large for M=20, n=4, dt=0.1
+
+        with pytest.raises(ValueError, match="Hyper-collision overflow risk detected"):
+            rk4_step(state, dt=0.1, eta=0.01, v_A=1.0, hyper_n=4)
+
+    def test_hypercollision_overflow_warning(self):
+        """Moderate hyper-collision rate should emit warning."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create state with moderate overflow risk (20 < rate < 50)
+        # For M=10, n=4, dt=0.01: 10^8 = 1e8
+        # Need nu * 1e8 * 0.01 between 20 and 50 → 2e-5 < nu < 5e-5
+        # Use nu=3e-5 which triggers warning but not error
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+        state.nu = 3e-5  # Moderate risk for M=10, n=4, dt=0.01
+
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            rk4_step(state, dt=0.01, eta=0.01, v_A=1.0, hyper_n=4)
+
+            # Check that a warning was issued
+            assert len(w) == 1
+            assert issubclass(w[0].category, RuntimeWarning)
+            assert "Hyper-collision damping rate is high" in str(w[0].message)
+
+    def test_hyperresistivity_overflow_error(self):
+        """Hyper-resistivity overflow risk should raise ValueError."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # For r=8, Nx=32: k_max ≈ 16, k_max^16 is huge
+        # safe eta < 50 / (k_max^16 * dt)
+        # Use very large eta to trigger error
+        eta_overflow = 1.0  # Too large for r=8
+
+        with pytest.raises(ValueError, match="Hyper-resistivity overflow risk detected"):
+            rk4_step(state, dt=0.1, eta=eta_overflow, v_A=1.0, hyper_r=8)
+
+    def test_hyperresistivity_overflow_warning(self):
+        """Moderate hyper-resistivity rate should emit warning or succeed."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Test that moderate parameters don't crash
+        # Whether it warns or not depends on exact grid/parameter combination
+        # The key is it doesn't raise an error
+        eta_moderate = 0.001
+
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = rk4_step(state, dt=0.01, eta=eta_moderate, v_A=1.0, hyper_r=2)
+
+            # Should complete successfully (may or may not warn)
+            assert result.time > state.time
+            assert jnp.isfinite(result.z_plus).all()
+
+    def test_safe_hyper_parameters(self):
+        """Safe hyper parameters should work without error or warning."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create state with safe parameters
+        # For M=10, n=4: need nu * 10^8 * dt < 20 → nu < 2e-6 (for dt=0.01)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+        state.nu = 1e-9  # Very safe for M=10, n=4
+
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            # Use very small eta for r=8 to avoid overflow
+            # For r=8, k_max ≈ 16: k_max^16 ≈ 2e19, so need eta << 1e-18
+            result = rk4_step(state, dt=0.01, eta=1e-20, v_A=1.0, hyper_r=8, hyper_n=4)
+
+            # Verify no warnings were issued
+            hyper_warnings = [warning for warning in w
+                             if "damping rate" in str(warning.message)]
+            assert len(hyper_warnings) == 0, \
+                f"Safe parameters should not trigger warnings, got: {hyper_warnings}"
+
+            # Verify state advanced correctly
+            assert result.time > state.time
+            assert jnp.isfinite(result.z_plus).all()
+            assert jnp.isfinite(result.g).all()
+
+
+class TestHyperdissipationEdgeCases:
+    """Test suite for edge cases: non-square grids, non-2π domains, mixed parameters."""
+
+    def test_non_square_grid(self):
+        """Hyper-dissipation should work with non-square grids (Nx != Ny)."""
+        # Create rectangular grid: 64x32x16
+        grid = SpectralGrid3D.create(Nx=64, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Use moderate hyper-dissipation (eta scaled for larger k_max)
+        dt = 0.01
+        eta = 0.001  # Smaller for Nx=64: k_max~32
+        state.nu = 0.05
+
+        # Should work without errors
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+        # Verify shapes are preserved
+        assert state_new.z_plus.shape == (grid.Nz, grid.Ny, grid.Nx//2+1)
+        assert state_new.g.shape == (grid.Nz, grid.Ny, grid.Nx//2+1, state.M+1)
+        assert jnp.isfinite(state_new.z_plus).all()
+        assert jnp.isfinite(state_new.g).all()
+
+    def test_non_2pi_domain(self):
+        """Hyper-dissipation should work with non-2π domains."""
+        # Create grid with arbitrary domain size
+        Lx, Ly, Lz = 4.0, 6.0, 8.0
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=Lx, Ly=Ly, Lz=Lz)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Use moderate hyper-dissipation
+        dt = 0.01
+        eta = 0.01
+        state.nu = 0.05
+
+        # Should work without errors
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+        # Verify physics is correct
+        # k_max should be 2π/dx = 2π/(Lx/Nx) = 2πNx/Lx
+        kx_max_expected = jnp.pi * grid.Nx / Lx
+        kx_max_actual = grid.kx[-1]
+        assert jnp.allclose(kx_max_actual, kx_max_expected, rtol=1e-10)
+
+        assert jnp.isfinite(state_new.z_plus).all()
+        assert jnp.isfinite(state_new.g).all()
+
+    def test_mixed_hyper_parameters_r2_n4(self):
+        """Test mixed hyper parameters: r=2 (moderate resistivity), n=4 (strong collisions)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Mixed parameters: r=2 (easy to tune), n=4 (requires small nu)
+        dt = 0.01
+        eta = 0.02  # Safe for r=2
+        nu = 1e-7   # Safe for n=4, M=10: nu < 5e-7
+        state.nu = nu
+
+        # Should work without errors
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=4)
+
+        # Verify dual dissipation mechanisms active
+        # r=2: Moderate resistive dissipation
+        # n=4: Strong collision damping on high-m moments
+        E_initial = jnp.sum(jnp.abs(state.g)**2)
+        E_final = jnp.sum(jnp.abs(state_new.g)**2)
+        assert E_final < E_initial, "Energy should decrease with dual dissipation"
+
+    def test_mixed_hyper_parameters_r4_n2(self):
+        """Test mixed hyper parameters: r=4 (strong resistivity), n=2 (moderate collisions)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Mixed parameters: r=4 (requires VERY small eta), n=2 (easy to tune)
+        dt = 0.01
+        eta = 1e-7   # Tiny eta required for r=4, k_max~16 (demonstrates impracticality!)
+        nu = 0.1     # Safe for n=2, M=10
+        state.nu = nu
+
+        # Should work without errors
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=4, hyper_n=2)
+
+        # Verify dual dissipation mechanisms active
+        E_initial = jnp.sum(jnp.abs(state.g)**2)
+        E_final = jnp.sum(jnp.abs(state_new.g)**2)
+        assert E_final < E_initial, "Energy should decrease with dual dissipation"
+
+    def test_anisotropic_domain(self):
+        """Test with highly anisotropic domain (Lx >> Ly >> Lz)."""
+        # Anisotropic domain: long in x, short in z
+        grid = SpectralGrid3D.create(Nx=64, Ny=32, Nz=16,
+                                     Lx=8*jnp.pi, Ly=4*jnp.pi, Lz=2*jnp.pi)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # Use moderate hyper-dissipation (eta scaled for grid)
+        dt = 0.01
+        eta = 0.001  # Smaller for Nx=64
+        state.nu = 0.05
+
+        # Should work without errors
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+        # Verify wavenumber grids are correctly scaled
+        # For Lx = 8π, kx grid should be denser (smaller dk)
+        # For Lz = 2π, kz grid should be coarser (larger dk)
+        dk_x = grid.kx[1] - grid.kx[0]
+        dk_z = grid.kz[1] - grid.kz[0]
+        assert dk_x < dk_z, "Longer domain should have finer k-spacing"
+
+        assert jnp.isfinite(state_new.z_plus).all()
+        assert jnp.isfinite(state_new.g).all()
+
+
+class TestHyperdissipationDegenerateCases:
+    """Test suite for degenerate cases: zero fields, M=0, very coarse grids."""
+
+    def test_zero_fields(self):
+        """Hyper-dissipation should handle zero initial fields gracefully."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create state with all zero fields explicitly
+        M = 10
+        state = KRMHDState(
+            z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64),
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.1,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        # Apply hyper-dissipation
+        dt = 0.01
+        eta = 0.01
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+        # Should remain zero (dissipation of zero is zero)
+        assert jnp.allclose(state_new.z_plus, 0.0, atol=1e-15)
+        assert jnp.allclose(state_new.z_minus, 0.0, atol=1e-15)
+        assert jnp.allclose(state_new.g, 0.0, atol=1e-15)
+
+    def test_zero_field_integration_multiple_steps(self):
+        """Integration test: Zero fields should remain zero over multiple timesteps (no spurious modes)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create state with all zero fields
+        M = 10
+        state = KRMHDState(
+            z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64),
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.1,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        # Run multiple timesteps with both standard and hyper-dissipation
+        dt = 0.01
+        n_steps = 10
+
+        # Test with standard dissipation (r=1, n=1)
+        state_r1 = state
+        for _ in range(n_steps):
+            state_r1 = rk4_step(state_r1, dt, eta=0.01, v_A=1.0, hyper_r=1, hyper_n=1)
+
+        # Verify no spurious modes generated
+        assert jnp.allclose(state_r1.z_plus, 0.0, atol=1e-15), "Spurious modes in z_plus (r=1)"
+        assert jnp.allclose(state_r1.z_minus, 0.0, atol=1e-15), "Spurious modes in z_minus (r=1)"
+        assert jnp.allclose(state_r1.g, 0.0, atol=1e-15), "Spurious modes in g (r=1)"
+
+        # Test with hyper-dissipation (r=2, n=2)
+        state_r2 = state
+        for _ in range(n_steps):
+            state_r2 = rk4_step(state_r2, dt, eta=0.0001, v_A=1.0, hyper_r=2, hyper_n=2)
+
+        # Verify no spurious modes generated
+        assert jnp.allclose(state_r2.z_plus, 0.0, atol=1e-15), "Spurious modes in z_plus (r=2)"
+        assert jnp.allclose(state_r2.z_minus, 0.0, atol=1e-15), "Spurious modes in z_minus (r=2)"
+        assert jnp.allclose(state_r2.g, 0.0, atol=1e-15), "Spurious modes in g (r=2)"
+
+        # Explicitly verify all Fourier modes remain zero (no single-mode excitation)
+        assert jnp.max(jnp.abs(state_r2.z_plus)) == 0.0, "Non-zero Fourier mode in z_plus"
+        assert jnp.max(jnp.abs(state_r2.z_minus)) == 0.0, "Non-zero Fourier mode in z_minus"
+        assert jnp.max(jnp.abs(state_r2.g)) == 0.0, "Non-zero Fourier mode in g"
+
+    def test_very_coarse_grid(self):
+        """Hyper-dissipation should work with very coarse grids (Nx=8)."""
+        # Very coarse grid: 8x8x8
+        grid = SpectralGrid3D.create(Nx=8, Ny=8, Nz=8)
+        state = initialize_alfven_wave(grid, M=5, kz_mode=1, amplitude=0.1)
+
+        # Even for a coarse grid, r=8 requires tiny eta
+        # k_max ~ 4.12, so k_max^16 ~ 7e9 (still huge!)
+        # Use r=2 instead (practical maximum)
+        dt = 0.01
+        eta = 0.01  # Safe for r=2
+        state.nu = 0.05
+
+        # Should work without errors
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+            # Should not crash and produce finite results
+            assert jnp.isfinite(state_new.z_plus).all()
+            assert jnp.isfinite(state_new.g).all()
+            # Verify dissipation is working (energy decreases)
+            E_elsasser_init = jnp.sum(jnp.abs(state.z_plus)**2) + jnp.sum(jnp.abs(state.z_minus)**2)
+            E_hermite_init = jnp.sum(jnp.abs(state.g)**2)
+            E_initial = E_elsasser_init + E_hermite_init
+
+            E_elsasser_final = jnp.sum(jnp.abs(state_new.z_plus)**2) + jnp.sum(jnp.abs(state_new.z_minus)**2)
+            E_hermite_final = jnp.sum(jnp.abs(state_new.g)**2)
+            E_final = E_elsasser_final + E_hermite_final
+            assert E_final < E_initial, "Dissipation should reduce energy"
+
+    def test_M_equals_one(self):
+        """Hyper-collisions should handle M=1 gracefully (only m=0,1 moments, no collisions)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Create state with M=1 (only g_0 and g_1 exist, both exempt from collisions)
+        M = 1
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        z_plus = z_plus.at[1, 1, 1].set(0.1 + 0.0j)
+
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
+        g = g.at[1, 1, 1, 0].set(0.1 + 0.0j)  # m=0
+        g = g.at[1, 1, 1, 1].set(0.05 + 0.0j)  # m=1
+
+        state = KRMHDState(
+            z_plus=z_plus,
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
+            g=g,
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=10.0,  # Large collision frequency (should have NO effect since m=0,1 are exempt)
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        # Apply hyper-collisions (large nu to verify exemption)
+        dt = 0.01
+        eta = 0.01
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=4)
+
+        # m=0,1 should not be affected by collisions (conservation)
+        # Should not produce NaN or Inf values despite large nu
+        assert state_new.g.shape == (grid.Nz, grid.Ny, grid.Nx//2+1, M+1)
+        assert jnp.isfinite(state_new.g).all(), "Should produce finite values despite large nu"
+
+        # Energy should decrease (from resistive dissipation only)
+        E_initial = jnp.sum(jnp.abs(state.g)**2)
+        E_final = jnp.sum(jnp.abs(state_new.g)**2)
+        assert E_final < E_initial, "Energy should decrease due to resistive dissipation"
+
+    def test_warning_threshold_exact(self):
+        """Verify warnings trigger at exactly the documented threshold (20.0)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        # For M=10, n=2, dt=0.01:
+        # Collision rate = nu * 10^4 * 0.01 = nu * 100
+        # To hit threshold of exactly 20.0: nu = 20.0 / 100 = 0.2
+        dt = 0.01
+        eta = 0.001
+        nu_threshold = 20.0 / (10**4 * dt)  # Exactly at warning threshold
+        state.nu = nu_threshold
+
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            # Should trigger warning (rate >= 20.0)
+            state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+            # Verify warning was triggered
+            hyper_warnings = [warning for warning in w
+                             if "damping rate" in str(warning.message)]
+            assert len(hyper_warnings) > 0, "Should trigger warning at threshold 20.0"
+
+        # Just below threshold should NOT warn
+        state.nu = nu_threshold * 0.99  # Slightly below 20.0
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+
+            # Verify no warning below threshold
+            hyper_warnings = [warning for warning in w
+                             if "damping rate" in str(warning.message)]
+            assert len(hyper_warnings) == 0, "Should NOT warn below threshold 20.0"

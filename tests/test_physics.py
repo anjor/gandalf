@@ -27,6 +27,8 @@ from krmhd.physics import (
     g0_rhs,
     g1_rhs,
     gm_rhs,
+    hyperdiffusion,
+    hyperresistivity,
 )
 
 
@@ -2075,3 +2077,170 @@ class TestHermiteMomentRHS:
         rhs_gm = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
                         grid.dealias_mask, 5, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
         assert jnp.allclose(rhs_gm[0, 0, 0], 0.0), "gm_rhs k=0 mode should be zero"
+
+
+class TestHyperdiffusion:
+    """Test suite for hyper-dissipation operators."""
+
+    def test_hyperdiffusion_shape_preservation(self):
+        """Hyperdiffusion should preserve field shape."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+
+        # Random field
+        key = jax.random.PRNGKey(42)
+        field = jax.random.normal(key, (grid.Nz, grid.Ny, grid.Nx//2+1),
+                                  dtype=jnp.float32).astype(jnp.complex64)
+
+        # Test different hyper-dissipation orders
+        for r in [1, 2, 4, 8]:
+            result = hyperdiffusion(field, grid.kx, grid.ky, eta=0.01, r=r)
+            assert result.shape == field.shape, \
+                f"Hyperdiffusion r={r} changed shape: {field.shape} → {result.shape}"
+            assert result.dtype == field.dtype, \
+                f"Hyperdiffusion r={r} changed dtype: {field.dtype} → {result.dtype}"
+
+    def test_hyperdiffusion_r1_standard(self):
+        """For r=1, hyperdiffusion should match standard Laplacian scaling."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        eta = 0.1
+
+        # Create single-mode field: only (kx=1, ky=0) mode active
+        field = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        ikx, iky, ikz = 1, 0, 0
+        field = field.at[ikz, iky, ikx].set(1.0 + 0.0j)
+
+        # Compute hyperdiffusion with r=1
+        result = hyperdiffusion(field, grid.kx, grid.ky, eta=eta, r=1)
+
+        # Expected: -η·k⊥²·field where k⊥² = kx² + ky² = 1² + 0² = 1
+        kx_val = grid.kx[ikx]
+        ky_val = grid.ky[iky]
+        k_perp_squared = kx_val**2 + ky_val**2
+        expected_value = -eta * k_perp_squared * 1.0  # field amplitude = 1.0
+
+        assert jnp.allclose(result[ikz, iky, ikx].real, expected_value, rtol=1e-5), \
+            f"r=1 dissipation mismatch: expected {expected_value}, got {result[ikz, iky, ikx].real}"
+
+    def test_hyperdiffusion_scaling_law(self):
+        """Verify k⊥^(2r) scaling for different r values."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        eta = 0.1
+
+        # Create single-mode field: (kx=2, ky=1) mode
+        field = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        ikx, iky, ikz = 2, 1, 0
+        field = field.at[ikz, iky, ikx].set(1.0 + 0.0j)
+
+        # k⊥² = kx² + ky²
+        kx_val = grid.kx[ikx]
+        ky_val = grid.ky[iky]
+        k_perp_squared = kx_val**2 + ky_val**2
+
+        # Test r=1, 2, 4, 8
+        for r in [1, 2, 4, 8]:
+            result = hyperdiffusion(field, grid.kx, grid.ky, eta=eta, r=r)
+
+            # Expected: -η·k⊥^(2r)·field
+            expected_value = -eta * (k_perp_squared ** r) * 1.0
+
+            assert jnp.allclose(result[ikz, iky, ikx].real, expected_value, rtol=1e-5), \
+                f"r={r} scaling wrong: expected {expected_value}, got {result[ikz, iky, ikx].real}"
+
+    def test_hyperdiffusion_k0_mode_zero(self):
+        """k=0 mode should give zero dissipation (k⊥=0)."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+
+        # Field with only k=0 mode
+        field = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        field = field.at[0, 0, 0].set(1.0 + 0.0j)
+
+        # Test all r values
+        for r in [1, 2, 4, 8]:
+            result = hyperdiffusion(field, grid.kx, grid.ky, eta=0.1, r=r)
+
+            # k⊥=0 → dissipation = 0 regardless of r
+            assert jnp.allclose(result[0, 0, 0], 0.0), \
+                f"k=0 mode dissipation should be zero for r={r}, got {result[0, 0, 0]}"
+
+    def test_hyperdiffusion_concentration_at_high_k(self):
+        """Hyper-dissipation (r>1) should be much stronger at high k than low k."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        eta = 0.01
+
+        # Low-k mode (kx=1, ky=0)
+        field_low = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        field_low = field_low.at[0, 0, 1].set(1.0)
+
+        # High-k mode (kx=16, ky=0) - near Nyquist
+        field_high = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        field_high = field_high.at[0, 0, 16].set(1.0)
+
+        # Standard dissipation (r=1)
+        diss_low_r1 = hyperdiffusion(field_low, grid.kx, grid.ky, eta=eta, r=1)
+        diss_high_r1 = hyperdiffusion(field_high, grid.kx, grid.ky, eta=eta, r=1)
+        ratio_r1 = jnp.abs(diss_high_r1[0, 0, 16]) / jnp.abs(diss_low_r1[0, 0, 1])
+
+        # Hyper-dissipation (r=8)
+        diss_low_r8 = hyperdiffusion(field_low, grid.kx, grid.ky, eta=eta, r=8)
+        diss_high_r8 = hyperdiffusion(field_high, grid.kx, grid.ky, eta=eta, r=8)
+        ratio_r8 = jnp.abs(diss_high_r8[0, 0, 16]) / jnp.abs(diss_low_r8[0, 0, 1])
+
+        # For r=1: ratio ~ k_high²/k_low² = 16²/1² = 256
+        # For r=8: ratio ~ k_high¹⁶/k_low¹⁶ = 16¹⁶/1¹⁶ = 18446744073709551616
+        # The hyper-dissipation ratio should be MUCH larger
+        assert ratio_r8 > ratio_r1 * 1e6, \
+            f"Hyper-dissipation (r=8) should concentrate at high k: ratio_r8={ratio_r8:.2e}, ratio_r1={ratio_r1:.2e}"
+
+    def test_hyperresistivity_alias(self):
+        """hyperresistivity() should be identical to hyperdiffusion()."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        eta = 0.1
+        r = 4
+
+        # Random field
+        key = jax.random.PRNGKey(42)
+        field = jax.random.normal(key, (grid.Nz, grid.Ny, grid.Nx//2+1),
+                                  dtype=jnp.float32).astype(jnp.complex64)
+
+        result_hyper = hyperdiffusion(field, grid.kx, grid.ky, eta=eta, r=r)
+        result_resist = hyperresistivity(field, grid.kx, grid.ky, eta=eta, r=r)
+
+        assert jnp.allclose(result_hyper, result_resist), \
+            "hyperresistivity() should match hyperdiffusion()"
+
+    def test_hyperdiffusion_zero_eta(self):
+        """Zero coefficient should give zero dissipation."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+
+        # Random field
+        key = jax.random.PRNGKey(42)
+        field = jax.random.normal(key, (grid.Nz, grid.Ny, grid.Nx//2+1),
+                                  dtype=jnp.float32).astype(jnp.complex64)
+
+        # eta=0 → no dissipation
+        result = hyperdiffusion(field, grid.kx, grid.ky, eta=0.0, r=8)
+
+        assert jnp.allclose(result, 0.0), \
+            "Zero eta should give zero dissipation"
+
+    def test_hyperdiffusion_negative_sign(self):
+        """Dissipation should always be negative (removes energy)."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        eta = 0.1
+
+        # Positive real field (energy-like quantity)
+        field = jnp.ones((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
+        field = field.at[0, 0, 0].set(0.0)  # Zero k=0 mode
+
+        # Dissipation should be negative (or zero at k=0)
+        result = hyperdiffusion(field, grid.kx, grid.ky, eta=eta, r=4)
+
+        # All non-zero modes should have negative real part (dissipation removes energy)
+        # Note: field is all positive real, so dissipation = -η·k⊥^(2r)·field < 0
+        for ikz in range(grid.Nz):
+            for iky in range(grid.Ny):
+                for ikx in range(grid.Nx//2+1):
+                    if ikz == 0 and iky == 0 and ikx == 0:
+                        continue  # Skip k=0 mode
+                    assert result[ikz, iky, ikx].real <= 0.0, \
+                        f"Dissipation at ({ikz},{iky},{ikx}) should be ≤0, got {result[ikz, iky, ikx].real}"

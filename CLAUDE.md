@@ -105,10 +105,11 @@ krmhd/
 └── validation.py    # Linear physics tests (Issue #10)
 
 examples/
-├── forcing_minimal.py      # ✅ COMPLETE: Minimal forcing example (~50 lines, 2s runtime)
-├── driven_turbulence.py    # ✅ COMPLETE: Comprehensive driven turbulence with forcing (317 lines, 20s runtime)
-├── decaying_turbulence.py  # ✅ COMPLETE: Turbulent cascade with diagnostics (Issue #12)
-└── orszag_tang.py          # ✅ COMPLETE: Orszag-Tang vortex benchmark (Issue #11)
+├── forcing_minimal.py          # ✅ COMPLETE: Minimal forcing example (~50 lines, 2s runtime)
+├── driven_turbulence.py        # ✅ COMPLETE: Comprehensive driven turbulence with forcing (317 lines, 20s runtime)
+├── decaying_turbulence.py      # ✅ COMPLETE: Turbulent cascade with diagnostics (Issue #12)
+├── orszag_tang.py              # ✅ COMPLETE: Orszag-Tang vortex benchmark (Issue #11)
+└── hyper_dissipation_demo.py   # ✅ COMPLETE: Hyper-dissipation r=1 vs r=2 comparison (Issue #28)
 ```
 
 **spectral.py** includes:
@@ -152,6 +153,82 @@ checkpoints to return to.
 - Monitor energy with diagnostics.EnergyHistory for tracking E(t)
 
 **✅ Issue #44 RESOLVED:** Implemented correct GANDALF energy-conserving formulation from thesis. The key insight is using k⊥⁻¹[{z⁺,-k⊥²z⁻} + {z⁻,-k⊥²z⁺} + k⊥²{z⁺,z⁻}] instead of simple -k⊥²{z∓,z±}. This conserves perpendicular gradient energy to machine precision.
+
+### Hyper-dissipation (Issue #28)
+
+Hyper-dissipation operators provide selective damping of small-scale modes while preserving large-scale turbulent dynamics. This is critical for preventing spectral pile-up at grid Nyquist scales without over-dissipating the inertial range.
+
+**Physics:**
+- **Standard dissipation** (r=1): -η∇²⊥ ~ -ηk⊥² (uniform damping across scales)
+- **Hyper-dissipation** (r>1): -η∇^(2r)⊥ ~ -ηk⊥^(2r) (concentrated at high-k)
+- **Hyper-collisions** (n>1): -νm^(2n) for Hermite moments (damps high-m modes)
+
+**Recommended parameters:**
+- **r = 2, n = 2**: Optimal balance for typical turbulence studies
+  - Creates steep exponential cutoff at k⊥ > k_max/2
+  - Preserves inertial range (k⊥ ~ 2-10) with minimal artificial damping
+  - Prevents spurious reflections from grid Nyquist boundary
+- **r = 1, n = 1**: Standard dissipation (reference case)
+- **r ≥ 3, n ≥ 3**: Generally impractical (requires tiny coefficients)
+
+**Parameter selection constraints:**
+- **Overflow safety**: Dissipation rate must satisfy `η·k_max^(2r)·dt < 50` (see timestepping.py:51-61)
+- **Practical limits** for typical grids (k_max ~ 30-60):
+  ```
+  r=1 (standard):     η < 0.01          (no overflow risk)
+  r=2 (recommended):  η < 1e-5 to 1e-4  (safe range)
+  r=3:                η < 1e-11         (impractically small!)
+  r=8:                η < 1e-29         (unusable)
+  ```
+- **Collision parameters**: Similar constraints apply for ν with M (max Hermite moment)
+- **Timestep dependence**: Smaller dt allows larger η, ν (rate·dt is the critical factor)
+
+**Usage in gandalf_step():**
+```python
+state = gandalf_step(
+    state,
+    dt=0.01,
+    eta=1e-4,     # Hyper-resistivity coefficient
+    nu=1e-4,      # Hyper-collision coefficient
+    v_A=1.0,
+    hyper_r=2,    # Hyper-resistivity order (default: 1)
+    hyper_n=2     # Hyper-collision order (default: 1)
+)
+```
+
+**Automatic validation:**
+- `ValueError` raised if `rate·dt ≥ 50` (overflow risk)
+- `RuntimeWarning` issued if `rate·dt ≥ 20` (moderate risk)
+- Error messages provide safe parameter recommendations
+
+**When to use:**
+- **Turbulence studies**: Essential for 256³ and higher resolutions
+- **Spectral pile-up**: When energy accumulates at high-k Nyquist boundary
+- **Long-time evolution**: Prevents small-scale instabilities in multi-τ simulations
+- **Clean inertial range**: When you need minimal artificial dissipation at k ~ 2-10
+
+**When NOT to use:**
+- **Linear physics tests**: Use standard dissipation (r=1, n=1) for analytical comparison
+- **Coarse grids**: For Nx < 64, standard dissipation may be sufficient
+- **Dissipation studies**: When you're specifically investigating viscous effects
+
+**Example:**
+See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r=2, showing:
+- Energy preservation: 83.6% decay (r=1) vs 24.3% decay (r=2)
+- Spectral behavior: Steep exponential cutoff at high-k for r=2
+- Large-scale dynamics: Inertial range (k ~ 2-5) preserved with hyper-dissipation
+
+**Implementation details:**
+- Hyper-resistivity: Applied via multiplicative factor exp(-η·k⊥^(2r)·dt) to z± in Fourier space
+- Hyper-collisions: Applied via multiplicative factor exp(-ν·m^(2n)·dt) to Hermite moments
+- Reality condition: Preserved (dissipation factors are real and uniform across modes)
+- Energy conservation: Modified to E(t) = E₀·exp(-2η⟨k⊥^(2r)⟩·t) for hyper-viscous decay
+
+**References:**
+- Implementation: physics.py (hyperdiffusion, hypercollision functions)
+- Integration: timestepping.py (gandalf_step with overflow validation)
+- Tests: test_physics.py (unit tests), test_timestepping.py (integration tests)
+- Example: examples/hyper_dissipation_demo.py
 
 ## Validation Suite
 

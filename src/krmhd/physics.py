@@ -365,6 +365,130 @@ def poisson_bracket_3d(
 
 
 # =============================================================================
+# Hyper-Dissipation Operators
+# =============================================================================
+
+
+@partial(jax.jit, static_argnames=['r'])
+def hyperdiffusion(
+    field: Array,
+    kx: Array,
+    ky: Array,
+    eta: float,
+    r: int = 1,
+) -> Array:
+    """
+    Compute hyper-diffusion operator: -η·k⊥^(2r)·field.
+
+    Hyper-diffusion concentrates dissipation at small scales (high k⊥), maximizing
+    the inertial range for turbulence studies. Standard diffusion (r=1) damps all
+    scales proportionally to k⊥², wasting resolution. Hyper-diffusion with r=4 or
+    r=8 creates a sharp cutoff at high k⊥, allowing wider inertial range.
+
+    Args:
+        field: Field in Fourier space (shape: [..., Ny, Nx//2+1])
+        kx: Wavenumber array in x (shape: [Nx//2+1])
+        ky: Wavenumber array in y (shape: [Ny])
+        eta: Hyper-diffusion coefficient η
+        r: Hyper-diffusion order (default: 1)
+            - r=1: Standard diffusion -ηk⊥²·field (default, backward compatible)
+            - r=2: Moderate hyper-diffusion -ηk⊥⁴·field (recommended for most cases)
+            - r=4: Strong hyper-diffusion -ηk⊥⁸·field (expert use, requires small eta)
+            - r=8: Maximum hyper-diffusion -ηk⊥¹⁶·field (expert use, requires tiny eta)
+
+    Returns:
+        Hyper-diffusion term -η·k⊥^(2r)·field (same shape as input)
+
+    Physics context:
+        For turbulence with forcing at k_force ~ 2-4 and grid extending to k_max ~ Nx/2:
+        - Standard (r=1): Dissipation spreads across all k, affects inertial range
+        - r=2: Good balance between inertial range and numerical stability (recommended)
+        - r=4: Strong concentration at high k, requires careful eta tuning (expert use)
+        - r=8: Very sharp cutoff, requires very small eta, difficult to tune (expert use)
+
+        Energy dissipation rate: dE/dt = -2η·k⊥^(2r)·E for mode at k⊥
+
+    Example:
+        >>> grid = SpectralGrid3D.create(Nx=128, Ny=128, Nz=64)
+        >>> field_k = jnp.ones((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        >>> # Standard dissipation
+        >>> dissipation_standard = hyperdiffusion(field_k, grid.kx, grid.ky, eta=0.01, r=1)
+        >>> # Hyper-dissipation (r=8)
+        >>> dissipation_hyper = hyperdiffusion(field_k, grid.kx, grid.ky, eta=0.01, r=8)
+        >>> # dissipation_hyper is negligible at low k, dominates at high k
+
+    Note:
+        When r > 1, the hyper-diffusion coefficient η should typically be reduced
+        compared to standard diffusion to avoid over-damping. Rule of thumb:
+        η_hyper ~ η_standard / k_max^(2(r-1))
+
+        **Numerical precision limits (r=8):** For r=8 with typical grids (k_max ~ 64),
+        k_max^16 ≈ 10^28. This requires η ~ 10^-27 to keep eta·k_max^16·dt < 50.
+        At such tiny values, dissipation becomes negligible due to float64 precision
+        limits (~10^-16). **Practical maximum: r=2 for typical grids (128^3 to 512^3).**
+        Use r=4 or r=8 only for small grids (k_max < 16) or as expert configurations.
+
+        **Dealiasing:** The hyperdiffusion operator is linear, so it does NOT require
+        dealiasing. However, if the result is subsequently used in nonlinear operations
+        (e.g., Poisson brackets, multiplications), those operations MUST be dealiased
+        to prevent aliasing errors from contaminating the simulation.
+
+    Reference:
+        - Thesis §2.5.2: Hyper-dissipation for inertial range studies
+        - Frisch (1995) "Turbulence": Hyperviscosity discussion
+    """
+    # Build k⊥² = kx² + ky²
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+
+    # Compute k⊥^(2r) and multiply by -η
+    # Note: For r=1, this is -η·k⊥² (standard Laplacian)
+    k_perp_2r = k_perp_squared ** r
+    hyperdiffusion_term = -eta * k_perp_2r * field
+
+    return hyperdiffusion_term
+
+
+@partial(jax.jit, static_argnames=['r'])
+def hyperresistivity(
+    field: Array,
+    kx: Array,
+    ky: Array,
+    eta: float,
+    r: int = 1,
+) -> Array:
+    """
+    Compute hyper-resistivity operator: -η·k⊥^(2r)·field.
+
+    This is an alias for hyperdiffusion() with clearer naming for magnetic fields.
+    Hyper-resistivity provides scale-selective damping of magnetic field fluctuations.
+
+    Args:
+        field: Magnetic field component in Fourier space (shape: [..., Ny, Nx//2+1])
+        kx: Wavenumber array in x (shape: [Nx//2+1])
+        ky: Wavenumber array in y (shape: [Ny])
+        eta: Hyper-resistivity coefficient η
+        r: Hyper-resistivity order (default: 1)
+            - r=1: Standard resistivity -ηk⊥²·B (default, backward compatible)
+            - r=2: Moderate hyper-resistivity -ηk⊥⁴·B (recommended for most cases)
+            - r=4: Strong hyper-resistivity -ηk⊥⁸·B (expert use, requires small eta)
+            - r=8: Maximum hyper-resistivity -ηk⊥¹⁶·B (expert use, requires tiny eta)
+
+    Returns:
+        Hyper-resistivity term -η·k⊥^(2r)·field (same shape as input)
+
+    Example:
+        >>> z_plus_dissipation = hyperresistivity(z_plus, grid.kx, grid.ky, eta=0.01, r=8)
+
+    Note:
+        This is identical to hyperdiffusion() but provides clearer naming when
+        applied to magnetic fields (z±, A∥, B∥).
+    """
+    return hyperdiffusion(field, kx, ky, eta, r)
+
+
+# =============================================================================
 # Elsasser Variable Conversions
 # =============================================================================
 
