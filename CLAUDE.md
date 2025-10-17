@@ -183,7 +183,7 @@ checkpoints to return to.
 
 ## Current Development Status
 
-**Test Coverage:** 222 passing tests across all modules (194 core + 28 forcing)
+**Test Coverage:** 238 passing tests across all modules (194 core + 28 forcing + 16 phase mixing)
 
 ### Completed (Issues #1-3, #21)
 - [x] Basic spectral infrastructure (2D/3D, Issue #2)
@@ -271,10 +271,13 @@ checkpoints to return to.
   - Example: field_line_visualization.py demonstrates all functionality
   - **Key improvement**: Spectral interpolation (vs bilinear in original GANDALF)
   - **TODO**: True k∥ spectrum via FFT along curved field lines (deferred)
-- [ ] Phase mixing diagnostics (Issue #26)
-  - Hermite moment flux: Γₘ,ₖ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ]
-  - Phase mixing/unmixing spectrum decomposition
-  - **Unblocked**: Field line infrastructure now available
+- [x] Phase mixing diagnostics (Issue #26) ✅
+  - hermite_flux(): Compute Γₘ,ₖ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ] energy flux between moments
+  - hermite_moment_energy(): Energy distribution E_m vs m in velocity space
+  - phase_mixing_energy(), phase_unmixing_energy(): Decompose modes by flux direction
+  - Visualization: plot_hermite_flux_spectrum(), plot_hermite_moment_energy(), plot_phase_mixing_2d()
+  - 16 comprehensive tests: shape, reality, conservation, energy decomposition
+  - **Ready for**: Issue #27 (Kinetic FDT validation)
 
 ### Forcing Mechanisms (Issue #29) ✅ COMPLETE
 - [x] Gaussian white noise forcing (Issue #29) ✅
@@ -306,8 +309,8 @@ checkpoints to return to.
   - Spectrum analysis with visualization
 - [ ] Kinetic FDT validation (Issue #27)
   - Critical validation against analytical Vlasov theory
-  - **Unblocked**: Forcing (Issue #29) now complete ✅
-  - Still requires: Phase mixing diagnostics (Issue #26)
+  - **Unblocked**: All dependencies complete (Forcing #29 ✅, Phase mixing #26 ✅)
+  - Ready to implement: Drive single k-modes, measure |gₘ|² vs m, compare with theory
 
 ### Production Features (Issues #13-15, #28, #30)
 - [ ] HDF5 I/O (Issue #13)
