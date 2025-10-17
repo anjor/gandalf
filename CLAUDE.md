@@ -384,13 +384,15 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
   - k^(-5/3) turbulent spectrum initialization
   - Energy history tracking and selective decay
   - Spectrum analysis with visualization
-- [x] Kinetic FDT validation (Issue #27) ✅
+- [x] Kinetic FDT validation (Issue #27, #66) ✅
   - Infrastructure complete: Force single k-modes, measure |gₘ|² spectrum, time-average
   - 3 passing tests: Basic validation, parameter scaling, energy balance
   - Example script: examples/kinetic_fdt_validation.py demonstrates workflow
-  - **Status**: Placeholder analytical models (simplified power-law + exp cutoff)
-  - **TODO**: Implement exact thesis equations (Eqs 3.37, 3.58) with plasma dispersion functions
+  - **Status**: Exact analytical expressions implemented (Issue #66)
+  - **Implementation**: Thesis Eqs 3.37 & 3.58 with plasma dispersion functions and Bessel functions
   - **Physics validated**: Spectrum decays exponentially with m (collisional damping works)
+  - **Kinetic effects**: Landau resonance (Z function), FLR corrections (I_m Bessel functions)
+  - **Power laws**: Phase mixing m^(-3/2), phase unmixing m^(-1/2) from kinetic theory
 
 ### Production Features (Issues #13-15, #28, #30)
 - [ ] HDF5 I/O (Issue #13)
