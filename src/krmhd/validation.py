@@ -235,20 +235,30 @@ def kinetic_response_function(
         # Return simple non-resonant response
         return 1.0 + 0.0j
 
+    # Causality prescription: effective_nu ≥ CAUSALITY_EPSILON * k∥v_th
+    # For collisionless case (nu=0), this adds small imaginary part iε to frequency
+    # to ensure proper Landau prescription (poles slightly below real axis)
+    # CAUSALITY_EPSILON=1e-3 chosen to be small compared to typical ν~0.01-0.3
+    # but large enough to avoid numerical issues near real axis
     effective_nu = max(nu, CAUSALITY_EPSILON * abs(k_parallel) * v_th)
     zeta = (omega - 1j * effective_nu) / (np.sqrt(2.0) * abs(k_parallel) * v_th)
 
-    # Plasma dispersion function and derivative
+    # Plasma dispersion function for Landau resonance
     Z_zeta = plasma_dispersion_function(zeta)
-    Zprime_zeta = plasma_dispersion_derivative(zeta)
+    # Note: Z'(ζ) = plasma_dispersion_derivative(zeta) is available for future use
+    # (e.g., for higher-order kinetic corrections or velocity moment calculations)
 
     # Kinetic response with Lambda parameter
-    # Simplified form based on KRMHD linear theory
-    # Full thesis expression may include additional k⊥ρ_s dependent terms
+    # Based on standard KRMHD linear theory (Howes et al. 2006)
+    # Lambda = 1 + 1/β gives kinetic corrections to pressure response
     kinetic_factor = 1.0 + (1.0 - 1.0/Lambda) * zeta * Z_zeta
 
-    # Response function (simplified)
-    # |R|² will appear in the spectrum as |g_m|² ~ |R|² × |FLR|² × |Forcing|²
+    # Response function
+    # TODO(Issue #66): Cross-check denominator against thesis Eq 3.37
+    # Standard dispersion relation has form D(k,ω) = 1 - χ(k,ω) where χ is susceptibility
+    # Current form (1 + |ζ|²)^(-1) is phenomenological damping factor
+    # May need to replace with exact dispersion relation from thesis/Howes 2006
+    # For now, provides qualitatively correct resonance structure
     response = kinetic_factor / (1.0 + abs(zeta)**2)
 
     return response
@@ -451,6 +461,9 @@ def analytical_phase_unmixing_spectrum(
     rho_s = np.sqrt(beta_i) * v_th / v_A
 
     # Alfvén wave frequency: ω ≈ k∥ v_A (Alfvén branch)
+    # For pure perpendicular modes (k∥→0), use reduced frequency ω ~ 0.1 k⊥ v_A
+    # Factor 0.1 represents weak Alfvén character in phase unmixing regime
+    # (perpendicular advection dominates, not wave propagation)
     omega = abs(k_parallel) * v_A if abs(k_parallel) > K_PARALLEL_ZERO_THRESHOLD else k_perp * v_A * 0.1
 
     # Kinetic response function |R(k, ω)|²
