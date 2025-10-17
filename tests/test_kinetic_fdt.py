@@ -44,7 +44,19 @@ from krmhd.validation import (
     analytical_total_spectrum,
     run_forced_single_mode,
     plot_fdt_comparison,
+    STEADY_STATE_FLUCTUATION_THRESHOLD,
+    SPECTRUM_NORMALIZATION_THRESHOLD,
 )
+
+
+# ============================================================================
+# Test Configuration
+# ============================================================================
+
+# Relaxed steady-state criterion for computational efficiency
+# Standard: STEADY_STATE_FLUCTUATION_THRESHOLD (10%)
+# Tests: Allow 15% due to short runtime (250 steps vs production 500+)
+RELAXED_STEADY_STATE_THRESHOLD = 0.15
 
 
 # ============================================================================
@@ -106,13 +118,14 @@ class TestKineticFDT:
         )
 
         # Check steady state was reached
-        # Standard criterion: <10% fluctuation (line 382)
-        # For this test, we relax to 15% due to short runtime (250 steps)
+        # Standard criterion: STEADY_STATE_FLUCTUATION_THRESHOLD (10%)
+        # For this test, we relax to RELAXED_STEADY_STATE_THRESHOLD (15%) due to short runtime (250 steps)
         # TODO: Increase runtime to n_steps=500+ for true steady state
         if not result['steady_state_reached']:
-            print(f"Warning: Near-steady state (fluctuation = {result['relative_fluctuation']:.1%}, target <10%)")
-            # Relaxed acceptance for computational efficiency: allow up to 15%
-            assert result['relative_fluctuation'] < 0.15, \
+            print(f"Warning: Near-steady state (fluctuation = {result['relative_fluctuation']:.1%}, "
+                  f"target <{STEADY_STATE_FLUCTUATION_THRESHOLD:.0%})")
+            # Relaxed acceptance for computational efficiency
+            assert result['relative_fluctuation'] < RELAXED_STEADY_STATE_THRESHOLD, \
                 f"Energy fluctuations too large: {result['relative_fluctuation']:.1%}"
 
         # Get numerical spectrum
@@ -137,6 +150,8 @@ class TestKineticFDT:
         # Focus on m=1 to m=10 where signal is strong (requires M >= 10 for full range)
         # For M < 10, tests all available moments
         m_test_range = slice(1, min(11, M+1))
+        # Use 1e-10 (not SPECTRUM_NORMALIZATION_THRESHOLD=1e-15) for relative error
+        # calculation to avoid over-sensitivity to small analytical predictions
         relative_error = np.abs(
             spectrum_numerical_norm[m_test_range] - spectrum_analytical_norm[m_test_range]
         ) / (spectrum_analytical_norm[m_test_range] + 1e-10)
@@ -160,7 +175,9 @@ class TestKineticFDT:
         print(f"\nNormalized spectrum comparison (first 10 moments):")
         print(f"{'m':<4} {'Numerical':<12} {'Analytical':<12} {'Rel. Error':<12}")
         for m in range(min(10, M+1)):
-            err = relative_error[m-1] if m > 0 and m <= 10 else 0.0
+            # relative_error starts at m=1 (skip m=0), so index is m-1
+            # Guard against out-of-bounds when M < 10
+            err = relative_error[m-1] if 0 < m <= len(relative_error) else 0.0
             print(f"{m:<4} {spectrum_numerical_norm[m]:<12.4e} "
                   f"{spectrum_analytical_norm[m]:<12.4e} {err:<12.2%}")
 
@@ -216,6 +233,7 @@ class TestKineticFDT:
         # High collision frequency should have more energy in low moments
         # (high moments are damped more strongly)
         # Compare energy at m=6: should be relatively higher for low-ν
+        # Use 1e-10 guard for division (more conservative than SPECTRUM_NORMALIZATION_THRESHOLD)
         ratio_low = result_low['spectrum'][6] / (result_low['spectrum'][0] + 1e-10)
         ratio_high = result_high['spectrum'][6] / (result_high['spectrum'][0] + 1e-10)
 
@@ -242,8 +260,8 @@ class TestKineticFDT:
         )
 
         # Check near steady state
-        # Relaxed criterion (15% instead of standard 10%) for computational efficiency
-        assert result['relative_fluctuation'] < 0.15, \
+        # Relaxed criterion (RELAXED_STEADY_STATE_THRESHOLD instead of standard 10%)
+        assert result['relative_fluctuation'] < RELAXED_STEADY_STATE_THRESHOLD, \
             f"Energy fluctuations too large: {result['relative_fluctuation']:.2%}"
 
         # Energy should not be zero (forcing is working)

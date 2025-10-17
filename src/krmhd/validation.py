@@ -115,6 +115,11 @@ def analytical_phase_mixing_spectrum(
 
     # Power-law exponent (simplified - thesis has exact formula)
     # Typically α ~ 1-2 for phase mixing cascade
+    # Note: This is an empirical approximation. Exact value depends on:
+    #   - Linear response function (plasma dispersion function)
+    #   - Forcing spectrum shape
+    #   - Landau resonance structure
+    # See Thesis §3.2 for derivation from kinetic response theory
     alpha = 1.5
 
     # k⊥ dependence (perpendicular structure affects spectrum normalization)
@@ -184,15 +189,20 @@ def analytical_phase_unmixing_spectrum(
         m_crit = k_perp * v_th / nu
 
     # Shallower power law for phase unmixing
+    # Note: This is an empirical approximation. Phase unmixing has weaker
+    # velocity-space cascade than phase mixing due to different nonlinear
+    # coupling structure. Exact exponent requires solution of kinetic
+    # equations with perpendicular advection.
+    # See Thesis §3.3 for discussion of phase unmixing regime
     alpha = 0.5
 
     # k∥ dependence (small k∥ enhances phase unmixing)
     # Explicit handling for k_parallel ≈ 0 case
     if abs(k_parallel) < K_PARALLEL_ZERO_THRESHOLD:
         # Pure perpendicular mode: phase unmixing saturates
-        k_ratio_factor = (k_perp * COLLISIONLESS_M_CRIT)**0.5
+        k_ratio_factor = np.sqrt(k_perp * COLLISIONLESS_M_CRIT)
     else:
-        k_ratio_factor = (k_perp / k_parallel)**0.5
+        k_ratio_factor = np.sqrt(k_perp / k_parallel)
 
     # Analytical spectrum
     spectrum = amplitude * k_ratio_factor * (m_array + 1.0)**(-alpha) * np.exp(-m_array / m_crit)

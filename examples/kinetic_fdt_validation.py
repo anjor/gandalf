@@ -220,7 +220,9 @@ if __name__ == "__main__":
     result, spectrum_analytical = main()
 
     # Show plot if running interactively
+    # Note: plt.show() can fail in headless environments (CI, SSH without X11)
     try:
         plt.show()
-    except:
+    except Exception:
+        # Catch display errors but allow KeyboardInterrupt/SystemExit to propagate
         pass
