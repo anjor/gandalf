@@ -391,9 +391,10 @@ def hyperdiffusion(
         ky: Wavenumber array in y (shape: [Ny])
         eta: Hyper-diffusion coefficient η
         r: Hyper-diffusion order (default: 1)
-            - r=1: Standard diffusion -ηk⊥²·field
-            - r=4: Hyper-diffusion -ηk⊥⁸·field (moderate concentration)
-            - r=8: Hyper-diffusion -ηk⊥¹⁶·field (sharp cutoff, production default)
+            - r=1: Standard diffusion -ηk⊥²·field (default, backward compatible)
+            - r=2: Moderate hyper-diffusion -ηk⊥⁴·field (recommended for most cases)
+            - r=4: Strong hyper-diffusion -ηk⊥⁸·field (expert use, requires small eta)
+            - r=8: Maximum hyper-diffusion -ηk⊥¹⁶·field (expert use, requires tiny eta)
 
     Returns:
         Hyper-diffusion term -η·k⊥^(2r)·field (same shape as input)
@@ -401,8 +402,9 @@ def hyperdiffusion(
     Physics context:
         For turbulence with forcing at k_force ~ 2-4 and grid extending to k_max ~ Nx/2:
         - Standard (r=1): Dissipation spreads across all k, affects inertial range
-        - r=4: Concentrates dissipation at k > k_max/2, good inertial range
-        - r=8: Very sharp cutoff, maximal inertial range, production standard
+        - r=2: Good balance between inertial range and numerical stability (recommended)
+        - r=4: Strong concentration at high k, requires careful eta tuning (expert use)
+        - r=8: Very sharp cutoff, requires very small eta, difficult to tune (expert use)
 
         Energy dissipation rate: dE/dt = -2η·k⊥^(2r)·E for mode at k⊥
 
@@ -457,9 +459,10 @@ def hyperresistivity(
         ky: Wavenumber array in y (shape: [Ny])
         eta: Hyper-resistivity coefficient η
         r: Hyper-resistivity order (default: 1)
-            - r=1: Standard resistivity -ηk⊥²·B
-            - r=4: Hyper-resistivity -ηk⊥⁸·B
-            - r=8: Hyper-resistivity -ηk⊥¹⁶·B (production default)
+            - r=1: Standard resistivity -ηk⊥²·B (default, backward compatible)
+            - r=2: Moderate hyper-resistivity -ηk⊥⁴·B (recommended for most cases)
+            - r=4: Strong hyper-resistivity -ηk⊥⁸·B (expert use, requires small eta)
+            - r=8: Maximum hyper-resistivity -ηk⊥¹⁶·B (expert use, requires tiny eta)
 
     Returns:
         Hyper-resistivity term -η·k⊥^(2r)·field (same shape as input)

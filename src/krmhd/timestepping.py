@@ -31,6 +31,8 @@ References:
 
 from functools import partial
 from typing import Callable, Tuple, NamedTuple
+import warnings
+
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -322,12 +324,14 @@ def _gandalf_step_jit(
         M: Number of Hermite moments
         Nz, Ny, Nx: Grid dimensions (static)
         hyper_r: Hyper-resistivity order (default: 1)
-            - r=1: Standard resistivity -ηk⊥²
-            - r=4: Hyper-resistivity -ηk⊥⁸
-            - r=8: Hyper-resistivity -ηk⊥¹⁶ (production default)
+            - r=1: Standard resistivity -ηk⊥² (default, backward compatible)
+            - r=2: Moderate hyper-resistivity -ηk⊥⁴ (recommended for most cases)
+            - r=4: Strong hyper-resistivity -ηk⊥⁸ (expert use, requires small eta)
+            - r=8: Maximum hyper-resistivity -ηk⊥¹⁶ (expert use, requires tiny eta)
         hyper_n: Hyper-collision order (default: 1)
-            - n=1: Standard collision -νm
-            - n=4: Hyper-collision -νm⁸ (production default)
+            - n=1: Standard collision -νm (default, backward compatible)
+            - n=2: Moderate hyper-collision -νm⁴ (recommended for most cases)
+            - n=4: Strong hyper-collision -νm⁸ (expert use, requires small nu)
 
     Returns:
         Updated KRMHDFields after full timestep
@@ -470,11 +474,13 @@ def gandalf_step(
         v_A: Alfvén velocity
         hyper_r: Hyper-resistivity order (default: 1)
             - r=1: Standard resistivity -ηk⊥² (default, backward compatible)
-            - r=4: Hyper-resistivity -ηk⊥⁸ (moderate concentration at high k)
-            - r=8: Hyper-resistivity -ηk⊥¹⁶ (sharp cutoff, production default)
+            - r=2: Moderate hyper-resistivity -ηk⊥⁴ (recommended for most cases)
+            - r=4: Strong hyper-resistivity -ηk⊥⁸ (expert use, requires small eta)
+            - r=8: Maximum hyper-resistivity -ηk⊥¹⁶ (expert use, requires tiny eta)
         hyper_n: Hyper-collision order (default: 1)
             - n=1: Standard collision -νm (default, backward compatible)
-            - n=4: Hyper-collision -νm⁸ (production default)
+            - n=2: Moderate hyper-collision -νm⁴ (recommended for most cases)
+            - n=4: Maximum hyper-collision -νm⁸ (expert use, requires tiny nu)
 
     Returns:
         New KRMHDState at time t + dt
@@ -559,7 +565,6 @@ def gandalf_step(
 
         # Warning for moderate risk (20-50)
         if max_collision_rate >= 20.0:
-            import warnings
             warnings.warn(
                 f"Hyper-collision damping rate is high: nu·M^(2n)·dt = {max_collision_rate:.2e}. "
                 f"Consider reducing nu or dt to improve numerical stability.",
@@ -587,7 +592,6 @@ def gandalf_step(
 
         # Warning for moderate risk (20-50)
         if max_resistivity_rate >= 20.0:
-            import warnings
             warnings.warn(
                 f"Hyper-resistivity damping rate is high: eta·k_max^(2r)·dt = {max_resistivity_rate:.2e}. "
                 f"Consider reducing eta or dt to improve numerical stability.",
