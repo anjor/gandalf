@@ -28,10 +28,7 @@ import sys
 import time
 from pathlib import Path
 
-import jax
-import jax.numpy as jnp
 import jax.random as jr
-import matplotlib.pyplot as plt
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -47,7 +44,6 @@ from krmhd import (
     compute_cfl_timestep,
     energy as compute_energy,
     force_alfven_modes,
-    compute_energy_injection_rate,
 )
 from krmhd.diagnostics import (
     EnergyHistory,

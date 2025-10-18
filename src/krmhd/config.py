@@ -422,10 +422,26 @@ def decaying_turbulence_config(**kwargs) -> SimulationConfig:
     Create configuration for decaying turbulence simulation.
 
     Args:
-        **kwargs: Override default parameters
+        **kwargs: Override default parameters (top-level keys only)
 
     Returns:
         SimulationConfig for decaying turbulence
+
+    Note:
+        Overrides replace entire configuration objects, not individual fields.
+        For example, `grid=GridConfig(Nx=128)` replaces the entire GridConfig,
+        so you must specify all fields (Nx, Ny, Nz, Lx, Ly, Lz).
+
+        To override individual fields, modify after creation:
+        >>> config = decaying_turbulence_config()
+        >>> config.grid.Nx = 128  # This will fail (Pydantic is immutable)
+
+        Instead, create a new config:
+        >>> from copy import deepcopy
+        >>> config = decaying_turbulence_config()
+        >>> config_dict = config.model_dump()
+        >>> config_dict['grid']['Nx'] = 128
+        >>> config = SimulationConfig(**config_dict)
     """
     config = SimulationConfig(
         name="decaying_turbulence",
@@ -461,10 +477,14 @@ def driven_turbulence_config(**kwargs) -> SimulationConfig:
     Create configuration for driven turbulence simulation.
 
     Args:
-        **kwargs: Override default parameters
+        **kwargs: Override default parameters (top-level keys only)
 
     Returns:
         SimulationConfig for driven turbulence
+
+    Note:
+        Overrides replace entire configuration objects. See decaying_turbulence_config()
+        docstring for details on override behavior.
     """
     config = SimulationConfig(
         name="driven_turbulence",
@@ -505,10 +525,14 @@ def orszag_tang_config(**kwargs) -> SimulationConfig:
     Create configuration for Orszag-Tang vortex simulation.
 
     Args:
-        **kwargs: Override default parameters
+        **kwargs: Override default parameters (top-level keys only)
 
     Returns:
         SimulationConfig for Orszag-Tang vortex
+
+    Note:
+        Overrides replace entire configuration objects. See decaying_turbulence_config()
+        docstring for details on override behavior.
     """
     config = SimulationConfig(
         name="orszag_tang",

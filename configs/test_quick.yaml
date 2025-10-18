@@ -35,7 +35,7 @@ time_integration:
   save_interval: 5
 
 io:
-  output_dir: /private/tmp/test_config_output
+  output_dir: output/test_quick
   save_spectra: true
   save_energy_history: true
   save_fields: false
