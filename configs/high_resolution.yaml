@@ -1,0 +1,54 @@
+# KRMHD High-Resolution Configuration
+# Production-quality run at 256^3 resolution
+# Expected runtime: ~30-60 minutes on M1 Pro
+
+name: high_resolution_turbulence
+description: High-resolution (256^3) turbulence simulation for production studies
+
+grid:
+  Nx: 256
+  Ny: 256
+  Nz: 128
+  Lx: 6.283185307179586
+  Ly: 6.283185307179586
+  Lz: 6.283185307179586
+
+physics:
+  v_A: 1.0
+  eta: 0.0001   # Small for high-Re turbulence
+  nu: 0.0001
+  beta_i: 1.0
+  hyper_r: 2    # Use hyper-dissipation for clean inertial range
+  hyper_n: 2
+
+initial_condition:
+  type: random_spectrum
+  amplitude: 1.0
+  alpha: 1.6666666666666667
+  k_min: 1.0
+  k_max: 30.0
+  k_wave:
+  - 0.0
+  - 0.0
+  - 1.0
+  M: 30  # More moments for better kinetic resolution
+
+forcing:
+  enabled: true
+  amplitude: 0.2
+  k_min: 2.0
+  k_max: 5.0
+
+time_integration:
+  n_steps: 1000
+  cfl_safety: 0.3
+  save_interval: 20
+  checkpoint_interval: 100  # Save checkpoints for restart capability
+
+io:
+  output_dir: output/high_resolution
+  save_spectra: true
+  save_energy_history: true
+  save_fields: false
+  save_final_state: true
+  overwrite: false
