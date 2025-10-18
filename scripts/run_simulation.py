@@ -120,8 +120,25 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
     # Determine timestep
     if config.time_integration.dt_fixed is not None:
         dt = config.time_integration.dt_fixed
+
+        # Validate fixed timestep against CFL
+        dt_cfl = compute_cfl_timestep(
+            state,
+            v_A=config.physics.v_A,
+            cfl_safety=config.time_integration.cfl_safety
+        )
+
+        if dt > 2.0 * dt_cfl:
+            import warnings
+            warnings.warn(
+                f"Fixed timestep dt={dt:.6e} is {dt/dt_cfl:.1f}x larger than CFL "
+                f"timestep ({dt_cfl:.6e}). This may cause numerical instability. "
+                f"Consider reducing dt or using CFL-based timestep.",
+                UserWarning
+            )
+
         if verbose:
-            print(f"Using fixed timestep: dt = {dt:.6e}")
+            print(f"Using fixed timestep: dt = {dt:.6e} (CFL suggests {dt_cfl:.6e})")
     else:
         dt = compute_cfl_timestep(
             state,
@@ -134,6 +151,10 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
     # Main loop
     t = 0.0
     start_time = time.time()
+
+    # TODO: Implement checkpoint saving when checkpoint_interval is set (Issue #13)
+    # if config.time_integration.checkpoint_interval is not None:
+    #     # Save state every checkpoint_interval steps to HDF5
 
     for step in range(config.time_integration.n_steps):
         # Apply forcing if enabled

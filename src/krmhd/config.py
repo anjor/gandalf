@@ -152,7 +152,7 @@ class TimeIntegrationConfig(BaseModel):
     checkpoint_interval: Optional[int] = Field(
         None,
         ge=1,
-        description="Save checkpoint every N steps"
+        description="Save checkpoint every N steps (reserved for HDF5 I/O, Issue #13)"
     )
 
 
@@ -432,12 +432,11 @@ def decaying_turbulence_config(**kwargs) -> SimulationConfig:
         For example, `grid=GridConfig(Nx=128)` replaces the entire GridConfig,
         so you must specify all fields (Nx, Ny, Nz, Lx, Ly, Lz).
 
-        To override individual fields, modify after creation:
+        To override individual fields, use Pydantic's model_copy():
         >>> config = decaying_turbulence_config()
-        >>> config.grid.Nx = 128  # This will fail (Pydantic is immutable)
+        >>> config = config.model_copy(update={'grid': config.grid.model_copy(update={'Nx': 128})})
 
-        Instead, create a new config:
-        >>> from copy import deepcopy
+        Or use dict manipulation:
         >>> config = decaying_turbulence_config()
         >>> config_dict = config.model_dump()
         >>> config_dict['grid']['Nx'] = 128
