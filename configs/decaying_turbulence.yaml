@@ -1,0 +1,52 @@
+# KRMHD Decaying Turbulence Configuration
+# Simulates unforced turbulent decay with k^(-5/3) initial spectrum
+
+name: decaying_turbulence
+description: Decaying turbulence with k^(-5/3) initial spectrum
+
+grid:
+  Nx: 64
+  Ny: 64
+  Nz: 32
+  Lx: 6.283185307179586
+  Ly: 6.283185307179586
+  Lz: 6.283185307179586
+
+physics:
+  v_A: 1.0
+  eta: 0.01
+  nu: 0.01
+  beta_i: 1.0
+  hyper_r: 1
+  hyper_n: 1
+
+initial_condition:
+  type: random_spectrum
+  amplitude: 1.0
+  alpha: 1.6666666666666667
+  k_min: 1.0
+  k_max: 10.0
+  k_wave:
+  - 0.0
+  - 0.0
+  - 1.0
+  M: 20
+
+forcing:
+  enabled: false
+  amplitude: 0.3
+  k_min: 2.0
+  k_max: 5.0
+
+time_integration:
+  n_steps: 100
+  cfl_safety: 0.3
+  save_interval: 10
+
+io:
+  output_dir: output/decaying_turbulence
+  save_spectra: true
+  save_energy_history: true
+  save_fields: false
+  save_final_state: true
+  overwrite: false
