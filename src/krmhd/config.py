@@ -57,7 +57,16 @@ class GridConfig(BaseModel):
 
 
 class PhysicsConfig(BaseModel):
-    """Physical parameters for KRMHD."""
+    """
+    Physical parameters for KRMHD.
+
+    Note:
+        Hyper-dissipation overflow validation requires knowing dt and grid size,
+        which are not available at config creation time. Runtime validation occurs in:
+        - gandalf_step() for hyper-collision overflow (timestepping.py:571-594)
+        - gandalf_step() for hyper-resistivity overflow (timestepping.py:596-622)
+        - run_simulation.py for CFL-based dt validation (lines 131-138)
+    """
 
     v_A: float = Field(1.0, gt=0, description="Alfvén velocity")
     eta: float = Field(0.01, ge=0, description="Resistivity coefficient")
@@ -163,7 +172,7 @@ class IOConfig(BaseModel):
 
     save_spectra: bool = Field(True, description="Save energy spectra")
     save_energy_history: bool = Field(True, description="Save energy time series")
-    save_fields: bool = Field(False, description="Save full field snapshots")
+    save_fields: bool = Field(False, description="Save full field snapshots (reserved for future use)")
     save_final_state: bool = Field(True, description="Save final state")
 
     overwrite: bool = Field(False, description="Overwrite existing output")
@@ -432,15 +441,15 @@ def decaying_turbulence_config(**kwargs) -> SimulationConfig:
         For example, `grid=GridConfig(Nx=128)` replaces the entire GridConfig,
         so you must specify all fields (Nx, Ny, Nz, Lx, Ly, Lz).
 
-        To override individual fields, use Pydantic's model_copy():
-        >>> config = decaying_turbulence_config()
-        >>> config = config.model_copy(update={'grid': config.grid.model_copy(update={'Nx': 128})})
-
-        Or use dict manipulation:
+        To override individual fields, dict manipulation is simplest:
         >>> config = decaying_turbulence_config()
         >>> config_dict = config.model_dump()
         >>> config_dict['grid']['Nx'] = 128
         >>> config = SimulationConfig(**config_dict)
+
+        Alternatively, use Pydantic's model_copy():
+        >>> config = decaying_turbulence_config()
+        >>> config = config.model_copy(update={'grid': config.grid.model_copy(update={'Nx': 128})})
     """
     config = SimulationConfig(
         name="decaying_turbulence",

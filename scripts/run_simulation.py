@@ -30,6 +30,9 @@ from pathlib import Path
 
 import jax.random as jr
 
+# CFL validation threshold for fixed timestep warnings
+CFL_WARNING_THRESHOLD = 2.0
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -85,7 +88,6 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
 
     # Initialize forcing if enabled
     if config.forcing.enabled:
-        import jax.random as jr
         key = jr.PRNGKey(config.forcing.seed or 42)
         if verbose:
             print(f"✓ Forcing enabled: k ∈ [{config.forcing.k_min}, {config.forcing.k_max}]")
@@ -128,7 +130,7 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
             cfl_safety=config.time_integration.cfl_safety
         )
 
-        if dt > 2.0 * dt_cfl:
+        if dt > CFL_WARNING_THRESHOLD * dt_cfl:
             import warnings
             warnings.warn(
                 f"Fixed timestep dt={dt:.6e} is {dt/dt_cfl:.1f}x larger than CFL "
