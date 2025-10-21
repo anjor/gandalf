@@ -89,6 +89,19 @@ from krmhd.forcing import (
     compute_energy_injection_rate,
 )
 
+from krmhd.config import (
+    GridConfig,
+    PhysicsConfig,
+    InitialConditionConfig,
+    ForcingConfig,
+    TimeIntegrationConfig,
+    IOConfig,
+    SimulationConfig,
+    decaying_turbulence_config,
+    driven_turbulence_config,
+    orszag_tang_config,
+)
+
 __all__ = [
     "__version__",
     # Spectral infrastructure
@@ -141,4 +154,15 @@ __all__ = [
     "force_alfven_modes",
     "force_slow_modes",
     "compute_energy_injection_rate",
+    # Configuration
+    "GridConfig",
+    "PhysicsConfig",
+    "InitialConditionConfig",
+    "ForcingConfig",
+    "TimeIntegrationConfig",
+    "IOConfig",
+    "SimulationConfig",
+    "decaying_turbulence_config",
+    "driven_turbulence_config",
+    "orszag_tang_config",
 ]
