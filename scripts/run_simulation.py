@@ -238,7 +238,7 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
         }
 
         if verbose:
-            print(f"✓ Computed energy spectra")
+            print("✓ Computed energy spectra")
 
     # Save outputs
     if config.io.save_energy_history:
@@ -249,7 +249,7 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
             **energy_dict
         )
         if verbose:
-            print(f"✓ Saved energy history")
+            print("✓ Saved energy history")
 
     if config.io.save_spectra:
         import numpy as np
@@ -258,7 +258,7 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
             **spectra
         )
         if verbose:
-            print(f"✓ Saved energy spectra")
+            print("✓ Saved energy spectra")
 
     if config.io.save_final_state:
         # Save final state as NPZ
@@ -271,7 +271,7 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
             g=np.array(state.g)
         )
         if verbose:
-            print(f"✓ Saved final state")
+            print("✓ Saved final state")
 
     # Create plots
     if config.io.save_spectra or config.io.save_energy_history:
@@ -286,7 +286,7 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
                 show=False
             )
             if verbose:
-                print(f"✓ Saved energy_history.png")
+                print("✓ Saved energy_history.png")
 
         # Spectrum plots
         if config.io.save_spectra:
@@ -307,7 +307,7 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
             )
 
             if verbose:
-                print(f"✓ Saved spectrum plots")
+                print("✓ Saved spectrum plots")
 
     if verbose:
         print("\n" + "=" * 70)
@@ -336,7 +336,7 @@ def generate_template(template_type: str) -> None:
     print(f"# {config.description}")
     print("#")
     print("# Edit this file and run:")
-    print(f"#   python scripts/run_simulation.py config.yaml")
+    print("#   python scripts/run_simulation.py config.yaml")
     print()
 
     # Output as YAML to stdout
