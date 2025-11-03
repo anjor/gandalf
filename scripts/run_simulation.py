@@ -169,6 +169,17 @@ def run_simulation(
     t = 0.0
     start_time = time.time()
 
+    # Warn if checkpoint_interval is set but not yet implemented
+    if config.time_integration.checkpoint_interval is not None:
+        import warnings
+        warnings.warn(
+            f"checkpoint_interval={config.time_integration.checkpoint_interval} is set but "
+            "checkpointing is not yet implemented (Issue #13). This setting will be ignored. "
+            "Use save_interval for periodic diagnostics instead.",
+            UserWarning,
+            stacklevel=2
+        )
+
     # TODO: Implement checkpoint saving when checkpoint_interval is set
     # GitHub Issue: https://github.com/anjor/gandalf/issues/13 (HDF5 I/O)
     # if config.time_integration.checkpoint_interval is not None:
@@ -187,9 +198,9 @@ def run_simulation(
             )
 
         # Time step
-        # Note: Passing config.physics.nu overrides state.nu for this step
-        # This allows runtime control of collision frequency without recreating state
-        # Precedence: config.physics.nu (if passed) > state.nu (default)
+        # Note: config.physics.nu provides runtime control of collision frequency
+        # gandalf_step uses config.physics.nu if provided, otherwise defaults to state.nu
+        # This avoids needing to recreate state when changing collision parameters
         state = gandalf_step(
             state,
             dt=dt,

@@ -313,3 +313,30 @@ class TestCheckpointIntervalValidation:
         """Test that checkpoint_interval defaults to None."""
         config = TimeIntegrationConfig(n_steps=100)
         assert config.checkpoint_interval is None
+
+    def test_checkpoint_interval_warns_at_runtime(self):
+        """Test that using checkpoint_interval in simulation issues runtime warning."""
+        import warnings
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = decaying_turbulence_config(
+                grid=GridConfig(Nx=8, Ny=8, Nz=8),
+                time_integration=TimeIntegrationConfig(
+                    n_steps=1,
+                    save_interval=1,
+                    checkpoint_interval=1  # Should trigger warning
+                ),
+                io=IOConfig(output_dir=tmpdir)
+            )
+
+            # Should warn at runtime when simulation runs
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                run_simulation(config, verbose=False)
+
+                # Check warning was issued
+                checkpoint_warnings = [
+                    warning for warning in w
+                    if "checkpoint_interval" in str(warning.message).lower()
+                ]
+                assert len(checkpoint_warnings) > 0
+                assert "Issue #13" in str(checkpoint_warnings[0].message)
