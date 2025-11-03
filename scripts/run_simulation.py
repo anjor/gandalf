@@ -27,14 +27,16 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Tuple
 
 import jax.random as jr
 import numpy as np
 
-# CFL validation threshold for fixed timestep warnings
+# CFL validation thresholds for fixed timestep
 # 2.0× CFL limit may cause numerical instability in explicit timestepping
 CFL_WARNING_THRESHOLD = 2.0
+# 10.0× CFL limit will almost certainly cause catastrophic failure
+CFL_ERROR_THRESHOLD = 10.0
 
 from krmhd.config import (
     SimulationConfig,
@@ -134,6 +136,15 @@ def run_simulation(
             cfl_safety=config.time_integration.cfl_safety
         )
 
+        # Error on severe CFL violations (>10× CFL limit)
+        if dt > CFL_ERROR_THRESHOLD * dt_cfl:
+            raise ValueError(
+                f"Fixed timestep dt={dt:.6e} is {dt/dt_cfl:.1f}x larger than CFL "
+                f"timestep ({dt_cfl:.6e}). This will cause catastrophic numerical failure. "
+                f"Reduce dt to < {CFL_ERROR_THRESHOLD * dt_cfl:.6e} or use CFL-based timestep (remove dt_fixed)."
+            )
+
+        # Warn on moderate CFL violations (2-10× CFL limit)
         if dt > CFL_WARNING_THRESHOLD * dt_cfl:
             import warnings
             warnings.warn(
@@ -222,7 +233,7 @@ def run_simulation(
         print(f"  Energy change: {(E_final['total'] - E_init['total']) / E_init['total'] * 100:.2f}%")
 
     # Compute spectra
-    spectra = {}
+    spectra: dict[str, Any] = {}
     if config.io.save_spectra:
         k_bins, E_k = energy_spectrum_1d(state)
         k_perp_bins, E_kperp = energy_spectrum_perpendicular(state)

@@ -187,6 +187,19 @@ class TimeIntegrationConfig(BaseModel):
         description="Save checkpoint every N steps (reserved for HDF5 I/O, Issue #13)"
     )
 
+    @model_validator(mode='after')
+    def warn_unimplemented_checkpoint(self):
+        """Warn if checkpoint_interval is set but not yet implemented."""
+        if self.checkpoint_interval is not None:
+            import warnings
+            warnings.warn(
+                f"checkpoint_interval={self.checkpoint_interval} is set but not yet "
+                "implemented. Checkpointing will be added in Issue #13 (HDF5 I/O). "
+                "This setting will be ignored for now.",
+                UserWarning
+            )
+        return self
+
 
 class IOConfig(BaseModel):
     """Input/Output configuration."""

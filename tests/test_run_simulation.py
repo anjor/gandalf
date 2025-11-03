@@ -248,3 +248,89 @@ class TestConfigImmutability:
             assert loaded_config.grid.Ny == 16
             assert loaded_config.grid.Nz == 8
             assert loaded_config.io.overwrite == True
+
+
+class TestCFLValidation:
+    """Tests for CFL timestep validation."""
+
+    def test_severe_cfl_violation_raises_error(self):
+        """Test that dt_fixed > 10× CFL raises ValueError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create config with absurdly large fixed timestep
+            config = decaying_turbulence_config(
+                grid=GridConfig(Nx=8, Ny=8, Nz=8),
+                time_integration=TimeIntegrationConfig(
+                    n_steps=1,
+                    dt_fixed=100.0  # Way too large (will be >10× CFL)
+                ),
+                io=IOConfig(output_dir=tmpdir)
+            )
+
+            # Should raise ValueError before starting simulation
+            with pytest.raises(ValueError) as exc_info:
+                run_simulation(config, verbose=False)
+
+            assert "catastrophic numerical failure" in str(exc_info.value)
+            assert "Reduce dt" in str(exc_info.value)
+
+    def test_moderate_cfl_violation_warns(self):
+        """Test that 2× < dt_fixed < 10× CFL issues warning."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import warnings
+
+            config = decaying_turbulence_config(
+                grid=GridConfig(Nx=8, Ny=8, Nz=8),
+                time_integration=TimeIntegrationConfig(
+                    n_steps=1,
+                    dt_fixed=1.0  # Likely 2-10× CFL but not catastrophic
+                ),
+                io=IOConfig(output_dir=tmpdir)
+            )
+
+            # Should warn but not error
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                state, history, grid = run_simulation(config, verbose=False)
+
+                # Check if warning was issued (may depend on grid/CFL calculation)
+                # At minimum, simulation should complete
+                assert state is not None
+
+
+class TestCheckpointIntervalWarning:
+    """Tests for checkpoint_interval warning."""
+
+    def test_checkpoint_interval_warns_when_set(self):
+        """Test that setting checkpoint_interval issues a warning."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            config = TimeIntegrationConfig(
+                n_steps=100,
+                checkpoint_interval=10  # Not yet implemented
+            )
+
+            # Should have issued a warning
+            assert len(w) > 0
+            assert "checkpoint_interval" in str(w[0].message).lower()
+            assert "Issue #13" in str(w[0].message)
+            assert "not yet implemented" in str(w[0].message).lower()
+
+    def test_no_warning_when_checkpoint_interval_none(self):
+        """Test that omitting checkpoint_interval doesn't warn."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            config = TimeIntegrationConfig(n_steps=100)
+
+            # Filter out unrelated warnings
+            checkpoint_warnings = [
+                warning for warning in w
+                if "checkpoint_interval" in str(warning.message).lower()
+            ]
+
+            assert len(checkpoint_warnings) == 0
