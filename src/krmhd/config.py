@@ -318,7 +318,7 @@ class SimulationConfig(BaseModel):
 
         elif ic.type == "orszag_tang":
             # Use shared Orszag-Tang initialization
-            from krmhd.validation import initialize_orszag_tang
+            from krmhd.physics import initialize_orszag_tang
             return initialize_orszag_tang(grid, M=ic.M)
 
         elif ic.type == "zero":

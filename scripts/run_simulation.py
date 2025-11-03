@@ -27,14 +27,14 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Tuple
 
 import jax.random as jr
+import numpy as np
 
 # CFL validation threshold for fixed timestep warnings
+# 2.0× CFL limit may cause numerical instability in explicit timestepping
 CFL_WARNING_THRESHOLD = 2.0
-
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from krmhd.config import (
     SimulationConfig,
@@ -47,6 +47,8 @@ from krmhd import (
     compute_cfl_timestep,
     energy as compute_energy,
     force_alfven_modes,
+    KRMHDState,
+    SpectralGrid3D,
 )
 from krmhd.diagnostics import (
     EnergyHistory,
@@ -58,7 +60,9 @@ from krmhd.diagnostics import (
 )
 
 
-def run_simulation(config: SimulationConfig, verbose: bool = True):
+def run_simulation(
+    config: SimulationConfig, verbose: bool = True
+) -> Tuple[KRMHDState, EnergyHistory, SpectralGrid3D]:
     """
     Run KRMHD simulation from configuration.
 
@@ -154,7 +158,8 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
     t = 0.0
     start_time = time.time()
 
-    # TODO: Implement checkpoint saving when checkpoint_interval is set (Issue #13)
+    # TODO: Implement checkpoint saving when checkpoint_interval is set
+    # GitHub Issue: https://github.com/anjor/gandalf/issues/13 (HDF5 I/O)
     # if config.time_integration.checkpoint_interval is not None:
     #     # Save state every checkpoint_interval steps to HDF5
 
@@ -243,7 +248,6 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
 
     # Save outputs
     if config.io.save_energy_history:
-        import numpy as np
         energy_dict = energy_history.to_dict()
         np.savez(
             output_dir / "energy_history.npz",
@@ -253,7 +257,6 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
             print(f"✓ Saved energy history")
 
     if config.io.save_spectra:
-        import numpy as np
         np.savez(
             output_dir / "spectra.npz",
             **spectra
@@ -263,7 +266,8 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
 
     if config.io.save_final_state:
         # Save final state as NPZ with all fields and metadata for exact restart
-        import numpy as np
+        # NOTE: Using NPZ for now; will migrate to HDF5 for better compression,
+        # metadata support, and partial reads once Issue #13 is implemented
         np.savez(
             output_dir / "final_state.npz",
             # Primary state fields (Fourier space)
