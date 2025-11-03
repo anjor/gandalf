@@ -182,6 +182,7 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
             dt=dt,
             eta=config.physics.eta,
             v_A=config.physics.v_A,
+            nu=config.physics.nu,
             hyper_r=config.physics.hyper_r,
             hyper_n=config.physics.hyper_n
         )
@@ -261,17 +262,32 @@ def run_simulation(config: SimulationConfig, verbose: bool = True):
             print(f"✓ Saved energy spectra")
 
     if config.io.save_final_state:
-        # Save final state as NPZ
+        # Save final state as NPZ with all fields and metadata for exact restart
         import numpy as np
         np.savez(
             output_dir / "final_state.npz",
-            phi=np.array(state.phi),
-            A_parallel=np.array(state.A_parallel),
+            # Primary state fields (Fourier space)
+            z_plus=np.array(state.z_plus),
+            z_minus=np.array(state.z_minus),
             B_parallel=np.array(state.B_parallel),
-            g=np.array(state.g)
+            g=np.array(state.g),
+            # Metadata for state reconstruction
+            M=state.M,
+            beta_i=state.beta_i,
+            v_th=state.v_th,
+            nu=state.nu,
+            Lambda=state.Lambda,
+            time=state.time,
+            # Grid parameters for validation
+            Nx=state.grid.Nx,
+            Ny=state.grid.Ny,
+            Nz=state.grid.Nz,
+            Lx=state.grid.Lx,
+            Ly=state.grid.Ly,
+            Lz=state.grid.Lz,
         )
         if verbose:
-            print(f"✓ Saved final state")
+            print(f"✓ Saved final state (z±, B∥, g, metadata)")
 
     # Create plots
     if config.io.save_spectra or config.io.save_energy_history:

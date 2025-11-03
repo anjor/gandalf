@@ -475,6 +475,7 @@ def gandalf_step(
     dt: float,
     eta: float,
     v_A: float,
+    nu: float | None = None,
     hyper_r: int = 1,
     hyper_n: int = 1,
 ) -> KRMHDState:
@@ -494,6 +495,10 @@ def gandalf_step(
         dt: Timestep size (should satisfy CFL for nonlinear terms)
         eta: Resistivity coefficient (or hyper-resistivity if hyper_r > 1)
         v_A: Alfvén velocity
+        nu: Collision frequency coefficient (optional, defaults to state.nu)
+            - If provided, overrides the collision frequency from state
+            - Allows runtime control of collision rate without recreating state
+            - Used for hyper-collision damping: -ν·m^(2n)
         hyper_r: Hyper-resistivity order (default: 1)
             - r=1: Standard resistivity -ηk⊥² (default, backward compatible)
             - r=2: Moderate hyper-resistivity -ηk⊥⁴ (recommended for most cases)
@@ -555,6 +560,9 @@ def gandalf_step(
         - Eqs. 2.13-2.25 - Integrating factor + RK2 implementation
         - Thesis §2.5.2 - Hyper-dissipation for inertial range studies
     """
+    # Use provided nu or fall back to state.nu
+    nu_effective = nu if nu is not None else state.nu
+
     # Input validation for hyper parameters
     if hyper_r not in [1, 2, 4, 8]:
         raise ValueError(
@@ -573,13 +581,13 @@ def gandalf_step(
     # At m=M, we compute exp(-nu·M^(2n)·dt) which underflows if argument > ~50
     if hyper_n > 1:
         M = state.M
-        max_collision_rate = state.nu * (M ** (2 * hyper_n)) * dt
+        max_collision_rate = nu_effective * (M ** (2 * hyper_n)) * dt
 
         if max_collision_rate >= MAX_DAMPING_RATE_THRESHOLD:
             safe_nu = MAX_DAMPING_RATE_THRESHOLD / ((M ** (2 * hyper_n)) * dt)
             raise ValueError(
                 f"Hyper-collision overflow risk detected!\n"
-                f"  Parameter: nu·M^(2n)·dt = {state.nu}·{M}^{2*hyper_n}·{dt} = {max_collision_rate:.2e}\n"
+                f"  Parameter: nu·M^(2n)·dt = {nu_effective}·{M}^{2*hyper_n}·{dt} = {max_collision_rate:.2e}\n"
                 f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
                 f"  Solution: Reduce nu to < {safe_nu:.2e} or reduce dt\n"
                 f"  For n={hyper_n}, M={M}: Recommended nu < {safe_nu:.2e} / dt"
@@ -647,7 +655,7 @@ def gandalf_step(
         eta,
         v_A,
         state.beta_i,
-        state.nu,
+        nu_effective,
         state.Lambda,
         state.M,
         grid.Nz,
