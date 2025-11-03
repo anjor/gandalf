@@ -74,8 +74,31 @@ class PhysicsConfig(BaseModel):
     beta_i: float = Field(1.0, gt=0, description="Ion plasma beta")
 
     # Hyper-dissipation parameters (Issue #28)
-    hyper_r: int = Field(1, ge=1, le=3, description="Hyper-resistivity order")
-    hyper_n: int = Field(1, ge=1, le=3, description="Hyper-collision order")
+    # Constraints match timestepping.py:564 and timestepping.py:570
+    hyper_r: int = Field(1, description="Hyper-resistivity order (1, 2, 4, or 8)")
+    hyper_n: int = Field(1, description="Hyper-collision order (1, 2, or 4)")
+
+    @field_validator('hyper_r')
+    @classmethod
+    def check_hyper_r(cls, v: int) -> int:
+        """Validate hyper_r matches timestepping.py constraints."""
+        if v not in {1, 2, 4, 8}:
+            raise ValueError(
+                f"hyper_r must be 1, 2, 4, or 8 (got {v}). "
+                "Use r=1 for standard dissipation, r=2 for typical turbulence studies."
+            )
+        return v
+
+    @field_validator('hyper_n')
+    @classmethod
+    def check_hyper_n(cls, v: int) -> int:
+        """Validate hyper_n matches timestepping.py constraints."""
+        if v not in {1, 2, 4}:
+            raise ValueError(
+                f"hyper_n must be 1, 2, or 4 (got {v}). "
+                "Use n=1 for standard collisions, n=2 for typical turbulence studies."
+            )
+        return v
 
     @model_validator(mode='after')
     def check_dissipation_overflow(self):

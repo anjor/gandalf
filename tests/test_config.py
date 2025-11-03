@@ -115,9 +115,49 @@ class TestPhysicsConfig:
         import warnings
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            config = PhysicsConfig(hyper_r=3, hyper_n=3)
+            config = PhysicsConfig(hyper_r=4, hyper_n=4)
             assert len(w) > 0
             assert "overflow" in str(w[0].message).lower()
+
+    def test_hyper_r_valid_values(self):
+        """Test hyper_r accepts valid values: 1, 2, 4, 8."""
+        for r in [1, 2, 4, 8]:
+            config = PhysicsConfig(hyper_r=r)
+            assert config.hyper_r == r
+
+    def test_hyper_n_valid_values(self):
+        """Test hyper_n accepts valid values: 1, 2, 4."""
+        for n in [1, 2, 4]:
+            config = PhysicsConfig(hyper_n=n)
+            assert config.hyper_n == n
+
+    def test_hyper_r_invalid_value_3(self):
+        """Test hyper_r=3 raises validation error."""
+        with pytest.raises(Exception) as exc_info:
+            PhysicsConfig(hyper_r=3)
+        assert "hyper_r must be 1, 2, 4, or 8" in str(exc_info.value)
+
+    def test_hyper_r_invalid_value_negative(self):
+        """Test negative hyper_r raises validation error."""
+        with pytest.raises(Exception):
+            PhysicsConfig(hyper_r=-1)
+
+    def test_hyper_r_invalid_value_zero(self):
+        """Test hyper_r=0 raises validation error."""
+        with pytest.raises(Exception):
+            PhysicsConfig(hyper_r=0)
+
+    def test_hyper_n_invalid_value_3(self):
+        """Test hyper_n=3 raises validation error."""
+        with pytest.raises(Exception) as exc_info:
+            PhysicsConfig(hyper_n=3)
+        assert "hyper_n must be 1, 2, or 4" in str(exc_info.value)
+
+    def test_hyper_n_invalid_value_8(self):
+        """Test hyper_n=8 raises validation error (only r can be 8)."""
+        with pytest.raises(Exception) as exc_info:
+            PhysicsConfig(hyper_n=8)
+        assert "hyper_n must be 1, 2, or 4" in str(exc_info.value)
 
 
 class TestInitialConditionConfig:
