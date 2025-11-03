@@ -185,21 +185,9 @@ class TimeIntegrationConfig(BaseModel):
     checkpoint_interval: Optional[int] = Field(
         None,
         ge=1,
-        description="Save checkpoint every N steps (reserved for HDF5 I/O, Issue #13)"
+        description="Save checkpoint every N steps (reserved for HDF5 I/O, Issue #13). "
+                    "Currently not implemented - will be silently ignored until Issue #13 is complete."
     )
-
-    @model_validator(mode='after')
-    def warn_unimplemented_checkpoint(self):
-        """Warn if checkpoint_interval is set but not yet implemented."""
-        if self.checkpoint_interval is not None:
-            import warnings
-            warnings.warn(
-                f"checkpoint_interval={self.checkpoint_interval} is set but not yet "
-                "implemented. Checkpointing will be added in Issue #13 (HDF5 I/O). "
-                "This setting will be ignored for now.",
-                UserWarning
-            )
-        return self
 
 
 class IOConfig(BaseModel):
@@ -213,6 +201,86 @@ class IOConfig(BaseModel):
     save_final_state: bool = Field(True, description="Save final state")
 
     overwrite: bool = Field(False, description="Overwrite existing output")
+
+    @field_validator('output_dir')
+    @classmethod
+    def check_safe_output_path(cls, v: str) -> str:
+        """
+        Validate output_dir to prevent path traversal to system directories.
+
+        Prevents writing to sensitive system locations while allowing:
+        - Relative paths (e.g., 'output', 'results/run1')
+        - User home directory paths (e.g., '~/simulations')
+        - Temporary directories (e.g., '/tmp/runs')
+        - HPC scratch spaces (e.g., '/scratch/username')
+
+        Raises:
+            ValueError: If path points to a system directory
+        """
+        from pathlib import Path
+        import os
+
+        # Expand user home directory
+        expanded = os.path.expanduser(v)
+        path = Path(expanded)
+
+        # System directories that should never be written to
+        system_dirs = {'/etc', '/var', '/sys', '/proc', '/root', '/boot', '/bin', '/sbin', '/usr', '/lib'}
+
+        # Allowed exceptions (common temp/scratch locations)
+        # Include both /var and /private/var paths for macOS compatibility
+        allowed_prefixes = {
+            '/tmp', '/private/tmp',
+            '/var/tmp', '/private/var/tmp',
+            '/var/folders', '/private/var/folders',
+            '/scratch'
+        }
+
+        # Check if absolute path points to system directory
+        if path.is_absolute():
+            # Resolve to canonical path (follows symlinks)
+            try:
+                resolved = path.resolve()
+            except (OSError, RuntimeError):
+                # Path doesn't exist yet, check parent
+                resolved = path
+
+            # Check if path is in an allowed location first
+            is_allowed = any(
+                str(resolved).startswith(prefix)
+                for prefix in allowed_prefixes
+            )
+
+            if is_allowed:
+                # Path is in allowed location, skip system directory check
+                return v
+
+            # Check if path is under any system directory
+            for sys_dir in system_dirs:
+                sys_path = Path(sys_dir)
+                # Resolve system directory too (e.g., /etc -> /private/etc on macOS)
+                try:
+                    sys_path_resolved = sys_path.resolve()
+                except (OSError, RuntimeError):
+                    sys_path_resolved = sys_path
+
+                # Check if resolved path starts with system directory
+                if resolved == sys_path_resolved or sys_path_resolved in resolved.parents:
+                    raise ValueError(
+                        f"output_dir cannot be under system directory {sys_dir}: {v}\n"
+                        f"Use a path under your home directory, /tmp, or /scratch instead."
+                    )
+
+        # Warn about excessive parent directory traversal (e.g., ../../../../etc/passwd)
+        if v.count('../') > 3:
+            import warnings
+            warnings.warn(
+                f"output_dir contains {v.count('../')} parent directory references (../). "
+                f"This may be unintentional. Consider using an absolute path instead.",
+                UserWarning
+            )
+
+        return v
 
 
 class SimulationConfig(BaseModel):

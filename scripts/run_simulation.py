@@ -27,7 +27,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any
 
 import jax.random as jr
 import numpy as np
@@ -64,7 +64,7 @@ from krmhd.diagnostics import (
 
 def run_simulation(
     config: SimulationConfig, verbose: bool = True
-) -> Tuple[KRMHDState, EnergyHistory, SpectralGrid3D]:
+) -> tuple[KRMHDState, EnergyHistory, SpectralGrid3D]:
     """
     Run KRMHD simulation from configuration.
 

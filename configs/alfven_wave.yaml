@@ -18,13 +18,14 @@ physics:
   eta: 0.0     # No dissipation for linear test
   nu: 0.0
   beta_i: 1.0
+  Lambda: 1.0
   hyper_r: 1
   hyper_n: 1
 
 initial_condition:
   type: alfven_wave
   amplitude: 0.01  # Small amplitude for linear regime
-  alpha: 1.6666666666666667
+  alpha: 1.667
   k_min: 1.0
   k_max: 10.0
   k_wave:

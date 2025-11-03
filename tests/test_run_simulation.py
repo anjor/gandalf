@@ -297,40 +297,19 @@ class TestCFLValidation:
                 assert state is not None
 
 
-class TestCheckpointIntervalWarning:
-    """Tests for checkpoint_interval warning."""
+class TestCheckpointIntervalValidation:
+    """Tests for checkpoint_interval field validation."""
 
-    def test_checkpoint_interval_warns_when_set(self):
-        """Test that setting checkpoint_interval issues a warning."""
-        import warnings
+    def test_checkpoint_interval_accepted_when_set(self):
+        """Test that setting checkpoint_interval is accepted (reserved for Issue #13)."""
+        config = TimeIntegrationConfig(
+            n_steps=100,
+            checkpoint_interval=10  # Reserved for HDF5 I/O
+        )
+        # Should accept the value without warning
+        assert config.checkpoint_interval == 10
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-
-            config = TimeIntegrationConfig(
-                n_steps=100,
-                checkpoint_interval=10  # Not yet implemented
-            )
-
-            # Should have issued a warning
-            assert len(w) > 0
-            assert "checkpoint_interval" in str(w[0].message).lower()
-            assert "Issue #13" in str(w[0].message)
-            assert "not yet implemented" in str(w[0].message).lower()
-
-    def test_no_warning_when_checkpoint_interval_none(self):
-        """Test that omitting checkpoint_interval doesn't warn."""
-        import warnings
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-
-            config = TimeIntegrationConfig(n_steps=100)
-
-            # Filter out unrelated warnings
-            checkpoint_warnings = [
-                warning for warning in w
-                if "checkpoint_interval" in str(warning.message).lower()
-            ]
-
-            assert len(checkpoint_warnings) == 0
+    def test_checkpoint_interval_none_by_default(self):
+        """Test that checkpoint_interval defaults to None."""
+        config = TimeIntegrationConfig(n_steps=100)
+        assert config.checkpoint_interval is None

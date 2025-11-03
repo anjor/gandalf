@@ -18,13 +18,14 @@ physics:
   eta: 0.0001  # Smaller coefficient for hyper-dissipation
   nu: 0.0001
   beta_i: 1.0
+  Lambda: 1.0
   hyper_r: 2   # Hyper-resistivity: -η∇^4
   hyper_n: 2   # Hyper-collision: -νm^4
 
 initial_condition:
   type: random_spectrum
   amplitude: 1.0
-  alpha: 1.6666666666666667
+  alpha: 1.667
   k_min: 1.0
   k_max: 15.0
   k_wave:
