@@ -496,9 +496,10 @@ def gandalf_step(
         eta: Resistivity coefficient (or hyper-resistivity if hyper_r > 1)
         v_A: Alfvén velocity
         nu: Collision frequency coefficient (optional, defaults to state.nu)
-            - If provided, overrides the collision frequency from state
-            - Allows runtime control of collision rate without recreating state
+            - **Precedence**: If provided, overrides state.nu for this timestep only
+            - Allows runtime control of collision rate from config without recreating state
             - Used for hyper-collision damping: -ν·m^(2n)
+            - **Note**: State is not mutated; next call uses state.nu unless nu is passed again
         hyper_r: Hyper-resistivity order (default: 1)
             - r=1: Standard resistivity -ηk⊥² (default, backward compatible)
             - r=2: Moderate hyper-resistivity -ηk⊥⁴ (recommended for most cases)

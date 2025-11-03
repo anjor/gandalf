@@ -187,6 +187,9 @@ def run_simulation(
             )
 
         # Time step
+        # Note: Passing config.physics.nu overrides state.nu for this step
+        # This allows runtime control of collision frequency without recreating state
+        # Precedence: config.physics.nu (if passed) > state.nu (default)
         state = gandalf_step(
             state,
             dt=dt,

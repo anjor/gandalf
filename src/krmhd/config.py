@@ -72,6 +72,7 @@ class PhysicsConfig(BaseModel):
     eta: float = Field(0.01, ge=0, description="Resistivity coefficient")
     nu: float = Field(0.01, ge=0, description="Collision frequency")
     beta_i: float = Field(1.0, gt=0, description="Ion plasma beta")
+    Lambda: float = Field(1.0, gt=0, description="Kinetic parameter Λ (controls kinetic vs adiabatic response, thesis Eq. 2.9)")
 
     # Hyper-dissipation parameters (Issue #28)
     # Constraints match timestepping.py:564 and timestepping.py:570
@@ -127,7 +128,7 @@ class InitialConditionConfig(BaseModel):
 
     # Parameters for random_spectrum
     amplitude: float = Field(1.0, ge=0, description="Initial amplitude")
-    alpha: float = Field(5.0/3.0, description="Spectral index (k^-alpha)")
+    alpha: float = Field(1.667, description="Spectral index (k^-alpha, 5/3 for Kolmogorov)")
     k_min: float = Field(1.0, gt=0, description="Minimum wavenumber")
     k_max: float = Field(10.0, gt=0, description="Maximum wavenumber")
 
@@ -326,7 +327,10 @@ class SimulationConfig(BaseModel):
                 alpha=ic.alpha,
                 amplitude=ic.amplitude,
                 k_min=ic.k_min,
-                k_max=ic.k_max
+                k_max=ic.k_max,
+                beta_i=self.physics.beta_i,
+                nu=self.physics.nu,
+                Lambda=self.physics.Lambda
             )
 
         elif ic.type == "alfven_wave":
@@ -337,7 +341,10 @@ class SimulationConfig(BaseModel):
                 kx_mode=kx,
                 ky_mode=ky,
                 kz_mode=kz,
-                amplitude=ic.amplitude
+                amplitude=ic.amplitude,
+                beta_i=self.physics.beta_i,
+                nu=self.physics.nu,
+                Lambda=self.physics.Lambda
             )
 
         elif ic.type == "kinetic_alfven_wave":
@@ -349,13 +356,21 @@ class SimulationConfig(BaseModel):
                 ky_mode=ky,
                 kz_mode=kz,
                 amplitude=ic.amplitude,
-                beta_i=self.physics.beta_i
+                beta_i=self.physics.beta_i,
+                nu=self.physics.nu,
+                Lambda=self.physics.Lambda
             )
 
         elif ic.type == "orszag_tang":
             # Use shared Orszag-Tang initialization
             from krmhd.physics import initialize_orszag_tang
-            return initialize_orszag_tang(grid, M=ic.M)
+            return initialize_orszag_tang(
+                grid,
+                M=ic.M,
+                beta_i=self.physics.beta_i,
+                nu=self.physics.nu,
+                Lambda=self.physics.Lambda
+            )
 
         elif ic.type == "zero":
             # Zero state for testing
@@ -376,7 +391,7 @@ class SimulationConfig(BaseModel):
                 beta_i=self.physics.beta_i,
                 v_th=1.0,
                 nu=self.physics.nu,
-                Lambda=1.0,
+                Lambda=self.physics.Lambda,
                 time=0.0,
                 grid=grid
             )
@@ -511,7 +526,7 @@ def decaying_turbulence_config(**kwargs) -> SimulationConfig:
         initial_condition=InitialConditionConfig(
             type="random_spectrum",
             amplitude=1.0,
-            alpha=5.0/3.0,
+            alpha=1.667,
             k_min=1.0,
             k_max=10.0,
             M=20
@@ -554,7 +569,7 @@ def driven_turbulence_config(**kwargs) -> SimulationConfig:
         initial_condition=InitialConditionConfig(
             type="random_spectrum",
             amplitude=0.1,
-            alpha=5.0/3.0,
+            alpha=1.667,
             k_min=1.0,
             k_max=10.0,
             M=20
