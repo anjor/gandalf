@@ -410,7 +410,7 @@ class TestTemplateConfigs:
         assert config.name == "decaying_turbulence"
         assert config.forcing.enabled is False
         assert config.initial_condition.type == "random_spectrum"
-        assert config.initial_condition.alpha == 5.0/3.0
+        assert config.initial_condition.alpha == 1.667  # Rounded for YAML readability
 
     def test_driven_turbulence_template(self):
         """Test driven turbulence template."""
