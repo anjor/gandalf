@@ -372,8 +372,24 @@ class SimulationConfig(BaseModel):
             raise ValueError(f"Unknown initial condition type: {ic.type}")
 
     def get_output_dir(self) -> Path:
-        """Get output directory as Path, creating if needed."""
+        """
+        Get output directory as Path, creating if needed.
+
+        Raises:
+            FileExistsError: If directory exists and overwrite=False
+        """
         output_dir = Path(self.io.output_dir)
+
+        # Check if directory exists and overwrite flag
+        if output_dir.exists() and not self.io.overwrite:
+            # Check if directory is non-empty
+            if any(output_dir.iterdir()):
+                raise FileExistsError(
+                    f"Output directory exists and is non-empty: {output_dir}\n"
+                    f"Use --output-dir to specify a different directory, "
+                    f"or set overwrite: true in config to allow overwriting."
+                )
+
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
 

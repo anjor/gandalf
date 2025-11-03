@@ -166,19 +166,13 @@ def run_simulation(
     for step in range(config.time_integration.n_steps):
         # Apply forcing if enabled
         if config.forcing.enabled:
-            key, subkey = jr.split(key)
-            forcing = force_alfven_modes(
-                grid,
+            state, key = force_alfven_modes(
+                state,
                 amplitude=config.forcing.amplitude,
                 k_min=config.forcing.k_min,
                 k_max=config.forcing.k_max,
-                key=subkey,
-                dt=dt
-            )
-            # Add forcing to both Elsasser variables (drives phi only, not A_parallel)
-            state = state._replace(
-                z_plus=state.z_plus + forcing,
-                z_minus=state.z_minus + forcing
+                dt=dt,
+                key=key
             )
 
         # Time step
@@ -438,7 +432,10 @@ Available templates:
 
     # Override output directory if specified
     if args.output_dir:
-        config.io.output_dir = args.output_dir
+        # Use model_copy to avoid mutating Pydantic model (bypasses validation)
+        config = config.model_copy(
+            update={'io': config.io.model_copy(update={'output_dir': args.output_dir})}
+        )
 
     # Run simulation
     try:
