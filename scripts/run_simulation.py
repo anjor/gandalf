@@ -446,7 +446,7 @@ Available templates:
 
     # Override output directory if specified
     if args.output_dir:
-        # Use model_copy to avoid mutating Pydantic model (bypasses validation)
+        # Use model_copy to create updated config while preserving immutability and validation
         config = config.model_copy(
             update={'io': config.io.model_copy(update={'output_dir': args.output_dir})}
         )

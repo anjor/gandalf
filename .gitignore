@@ -60,6 +60,7 @@ dmypy.json
 *.png
 *.pdf
 *.mp4
+output/
 outputs/
 results/
 figures/

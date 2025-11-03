@@ -144,9 +144,16 @@ class InitialConditionConfig(BaseModel):
     @field_validator('k_wave')
     @classmethod
     def check_k_wave_length(cls, v: list[float]) -> list[float]:
-        """Ensure k_wave has exactly 3 components."""
+        """Ensure k_wave has exactly 3 components and all values are finite."""
         if len(v) != 3:
             raise ValueError(f"k_wave must have 3 components, got {len(v)}")
+
+        import math
+        for i, val in enumerate(v):
+            if not math.isfinite(val):
+                raise ValueError(
+                    f"k_wave[{i}] must be finite (not NaN/Inf), got {val}"
+                )
         return v
 
 
@@ -368,7 +375,7 @@ class SimulationConfig(BaseModel):
             Lz=self.grid.Lz
         )
 
-    def create_initial_state(self, grid):
+    def create_initial_state(self, grid: "SpectralGrid3D") -> "KRMHDState":
         """
         Create initial KRMHDState from configuration.
 
