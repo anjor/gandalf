@@ -1657,27 +1657,33 @@ def initialize_orszag_tang(
     #
     # Energy target: Initial E ~ 4.0 (from thesis Fig. 3.1)
     # With Φ = -2cos(x) - 2cos(y) and Ψ = cos(2x) + 2cos(y)
-    # Set coefficients to match real-space amplitudes directly
-
-    # Orszag-Tang initial conditions from thesis Eq. 2.31-2.32:
-    # φ = -2(cos x + cos y),  A = 2cos y + cos 2x
-    # z+ = φ + A = -2cos(x) + cos(2x),  z- = φ - A = -2cos(x) - cos(2x) - 4cos(y)
+    # Set coefficients to match ORIGINAL GANDALF exactly (no scaling)
+    # From init_func.cu lines 111-141:
+    #   f[kx=1, ky=0] = -1.0, g[kx=1, ky=0] = -1.0
+    #   f[kx=2, ky=0] = +0.5, g[kx=2, ky=0] = -0.5
+    #   g[kx=0, ky=1] = -2.0, g[kx=0, ky=-1] = -2.0
     #
-    # Target: E_total ~ 4.0 with E_mag = E_kin = 2.0
-    # Scale factor determined empirically to match reference
-    scale = jnp.sqrt(2.0 * grid.Nx * grid.Ny / 2.0)  # Factor of 2× to get E~4
+    # This matches thesis Eq. 2.31-2.32:
+    # φ = -2(cos x + cos y),  A = 2cos y + cos 2x
+    # z+ = φ + A = -2cos(x) + cos(2x)
+    # z- = φ - A = -2cos(x) - cos(2x) - 4cos(y)
 
     # Initialize as zero arrays
     z_plus_k = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex)
     z_minus_k = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex)
 
-    # Set z± coefficients:
+    # FFT normalization: Original GANDALF uses unnormalized FFT, JAX uses normalized
+    # To match original GANDALF energies (E_total ~ 4.0), scale by Nx (= Ny for square grid)
+    # This compensates for JAX's FFT normalization: JAX divides by N, CUFFT doesn't
+    scale = float(grid.Nx)
+
+    # Set z± coefficients with FFT normalization factor:
     z_plus_k = z_plus_k.at[0, 0, 1].set(-1.0 * scale)  # z+: kx=1, ky=0
-    z_plus_k = z_plus_k.at[0, 0, 2].set(0.5 * scale)   # z+: kx=2, ky=0
+    z_plus_k = z_plus_k.at[0, 0, 2].set(+0.5 * scale)  # z+: kx=2, ky=0
 
     z_minus_k = z_minus_k.at[0, 0, 1].set(-1.0 * scale)  # z-: kx=1, ky=0
     z_minus_k = z_minus_k.at[0, 0, 2].set(-0.5 * scale)  # z-: kx=2, ky=0
-    z_minus_k = z_minus_k.at[0, 1, 0].set(-2.0 * scale)  # z-: kx=0, ky=1
+    z_minus_k = z_minus_k.at[0, 1, 0].set(-2.0 * scale)  # z-: kx=0, ky=+1
     z_minus_k = z_minus_k.at[0, grid.Ny - 1, 0].set(-2.0 * scale)  # z-: kx=0, ky=-1
 
     # Note: Dealiasing not needed for smooth analytical ICs
