@@ -692,14 +692,17 @@ def z_plus_rhs(
     # bracket1 = {z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺}
     bracket1a = poisson_bracket_3d(z_plus, lap_perp_z_minus, kx, ky, Nz, Ny, Nx, dealias_mask)
     bracket1b = poisson_bracket_3d(z_minus, lap_perp_z_plus, kx, ky, Nz, Ny, Nx, dealias_mask)
-    bracket1 = (bracket1a + bracket1b) * dealias_mask  # Dealias after addition!
+    # NOTE: poisson_bracket_3d already applies dealias_mask, so this is redundant.
+    # However, we apply it again as defensive programming after linear combination.
+    # Minor performance cost (~2 array multiplications) for extra safety.
+    bracket1 = (bracket1a + bracket1b) * dealias_mask
 
     # bracket2 = -k⊥²{z⁺, z⁻}
     bracket_zm_zp = poisson_bracket_3d(z_plus, z_minus, kx, ky, Nz, Ny, Nx, dealias_mask)
     bracket2 = laplacian(bracket_zm_zp, kx, ky, kz=None)  # -k⊥²{z⁺,z⁻}
 
     # Compute: bracket1 - bracket2
-    combined_bracket = (bracket1 - bracket2) * dealias_mask  # Dealias after subtraction!
+    combined_bracket = (bracket1 - bracket2) * dealias_mask  # Defensive dealiasing
 
     # Apply inverse Laplacian: k⊥²^(-1) × [bracket1 - bracket2]
     # In Fourier space: multiply by -1/k⊥² (negative because laplacian returns -k⊥²f)
@@ -776,14 +779,15 @@ def z_minus_rhs(
     # bracket1 = {z⁻, -k⊥²z⁺} + {z⁺, -k⊥²z⁻}  (same as z⁺ but roles swapped)
     bracket1a = poisson_bracket_3d(z_minus, lap_perp_z_plus, kx, ky, Nz, Ny, Nx, dealias_mask)
     bracket1b = poisson_bracket_3d(z_plus, lap_perp_z_minus, kx, ky, Nz, Ny, Nx, dealias_mask)
-    bracket1 = (bracket1a + bracket1b) * dealias_mask  # Dealias after addition!
+    # NOTE: Defensive dealiasing after linear combination (same reasoning as z_plus_rhs)
+    bracket1 = (bracket1a + bracket1b) * dealias_mask
 
     # bracket2 = -k⊥²{z⁻, z⁺}
     bracket_zp_zm = poisson_bracket_3d(z_minus, z_plus, kx, ky, Nz, Ny, Nx, dealias_mask)
     bracket2 = laplacian(bracket_zp_zm, kx, ky, kz=None)
 
     # Compute: bracket1 - bracket2
-    combined_bracket = (bracket1 - bracket2) * dealias_mask  # Dealias after subtraction!
+    combined_bracket = (bracket1 - bracket2) * dealias_mask  # Defensive dealiasing
 
     # Apply inverse perpendicular Laplacian k⊥²^(-1)
     # Physics: k=0 mode (domain-averaged quantities) doesn't evolve via Poisson bracket
