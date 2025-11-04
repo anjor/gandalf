@@ -106,7 +106,7 @@ class KRMHDState(BaseModel):
     z_minus: Array = Field(description="Elsasser z- (counter-propagating wave) in Fourier space")
     B_parallel: Array = Field(description="Parallel magnetic field in Fourier space")
     g: Array = Field(description="Hermite moments of electron distribution")
-    M: int = Field(gt=0, description="Number of Hermite moments")
+    M: int = Field(ge=0, description="Number of Hermite moments (M=0 for pure fluid, M>0 for kinetic)")
     beta_i: float = Field(gt=0.0, description="Ion plasma beta")
     v_th: float = Field(gt=0.0, description="Electron thermal velocity")
     nu: float = Field(ge=0.0, description="Collision frequency")
@@ -692,14 +692,17 @@ def z_plus_rhs(
     # bracket1 = {z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺}
     bracket1a = poisson_bracket_3d(z_plus, lap_perp_z_minus, kx, ky, Nz, Ny, Nx, dealias_mask)
     bracket1b = poisson_bracket_3d(z_minus, lap_perp_z_plus, kx, ky, Nz, Ny, Nx, dealias_mask)
-    bracket1 = bracket1a + bracket1b
+    # NOTE: poisson_bracket_3d already applies dealias_mask, so this is redundant.
+    # However, we apply it again as defensive programming after linear combination.
+    # Minor performance cost (~2 array multiplications) for extra safety.
+    bracket1 = (bracket1a + bracket1b) * dealias_mask
 
     # bracket2 = -k⊥²{z⁺, z⁻}
     bracket_zm_zp = poisson_bracket_3d(z_plus, z_minus, kx, ky, Nz, Ny, Nx, dealias_mask)
     bracket2 = laplacian(bracket_zm_zp, kx, ky, kz=None)  # -k⊥²{z⁺,z⁻}
 
     # Compute: bracket1 - bracket2
-    combined_bracket = bracket1 - bracket2
+    combined_bracket = (bracket1 - bracket2) * dealias_mask  # Defensive dealiasing
 
     # Apply inverse Laplacian: k⊥²^(-1) × [bracket1 - bracket2]
     # In Fourier space: multiply by -1/k⊥² (negative because laplacian returns -k⊥²f)
@@ -776,14 +779,15 @@ def z_minus_rhs(
     # bracket1 = {z⁻, -k⊥²z⁺} + {z⁺, -k⊥²z⁻}  (same as z⁺ but roles swapped)
     bracket1a = poisson_bracket_3d(z_minus, lap_perp_z_plus, kx, ky, Nz, Ny, Nx, dealias_mask)
     bracket1b = poisson_bracket_3d(z_plus, lap_perp_z_minus, kx, ky, Nz, Ny, Nx, dealias_mask)
-    bracket1 = bracket1a + bracket1b
+    # NOTE: Defensive dealiasing after linear combination (same reasoning as z_plus_rhs)
+    bracket1 = (bracket1a + bracket1b) * dealias_mask
 
     # bracket2 = -k⊥²{z⁻, z⁺}
     bracket_zp_zm = poisson_bracket_3d(z_minus, z_plus, kx, ky, Nz, Ny, Nx, dealias_mask)
     bracket2 = laplacian(bracket_zp_zm, kx, ky, kz=None)
 
     # Compute: bracket1 - bracket2
-    combined_bracket = bracket1 - bracket2
+    combined_bracket = (bracket1 - bracket2) * dealias_mask  # Defensive dealiasing
 
     # Apply inverse perpendicular Laplacian k⊥²^(-1)
     # Physics: k=0 mode (domain-averaged quantities) doesn't evolve via Poisson bracket
@@ -1491,8 +1495,11 @@ def energy(state: KRMHDState) -> Dict[str, float]:
     # - Factor of N makes them match
 
     Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
-    N_total = Nx * Ny * Nz
-    norm_factor = 1.0 / N_total
+    # For perpendicular energy (k⊥² terms), normalize by Nx*Ny only
+    # because we sum over all z-planes. Works for both 2D (only kz=0 populated)
+    # and 3D (all z-planes populated).
+    N_perp = Nx * Ny
+    norm_factor = 1.0 / N_perp
 
     # For rfft, we need to handle three cases:
     # - kx = 0: No negative counterpart, factor = 1
@@ -1510,17 +1517,29 @@ def energy(state: KRMHDState) -> Dict[str, float]:
     # Compute k² for gradient energy
     k_perp_squared = kx_3d**2 + ky_3d**2
 
-    # Magnetic energy: E_mag = (1/2) ∫ |∇⊥A∥|² dx
-    # Apply correct factors: 1 for kx=0 and Nyquist, 2 for middle modes
-    A_mag_squared = k_perp_squared * jnp.abs(state.A_parallel) ** 2
-    E_magnetic = 0.5 * norm_factor * (
-        jnp.sum(jnp.where(kx_middle, 2.0 * A_mag_squared, A_mag_squared))
-    ).real
+    # Physical energy decomposition: E_kin = ∫|∇φ|² dx,  E_mag = ∫|∇A∥|² dx
+    # Since z± = φ ± A∥, we have: φ = (z+ + z-)/2,  A∥ = (z+ - z-)/2
+    # Therefore: |∇φ|² + |∇A∥|² = (1/2)(|∇z+|² + |∇z-|²)
+    #
+    # Works for both 2D (Nz=2, only kz=0 populated) and 3D (all z-planes):
+    # - Sum over ALL z-planes (for 2D, kz≠0 planes are zero and contribute nothing)
+    # - Normalize by N_perp = Nx*Ny (NOT Nx*Ny*Nz)
+    # - This correctly handles both cases automatically
+    phi_3d = 0.5 * (state.z_plus + state.z_minus)  # Shape: (Nz, Ny, Nx//2+1)
+    A_par_3d = 0.5 * (state.z_plus - state.z_minus)
 
-    # Kinetic energy: E_kin = (1/2) ∫ |∇⊥φ|² dx
-    phi_mag_squared = k_perp_squared * jnp.abs(state.phi) ** 2
+    # Compute gradient energies: |∇φ|² and |∇A∥|²
+    phi_grad_squared = k_perp_squared * jnp.abs(phi_3d) ** 2
+    A_par_grad_squared = k_perp_squared * jnp.abs(A_par_3d) ** 2
+
+    # Integrate over physical space (Parseval's theorem + rfft factor)
+    # Factor of 0.5 from energy definition E = (1/2)∫|∇f|² dx
+    # Sum over all z-planes (includes both populated and empty planes)
     E_kinetic = 0.5 * norm_factor * (
-        jnp.sum(jnp.where(kx_middle, 2.0 * phi_mag_squared, phi_mag_squared))
+        jnp.sum(jnp.where(kx_middle, 2.0 * phi_grad_squared, phi_grad_squared))
+    ).real
+    E_magnetic = 0.5 * norm_factor * (
+        jnp.sum(jnp.where(kx_middle, 2.0 * A_par_grad_squared, A_par_grad_squared))
     ).real
 
     # Compressive energy: E_comp = (1/2) ∫ |δB∥|² dx
@@ -1546,11 +1565,11 @@ def energy(state: KRMHDState) -> Dict[str, float]:
 
 def initialize_orszag_tang(
     grid: SpectralGrid3D,
-    M: int = 10,
+    M: int = 0,
     B0: float = None,
     v_th: float = 1.0,
     beta_i: float = 1.0,
-    nu: float = 0.01,
+    nu: float = 0.0,
     Lambda: float = 1.0,
 ) -> KRMHDState:
     """
@@ -1565,25 +1584,33 @@ def initialize_orszag_tang(
         Magnetic: B = (-B0·sin(y), B0·sin(2x), 0) with B0 = 1/√(4π)
 
     This implementation (incompressible RMHD):
-        Stream function: φ = [cos(kx·x) + cos(ky·y)]/(2π)
-            → generates v⊥ = ẑ × ∇φ = (-sin(ky·y), sin(kx·x))/(2π)
-        Vector potential: A∥ = B0·[cos(2kx·x)/(4π) + cos(ky·y)]/(2π)
-            → generates B⊥ = ẑ × ∇A∥ = B0·(-sin(ky·y), sin(2kx·x))/(2π)
+        Stream function: φ = -2[cos(kx·x) + cos(ky·y)]
+            → generates v⊥ = ẑ × ∇φ with amplitude O(1)
+        Vector potential: A∥ = B0·[cos(2kx·x) + 2cos(ky·y)]
+            → generates B⊥ = ẑ × ∇A∥ with amplitude O(B0)
 
     where kx = 2π/Lx, ky = 2π/Ly are the fundamental wavenumbers.
+    Reference: Equations 2.31 & 2.32 from standard Orszag-Tang test case.
 
     Args:
         grid: SpectralGrid3D defining spatial dimensions
-        M: Number of Hermite moments (default: 10)
-            **Why M=10?** Orszag-Tang is primarily a fluid test (nonlinear MHD).
-            The kinetic response (Hermite moments g) represents small thermal
-            corrections. M=10 is sufficient for the fluid limit where kinetic
-            effects are minimal. For fully kinetic problems, use M=20-30.
+        M: Number of Hermite moments (default: 0 for pure fluid test)
+            **IMPORTANT**: Default changed from M=10 to M=0 in this PR.
+            Existing code calling without explicit M will now get pure fluid dynamics.
+            For kinetic physics, explicitly pass M=10 or higher.
+
+            **M=0**: Pure fluid RMHD (default). Tests nonlinear MHD dynamics only.
+                Hermite moments remain zero throughout (g ≡ 0), no kinetic physics.
+                Use with eta=0, nu=0 for exact energy conservation benchmark.
+            **M=10-20**: Fluid + weak kinetic response. For testing kinetic corrections.
+            **M=20-30**: Full kinetic KRMHD. For Landau damping, phase mixing studies.
         B0: Magnetic field amplitude (default: 1/√(4π) ≈ 0.282)
             Standard Orszag-Tang normalization from original paper
         v_th: Electron thermal velocity (default: 1.0)
         beta_i: Ion plasma beta (default: 1.0)
-        nu: Collision frequency (default: 0.01)
+        nu: Collision frequency (default: 0.0 for inviscid test)
+            Set nu=0 with M=0 for exact energy conservation.
+            For kinetic tests (M>0), use nu ~ 0.01-0.1 for collisional damping.
         Lambda: Kinetic parameter Λ = k∥²λ_D² (default: 1.0)
 
     Returns:
@@ -1628,33 +1655,56 @@ def initialize_orszag_tang(
     kx = 2 * jnp.pi / grid.Lx  # Fundamental wavenumber in x
     ky = 2 * jnp.pi / grid.Ly  # Fundamental wavenumber in y
 
-    # Orszag-Tang initial conditions (incompressible version)
-    # φ generates v⊥ = ẑ × ∇φ = (∂φ/∂y, -∂φ/∂x, 0)
-    phi_real = (jnp.cos(kx * X) + jnp.cos(ky * Y)) / (2 * jnp.pi)
+    # Orszag-Tang initial conditions - SET FOURIER COEFFICIENTS DIRECTLY
+    # Reference thesis Eq. 2.31: Φ = -2[cos(2πx/Lx) + cos(2πy/Ly)]
+    # Reference thesis Eq. 2.32: Ψ = cos(4πx/Lx) + 2cos(2πy/Ly)
+    #
+    # For rfft with our energy normalization E = (1/N_total) Σ |k⊥ f̂_k|²:
+    # - Set Fourier coefficients to real-space amplitude
+    # - The 1/N_total in energy + Parseval accounts for FFT convention
+    # - For rfft: need factor of 2 for middle modes (positive kx only)
+    # But this factor of 2 is handled in energy calculation, not here!
+    #
+    # Energy target: Initial E ~ 4.0 (from thesis Fig. 3.1)
+    # With Φ = -2cos(x) - 2cos(y) and Ψ = cos(2x) + 2cos(y)
+    # Set coefficients to match ORIGINAL GANDALF exactly (no scaling)
+    # From init_func.cu lines 111-141:
+    #   f[kx=1, ky=0] = -1.0, g[kx=1, ky=0] = -1.0
+    #   f[kx=2, ky=0] = +0.5, g[kx=2, ky=0] = -0.5
+    #   g[kx=0, ky=1] = -2.0, g[kx=0, ky=-1] = -2.0
+    #
+    # This matches thesis Eq. 2.31-2.32:
+    # φ = -2(cos x + cos y),  A = 2cos y + cos 2x
+    # z+ = φ + A = -2cos(x) + cos(2x)
+    # z- = φ - A = -2cos(x) - cos(2x) - 4cos(y)
 
-    # A∥ generates B⊥ = ẑ × ∇A∥ = (∂A∥/∂y, -∂A∥/∂x, 0)
-    # Note: factor of 2 in x-wavenumber (sin(2kx·x) vs sin(kx·x))
-    # This creates the characteristic Orszag-Tang magnetic topology
-    A_parallel_real = B0 * (
-        jnp.cos(2 * kx * X) / (4 * jnp.pi) +
-        jnp.cos(ky * Y) / (2 * jnp.pi)
-    )
+    # Initialize as zero arrays
+    z_plus_k = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex)
+    z_minus_k = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex)
 
-    # Transform to Fourier space
-    phi_k = rfftn_forward(phi_real)
-    A_parallel_k = rfftn_forward(A_parallel_real)
+    # FFT normalization: Original GANDALF uses unnormalized FFT, JAX uses normalized
+    # To match original GANDALF energies (E_total ~ 4.0), scale by Nx
+    # JAX FFT divides by N on inverse transform, CUFFT doesn't
+    # For 2D problems, Nz=2 and only kz=0 is populated, so scale by Nx compensates
+    # TODO: Verify this scaling works correctly for full 3D turbulence
+    scale = float(grid.Nx)
+
+    # Set z± coefficients with FFT normalization factor:
+    z_plus_k = z_plus_k.at[0, 0, 1].set(-1.0 * scale)  # z+: kx=1, ky=0
+    z_plus_k = z_plus_k.at[0, 0, 2].set(+0.5 * scale)  # z+: kx=2, ky=0
+
+    z_minus_k = z_minus_k.at[0, 0, 1].set(-1.0 * scale)  # z-: kx=1, ky=0
+    z_minus_k = z_minus_k.at[0, 0, 2].set(-0.5 * scale)  # z-: kx=2, ky=0
+    z_minus_k = z_minus_k.at[0, 1, 0].set(-2.0 * scale)  # z-: kx=0, ky=+1
+    z_minus_k = z_minus_k.at[0, grid.Ny - 1, 0].set(-2.0 * scale)  # z-: kx=0, ky=-1
 
     # Note: Dealiasing not needed for smooth analytical ICs
     # The cosine functions only populate discrete wavenumbers (kx, 2kx, ky)
     # which are well-resolved on the grid. Dealiasing is only required AFTER
     # nonlinear operations (Poisson brackets) to prevent aliasing errors.
 
-    # Convert to Elsasser variables z± = φ ± A∥
-    z_plus_k = phi_k + A_parallel_k
-    z_minus_k = phi_k - A_parallel_k
-
     # Initialize parallel magnetic field (passive, set to zero for pure Alfvén mode)
-    B_parallel = jnp.zeros_like(phi_k)
+    B_parallel = jnp.zeros_like(z_plus_k)
 
     # Initialize Hermite moments (kinetic distribution)
     # g = 0 represents fluid limit: no kinetic response

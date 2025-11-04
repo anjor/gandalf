@@ -160,50 +160,16 @@ def _krmhd_rhs_jit(
     dB_parallel_dt = jnp.zeros_like(fields.B_parallel)
 
     # Hermite moment evolution (Issue #49 - now fully implemented!)
-    # Compute g0 RHS (density moment, thesis Eq. 2.7)
-    dg_dt_0 = g0_rhs(
-        fields.g,
-        fields.z_plus,
-        fields.z_minus,
-        kx,
-        ky,
-        kz,
-        dealias_mask,
-        beta_i,
-        Nz,
-        Ny,
-        Nx,
-    )
-
-    # Compute g1 RHS (velocity moment, thesis Eq. 2.8)
-    dg_dt_1 = g1_rhs(
-        fields.g,
-        fields.z_plus,
-        fields.z_minus,
-        kx,
-        ky,
-        kz,
-        dealias_mask,
-        beta_i,
-        Lambda,
-        Nz,
-        Ny,
-        Nx,
-    )
-
-    # Initialize dg_dt array and populate first two moments
-    dg_dt = jnp.zeros_like(fields.g)
-    dg_dt = dg_dt.at[:, :, :, 0].set(dg_dt_0)
-    dg_dt = dg_dt.at[:, :, :, 1].set(dg_dt_1)
-
-    # Compute higher moment RHS (m >= 2, thesis Eq. 2.9)
-    # NOTE: Python for loop is correct here! Since M is in static_argnames, the JIT compiler
-    # sees the iteration count at compile time and fully unrolls this loop into separate
-    # gm_rhs() calls for each m. This is necessary because gm_rhs() requires m as a static
-    # argument (for compile-time optimization of Hermite recurrence coefficients).
-    # Using vmap/scan would make m dynamic, breaking the static_argnames contract.
-    for m in range(2, M + 1):
-        dg_dt_m = gm_rhs(
+    # **OPTIMIZATION**: For M=0 (pure fluid mode), skip all kinetic physics computation.
+    # This is critical for benchmarks like Orszag-Tang that test fluid-only dynamics.
+    # When M=0, fields.g has shape (Nz, Ny, Nx//2+1, 1) and should remain zero.
+    if M == 0:
+        # Pure fluid mode: no kinetic response, g = 0 throughout evolution
+        dg_dt = jnp.zeros_like(fields.g)
+    else:
+        # Full kinetic mode: evolve Hermite moment hierarchy
+        # Compute g0 RHS (density moment, thesis Eq. 2.7)
+        dg_dt_0 = g0_rhs(
             fields.g,
             fields.z_plus,
             fields.z_minus,
@@ -211,14 +177,56 @@ def _krmhd_rhs_jit(
             ky,
             kz,
             dealias_mask,
-            m,
             beta_i,
-            nu,
             Nz,
             Ny,
             Nx,
         )
-        dg_dt = dg_dt.at[:, :, :, m].set(dg_dt_m)
+
+        # Compute g1 RHS (velocity moment, thesis Eq. 2.8)
+        dg_dt_1 = g1_rhs(
+            fields.g,
+            fields.z_plus,
+            fields.z_minus,
+            kx,
+            ky,
+            kz,
+            dealias_mask,
+            beta_i,
+            Lambda,
+            Nz,
+            Ny,
+            Nx,
+        )
+
+        # Initialize dg_dt array and populate first two moments
+        dg_dt = jnp.zeros_like(fields.g)
+        dg_dt = dg_dt.at[:, :, :, 0].set(dg_dt_0)
+        dg_dt = dg_dt.at[:, :, :, 1].set(dg_dt_1)
+
+        # Compute higher moment RHS (m >= 2, thesis Eq. 2.9)
+        # NOTE: Python for loop is correct here! Since M is in static_argnames, the JIT compiler
+        # sees the iteration count at compile time and fully unrolls this loop into separate
+        # gm_rhs() calls for each m. This is necessary because gm_rhs() requires m as a static
+        # argument (for compile-time optimization of Hermite recurrence coefficients).
+        # Using vmap/scan would make m dynamic, breaking the static_argnames contract.
+        for m in range(2, M + 1):
+            dg_dt_m = gm_rhs(
+                fields.g,
+                fields.z_plus,
+                fields.z_minus,
+                kx,
+                ky,
+                kz,
+                dealias_mask,
+                m,
+                beta_i,
+                nu,
+                Nz,
+                Ny,
+                Nx,
+            )
+            dg_dt = dg_dt.at[:, :, :, m].set(dg_dt_m)
 
     return KRMHDFields(
         z_plus=dz_plus_dt,
