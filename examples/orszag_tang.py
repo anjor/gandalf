@@ -58,18 +58,18 @@ eta = 0.0           # NO resistivity (test inviscid with higher resolution)
 nu = 0.0            # NO collisions (M=0, not used)
 cfl_safety = 0.3    # CFL safety factor
 
-# Time evolution (reference runs to t = 2.0 τ_A)
+# Time evolution (thesis Figure 2.1 shows evolution to t = 2.0 τ_A)
 # Alfvén time: τ_A = L_box / v_A = 2π / 1 = 6.28 time units
-# So 2 τ_A = 12.57 time units
+# Run to 4 τ_A to see full oscillation cycle
 tau_A = 2 * np.pi / v_A
-t_final = 2.0 * tau_A  # Two Alfvén times: t = 12.57
-save_interval = 0.2 * tau_A  # Save every 0.2 τ_A
+t_final = 4.0 * tau_A  # Four Alfvén times: t = 25.13
+save_interval = 0.1 * tau_A  # Save every 0.1 τ_A for smooth curves
 
 print(f"\nGrid: {Nx} × {Ny} (2D)")
 print(f"Domain: {Lx:.2f} × {Ly:.2f}")
 print(f"Physics: B0={B0:.3f}, v_A={v_A}, η={eta}")
 print(f"Time normalization: τ_A = {tau_A:.4f} time units")
-print(f"Evolution: t ∈ [0, {t_final:.2f}] = [0, 2.0] τ_A")
+print(f"Evolution: t ∈ [0, {t_final:.2f}] = [0, {t_final/tau_A:.1f}] τ_A")
 
 # ============================================================================
 # Initialize Grid and State
@@ -192,13 +192,14 @@ fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
 # Plot 1: Energy components vs time
 ax1 = axes[0]
 times = np.array(history.times)
+times_alfven = times / tau_A  # Convert to Alfvén times for x-axis
 E_total = np.array(history.E_total)
 E_kinetic = np.array(history.E_kinetic)
 E_magnetic = np.array(history.E_magnetic)
 
-ax1.plot(times, E_total, 'k-', linewidth=2, label='Total Energy')
-ax1.plot(times, E_kinetic, 'r--', linewidth=2, label='Kinetic Energy')
-ax1.plot(times, E_magnetic, 'b:', linewidth=2, label='Magnetic Energy')
+ax1.plot(times_alfven, E_total, 'k-', linewidth=2, label='Total Energy')
+ax1.plot(times_alfven, E_kinetic, 'r--', linewidth=2, label='Kinetic Energy')
+ax1.plot(times_alfven, E_magnetic, 'b:', linewidth=2, label='Magnetic Energy')
 ax1.set_ylabel('Energy', fontsize=12)
 ax1.legend(loc='best', fontsize=10)
 ax1.grid(True, alpha=0.3)
@@ -207,10 +208,10 @@ ax1.set_title('Pure Fluid Orszag-Tang: Energy Conservation Test', fontsize=14, f
 # Plot 2: Energy conservation error
 ax2 = axes[1]
 E_error = np.abs(E_total - E_total[0]) / E_total[0] * 100  # Percentage
-ax2.plot(times, E_error, 'k-', linewidth=2)
+ax2.plot(times_alfven, E_error, 'k-', linewidth=2)
 ax2.axhline(y=0.01, color='g', linestyle='--', linewidth=1, label='Target: 0.01%')
 ax2.axhline(y=0.1, color='orange', linestyle='--', linewidth=1, label='Acceptable: 0.1%')
-ax2.set_xlabel('Time (Alfvén times)', fontsize=12)
+ax2.set_xlabel('t / τ_A', fontsize=12)
 ax2.set_ylabel('|ΔE/E₀| (%)', fontsize=12)
 ax2.set_yscale('log')
 ax2.legend(loc='best', fontsize=10)
