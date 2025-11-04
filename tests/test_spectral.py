@@ -1084,5 +1084,149 @@ class TestPoissonSolver3D:
             poisson_solve_3d(omega_fourier_2d, grid.kx, grid.ky)
 
 
+class TestPytreeRegistration:
+    """Test suite for JAX pytree registration of spectral grids."""
+
+    def test_spectral_grid_2d_tree_flatten_unflatten(self):
+        """Test that SpectralGrid2D can be flattened and unflattened."""
+        grid = SpectralGrid2D.create(Nx=64, Ny=64, Lx=1.0, Ly=2.0)
+
+        # Flatten using our custom flatten function directly
+        from krmhd.spectral import _spectral_grid_2d_flatten, _spectral_grid_2d_unflatten
+
+        children, aux_data = _spectral_grid_2d_flatten(grid)
+
+        # Check children are arrays
+        assert len(children) == 3  # kx, ky, dealias_mask
+        assert all(isinstance(c, jax.Array) for c in children)
+
+        # Check aux_data contains static fields
+        Nx, Ny, Lx, Ly = aux_data
+        assert Nx == 64
+        assert Ny == 64
+        assert Lx == 1.0
+        assert Ly == 2.0
+
+        # Unflatten and verify roundtrip
+        grid_reconstructed = _spectral_grid_2d_unflatten(aux_data, children)
+        assert grid_reconstructed.Nx == grid.Nx
+        assert grid_reconstructed.Ny == grid.Ny
+        assert jnp.allclose(grid_reconstructed.kx, grid.kx)
+        assert jnp.allclose(grid_reconstructed.ky, grid.ky)
+        assert jnp.allclose(grid_reconstructed.dealias_mask, grid.dealias_mask)
+
+    def test_spectral_grid_3d_tree_flatten_unflatten(self):
+        """Test that SpectralGrid3D can be flattened and unflattened."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32, Lx=1.0, Ly=2.0, Lz=3.0)
+
+        # Flatten using our custom flatten function directly
+        from krmhd.spectral import _spectral_grid_3d_flatten, _spectral_grid_3d_unflatten
+
+        children, aux_data = _spectral_grid_3d_flatten(grid)
+
+        # Check children are arrays
+        assert len(children) == 4  # kx, ky, kz, dealias_mask
+        assert all(isinstance(c, jax.Array) for c in children)
+
+        # Check aux_data contains static fields
+        Nx, Ny, Nz, Lx, Ly, Lz = aux_data
+        assert Nx == 32
+        assert Ny == 32
+        assert Nz == 32
+        assert Lx == 1.0
+        assert Ly == 2.0
+        assert Lz == 3.0
+
+        # Unflatten and verify roundtrip
+        grid_reconstructed = _spectral_grid_3d_unflatten(aux_data, children)
+        assert grid_reconstructed.Nx == grid.Nx
+        assert grid_reconstructed.Ny == grid.Ny
+        assert grid_reconstructed.Nz == grid.Nz
+        assert jnp.allclose(grid_reconstructed.kx, grid.kx)
+        assert jnp.allclose(grid_reconstructed.ky, grid.ky)
+        assert jnp.allclose(grid_reconstructed.kz, grid.kz)
+        assert jnp.allclose(grid_reconstructed.dealias_mask, grid.dealias_mask)
+
+    def test_spectral_grid_2d_tree_map(self):
+        """Test that jax.tree.map works on SpectralGrid2D."""
+        grid = SpectralGrid2D.create(Nx=64, Ny=64)
+
+        # Apply tree.map to scale all arrays by 2
+        grid_scaled = jax.tree.map(lambda x: x * 2, grid)
+
+        # Check that arrays were scaled
+        assert jnp.allclose(grid_scaled.kx, grid.kx * 2)
+        assert jnp.allclose(grid_scaled.ky, grid.ky * 2)
+        assert jnp.allclose(grid_scaled.dealias_mask, grid.dealias_mask * 2)
+
+        # Check that static fields are preserved
+        assert grid_scaled.Nx == grid.Nx
+        assert grid_scaled.Ny == grid.Ny
+        assert grid_scaled.Lx == grid.Lx
+        assert grid_scaled.Ly == grid.Ly
+
+    def test_spectral_grid_3d_tree_map(self):
+        """Test that jax.tree.map works on SpectralGrid3D."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+
+        # Apply tree.map to scale all arrays by 3
+        grid_scaled = jax.tree.map(lambda x: x * 3, grid)
+
+        # Check that arrays were scaled
+        assert jnp.allclose(grid_scaled.kx, grid.kx * 3)
+        assert jnp.allclose(grid_scaled.ky, grid.ky * 3)
+        assert jnp.allclose(grid_scaled.kz, grid.kz * 3)
+        assert jnp.allclose(grid_scaled.dealias_mask, grid.dealias_mask * 3)
+
+        # Check that static fields are preserved
+        assert grid_scaled.Nx == grid.Nx
+        assert grid_scaled.Ny == grid.Ny
+        assert grid_scaled.Nz == grid.Nz
+
+    def test_spectral_grid_2d_jit_acceptance(self):
+        """Test that SpectralGrid2D can be passed to JIT-compiled functions."""
+
+        @jax.jit
+        def compute_kx_sum(grid: SpectralGrid2D) -> float:
+            return jnp.sum(grid.kx)
+
+        grid = SpectralGrid2D.create(Nx=64, Ny=64)
+        result = compute_kx_sum(grid)
+
+        # Should not raise an error and should give expected result
+        expected = jnp.sum(grid.kx)
+        assert jnp.isclose(result, expected)
+
+    def test_spectral_grid_3d_jit_acceptance(self):
+        """Test that SpectralGrid3D can be passed to JIT-compiled functions."""
+
+        @jax.jit
+        def compute_grid_volume(grid: SpectralGrid3D) -> float:
+            return grid.Lx * grid.Ly * grid.Lz
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32, Lx=1.0, Ly=2.0, Lz=3.0)
+        result = compute_grid_volume(grid)
+
+        # Should not raise an error
+        expected = 1.0 * 2.0 * 3.0
+        assert jnp.isclose(result, expected)
+
+    def test_spectral_grid_3d_jit_with_arrays(self):
+        """Test that SpectralGrid3D arrays can be accessed in JIT functions."""
+
+        @jax.jit
+        def compute_k_max(grid: SpectralGrid3D) -> float:
+            kx_max = jnp.max(jnp.abs(grid.kx))
+            ky_max = jnp.max(jnp.abs(grid.ky))
+            kz_max = jnp.max(jnp.abs(grid.kz))
+            return jnp.sqrt(kx_max**2 + ky_max**2 + kz_max**2)
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        result = compute_k_max(grid)
+
+        # Should not raise an error
+        assert result > 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

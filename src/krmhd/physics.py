@@ -186,6 +186,55 @@ class KRMHDState(BaseModel):
         )
 
 
+# Register KRMHDState as JAX pytree
+def _krmhd_state_flatten(state: KRMHDState):
+    """
+    Flatten KRMHDState into arrays (children) and static data (aux_data).
+
+    Arrays (children): z_plus, z_minus, B_parallel, g, grid (itself a pytree)
+    Static data (aux_data): M, beta_i, v_th, nu, Lambda, time
+
+    The grid field is treated as a child (pytree) rather than aux_data
+    because it contains JAX arrays (kx, ky, kz, dealias_mask) and is
+    registered as a pytree.
+    """
+    children = (state.z_plus, state.z_minus, state.B_parallel, state.g, state.grid)
+    aux_data = (state.M, state.beta_i, state.v_th, state.nu, state.Lambda, state.time)
+    return children, aux_data
+
+
+def _krmhd_state_unflatten(aux_data, children):
+    """
+    Reconstruct KRMHDState from aux_data and children.
+
+    This directly constructs the object, preserving the exact arrays
+    from JAX tree operations (including grid as a pytree).
+    """
+    M, beta_i, v_th, nu, Lambda, time = aux_data
+    z_plus, z_minus, B_parallel, g, grid = children
+    return KRMHDState(
+        z_plus=z_plus,
+        z_minus=z_minus,
+        B_parallel=B_parallel,
+        g=g,
+        M=M,
+        beta_i=beta_i,
+        v_th=v_th,
+        nu=nu,
+        Lambda=Lambda,
+        time=time,
+        grid=grid,
+    )
+
+
+# Register with JAX
+jax.tree_util.register_pytree_node(
+    KRMHDState,
+    _krmhd_state_flatten,
+    _krmhd_state_unflatten,
+)
+
+
 @partial(jax.jit, static_argnums=(4, 5))
 def poisson_bracket_2d(
     f_fourier: Array,

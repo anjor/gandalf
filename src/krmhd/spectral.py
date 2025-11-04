@@ -137,6 +137,47 @@ class SpectralGrid2D(BaseModel):
         )
 
 
+# Register SpectralGrid2D as JAX pytree
+def _spectral_grid_2d_flatten(grid: SpectralGrid2D):
+    """
+    Flatten SpectralGrid2D into arrays (children) and static data (aux_data).
+
+    Arrays (children): kx, ky, dealias_mask
+    Static data (aux_data): Nx, Ny, Lx, Ly
+    """
+    children = (grid.kx, grid.ky, grid.dealias_mask)
+    aux_data = (grid.Nx, grid.Ny, grid.Lx, grid.Ly)
+    return children, aux_data
+
+
+def _spectral_grid_2d_unflatten(aux_data, children):
+    """
+    Reconstruct SpectralGrid2D from aux_data and children.
+
+    This bypasses the factory method and directly constructs the object,
+    preserving the exact arrays from JAX tree operations.
+    """
+    Nx, Ny, Lx, Ly = aux_data
+    kx, ky, dealias_mask = children
+    return SpectralGrid2D(
+        Nx=Nx,
+        Ny=Ny,
+        Lx=Lx,
+        Ly=Ly,
+        kx=kx,
+        ky=ky,
+        dealias_mask=dealias_mask,
+    )
+
+
+# Register with JAX
+jax.tree_util.register_pytree_node(
+    SpectralGrid2D,
+    _spectral_grid_2d_flatten,
+    _spectral_grid_2d_unflatten,
+)
+
+
 class SpectralGrid3D(BaseModel):
     """
     Immutable 3D spectral grid specification with wavenumber arrays.
@@ -278,6 +319,50 @@ class SpectralGrid3D(BaseModel):
             kz=kz,
             dealias_mask=dealias_mask,
         )
+
+
+# Register SpectralGrid3D as JAX pytree
+def _spectral_grid_3d_flatten(grid: SpectralGrid3D):
+    """
+    Flatten SpectralGrid3D into arrays (children) and static data (aux_data).
+
+    Arrays (children): kx, ky, kz, dealias_mask
+    Static data (aux_data): Nx, Ny, Nz, Lx, Ly, Lz
+    """
+    children = (grid.kx, grid.ky, grid.kz, grid.dealias_mask)
+    aux_data = (grid.Nx, grid.Ny, grid.Nz, grid.Lx, grid.Ly, grid.Lz)
+    return children, aux_data
+
+
+def _spectral_grid_3d_unflatten(aux_data, children):
+    """
+    Reconstruct SpectralGrid3D from aux_data and children.
+
+    This bypasses the factory method and directly constructs the object,
+    preserving the exact arrays from JAX tree operations.
+    """
+    Nx, Ny, Nz, Lx, Ly, Lz = aux_data
+    kx, ky, kz, dealias_mask = children
+    return SpectralGrid3D(
+        Nx=Nx,
+        Ny=Ny,
+        Nz=Nz,
+        Lx=Lx,
+        Ly=Ly,
+        Lz=Lz,
+        kx=kx,
+        ky=ky,
+        kz=kz,
+        dealias_mask=dealias_mask,
+    )
+
+
+# Register with JAX
+jax.tree_util.register_pytree_node(
+    SpectralGrid3D,
+    _spectral_grid_3d_flatten,
+    _spectral_grid_3d_unflatten,
+)
 
 
 class SpectralField2D(BaseModel):
