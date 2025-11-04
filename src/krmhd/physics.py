@@ -1595,6 +1595,10 @@ def initialize_orszag_tang(
     Args:
         grid: SpectralGrid3D defining spatial dimensions
         M: Number of Hermite moments (default: 0 for pure fluid test)
+            **IMPORTANT**: Default changed from M=10 to M=0 in this PR.
+            Existing code calling without explicit M will now get pure fluid dynamics.
+            For kinetic physics, explicitly pass M=10 or higher.
+
             **M=0**: Pure fluid RMHD (default). Tests nonlinear MHD dynamics only.
                 Hermite moments remain zero throughout (g ≡ 0), no kinetic physics.
                 Use with eta=0, nu=0 for exact energy conservation benchmark.
