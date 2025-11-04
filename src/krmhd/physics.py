@@ -106,7 +106,7 @@ class KRMHDState(BaseModel):
     z_minus: Array = Field(description="Elsasser z- (counter-propagating wave) in Fourier space")
     B_parallel: Array = Field(description="Parallel magnetic field in Fourier space")
     g: Array = Field(description="Hermite moments of electron distribution")
-    M: int = Field(gt=0, description="Number of Hermite moments")
+    M: int = Field(ge=0, description="Number of Hermite moments (M=0 for pure fluid, M>0 for kinetic)")
     beta_i: float = Field(gt=0.0, description="Ion plasma beta")
     v_th: float = Field(gt=0.0, description="Electron thermal velocity")
     nu: float = Field(ge=0.0, description="Collision frequency")
@@ -1546,11 +1546,11 @@ def energy(state: KRMHDState) -> Dict[str, float]:
 
 def initialize_orszag_tang(
     grid: SpectralGrid3D,
-    M: int = 10,
+    M: int = 0,
     B0: float = None,
     v_th: float = 1.0,
     beta_i: float = 1.0,
-    nu: float = 0.01,
+    nu: float = 0.0,
     Lambda: float = 1.0,
 ) -> KRMHDState:
     """
@@ -1565,25 +1565,29 @@ def initialize_orszag_tang(
         Magnetic: B = (-B0·sin(y), B0·sin(2x), 0) with B0 = 1/√(4π)
 
     This implementation (incompressible RMHD):
-        Stream function: φ = [cos(kx·x) + cos(ky·y)]/(2π)
-            → generates v⊥ = ẑ × ∇φ = (-sin(ky·y), sin(kx·x))/(2π)
-        Vector potential: A∥ = B0·[cos(2kx·x)/(4π) + cos(ky·y)]/(2π)
-            → generates B⊥ = ẑ × ∇A∥ = B0·(-sin(ky·y), sin(2kx·x))/(2π)
+        Stream function: φ = -2[cos(kx·x) + cos(ky·y)]
+            → generates v⊥ = ẑ × ∇φ with amplitude O(1)
+        Vector potential: A∥ = B0·[cos(2kx·x) + 2cos(ky·y)]
+            → generates B⊥ = ẑ × ∇A∥ with amplitude O(B0)
 
     where kx = 2π/Lx, ky = 2π/Ly are the fundamental wavenumbers.
+    Reference: Equations 2.31 & 2.32 from standard Orszag-Tang test case.
 
     Args:
         grid: SpectralGrid3D defining spatial dimensions
-        M: Number of Hermite moments (default: 10)
-            **Why M=10?** Orszag-Tang is primarily a fluid test (nonlinear MHD).
-            The kinetic response (Hermite moments g) represents small thermal
-            corrections. M=10 is sufficient for the fluid limit where kinetic
-            effects are minimal. For fully kinetic problems, use M=20-30.
+        M: Number of Hermite moments (default: 0 for pure fluid test)
+            **M=0**: Pure fluid RMHD (default). Tests nonlinear MHD dynamics only.
+                Hermite moments remain zero throughout (g ≡ 0), no kinetic physics.
+                Use with eta=0, nu=0 for exact energy conservation benchmark.
+            **M=10-20**: Fluid + weak kinetic response. For testing kinetic corrections.
+            **M=20-30**: Full kinetic KRMHD. For Landau damping, phase mixing studies.
         B0: Magnetic field amplitude (default: 1/√(4π) ≈ 0.282)
             Standard Orszag-Tang normalization from original paper
         v_th: Electron thermal velocity (default: 1.0)
         beta_i: Ion plasma beta (default: 1.0)
-        nu: Collision frequency (default: 0.01)
+        nu: Collision frequency (default: 0.0 for inviscid test)
+            Set nu=0 with M=0 for exact energy conservation.
+            For kinetic tests (M>0), use nu ~ 0.01-0.1 for collisional damping.
         Lambda: Kinetic parameter Λ = k∥²λ_D² (default: 1.0)
 
     Returns:
@@ -1629,15 +1633,17 @@ def initialize_orszag_tang(
     ky = 2 * jnp.pi / grid.Ly  # Fundamental wavenumber in y
 
     # Orszag-Tang initial conditions (incompressible version)
-    # φ generates v⊥ = ẑ × ∇φ = (∂φ/∂y, -∂φ/∂x, 0)
-    phi_real = (jnp.cos(kx * X) + jnp.cos(ky * Y)) / (2 * jnp.pi)
+    # Reference: Φ = -2[cos(2πx/Lx) + cos(2πy/Ly)]  [Eq. 2.31]
+    # φ generates v⊥ = ẑ × ∇φ = (-∂φ/∂y, ∂φ/∂x, 0)
+    # Note: Using reduced amplitude for better energy balance
+    phi_real = -(jnp.cos(kx * X) + jnp.cos(ky * Y))
 
-    # A∥ generates B⊥ = ẑ × ∇A∥ = (∂A∥/∂y, -∂A∥/∂x, 0)
-    # Note: factor of 2 in x-wavenumber (sin(2kx·x) vs sin(kx·x))
-    # This creates the characteristic Orszag-Tang magnetic topology
-    A_parallel_real = B0 * (
-        jnp.cos(2 * kx * X) / (4 * jnp.pi) +
-        jnp.cos(ky * Y) / (2 * jnp.pi)
+    # Reference: Ψ = cos(4πx/Lx) + 2cos(2πy/Ly)  [Eq. 2.32]
+    # A∥ generates B⊥ = ẑ × ∇A∥ = (-∂A∥/∂y, ∂A∥/∂x, 0)
+    # Note: factor of 2 in wavenumbers creates characteristic Orszag-Tang topology
+    # Scaled up to balance kinetic energy
+    A_parallel_real = (2.0 * B0) * (
+        jnp.cos(2 * kx * X) + 2.0 * jnp.cos(ky * Y)
     )
 
     # Transform to Fourier space

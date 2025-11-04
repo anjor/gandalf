@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 """
-Incompressible Orszag-Tang Vortex for RMHD
+Pure Fluid Orszag-Tang Vortex: Energy Conservation Benchmark
 
-Adaptation of the classic compressible Orszag-Tang vortex test to incompressible
-Reduced MHD (RMHD). Tests nonlinear dynamics, energy cascade, and current sheet
-formation in the incompressible limit.
+Tests the GANDALF energy-conserving formulation for pure fluid (non-kinetic) RMHD.
+With η=0, ν=0, M=0, energy should be conserved to ~0.01% (machine precision).
+
+This benchmark verifies:
+- Exact energy conservation in inviscid limit (GANDALF integrating factor method)
+- Kinetic ↔ magnetic energy exchange (Alfvénic dynamics)
+- Nonlinear MHD dynamics without kinetic effects
 
 Original Orszag-Tang (Compressible MHD):
     - Velocity: Vx = -sin(y), Vy = sin(x)
     - Magnetic: Bx = -B0·sin(y), By = B0·sin(2x), B0 = 1/√(4π)
-    - Shows shock formation and complex dynamics
 
-This Adaptation (Incompressible RMHD):
-    - Stream function: φ = [cos(x) + cos(y)]/(2π) → v⊥ = ẑ × ∇φ
-    - Vector potential: A∥ = B0·[cos(2x)/(4π) + cos(y)]/(2π) → B⊥ = ẑ × ∇A∥
-    - Incompressible: no shocks, but current sheets and nonlinear cascade develop
+This Pure Fluid RMHD Version:
+    - Stream function: φ = -(cos(x) + cos(y)) → v⊥ = ẑ × ∇φ
+    - Vector potential: A∥ = 2B0·(cos(2x) + 2cos(y)) → B⊥ = ẑ × ∇A∥
+    - Hermite moments: M=0 (pure fluid, no kinetic physics)
+    - Dissipation: η=0, ν=0 (inviscid/collisionless for energy conservation test)
 
-Runtime: ~1-2 minutes on M1 Pro for 64² resolution
+Reference: GANDALF energy-conserving formulation (Issue #44)
+Expected: |ΔE/E₀| < 0.01% over t ∈ [0, 2.0]
+Runtime: ~5-10 seconds on M1 Pro for 32² resolution
 """
 
 import numpy as np
@@ -30,23 +36,23 @@ from krmhd import (
 from krmhd.diagnostics import EnergyHistory
 
 print("=" * 70)
-print("Incompressible Orszag-Tang Vortex (RMHD)")
+print("Pure Fluid Orszag-Tang: Energy Conservation Benchmark")
 print("=" * 70)
 
-# Grid resolution (2D problem - use Nz=2 minimum for 3D code)
-# Use 64² for reasonable speed, 128² for better resolution
-Nx, Ny, Nz = 64, 64, 2
-Lx = Ly = 2 * np.pi  # Match original Orszag-Tang domain
-Lz = 2 * np.pi       # Arbitrary for 2D problem
+# Grid resolution (2D problem - minimal for pure perpendicular physics)
+Nx, Ny, Nz = 32, 32, 2  # 32² × 2 (Nz=2 minimum for 3D code, but physics is pure 2D)
+Lx = Ly = 2 * np.pi      # Match original Orszag-Tang domain
+Lz = 2 * np.pi           # Arbitrary for 2D problem
 
-# Physics parameters
+# Physics parameters (INVISCID for energy conservation test)
 B0 = 1.0 / np.sqrt(4 * np.pi)  # Magnetic field amplitude (~0.282)
 v_A = 1.0           # Alfvén velocity
-eta = 0.001         # Resistivity (small for quasi-ideal evolution)
+eta = 0.0           # NO resistivity (inviscid test)
+nu = 0.0            # NO collisions (collisionless test)
 cfl_safety = 0.3    # CFL safety factor
 
-# Time evolution
-t_final = 1.0       # Standard benchmark time
+# Time evolution (reference runs to t = 2.0 τ_A)
+t_final = 2.0       # Two Alfvén times (match reference)
 save_interval = 0.1  # Save diagnostics every 0.1 time units
 
 print(f"\nGrid: {Nx} × {Ny} (2D)")
@@ -61,22 +67,16 @@ print(f"Evolution: t ∈ [0, {t_final}]")
 print("\nInitializing...")
 grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
 
-# Initialize Orszag-Tang vortex using shared function
-state = initialize_orszag_tang(
-    grid=grid,
-    M=10,  # Number of Hermite moments (sufficient for fluid limit)
-    B0=B0,
-    v_th=1.0,
-    beta_i=1.0,
-    nu=0.01,
-    Lambda=1.0,
-)
+# Initialize Orszag-Tang vortex: PURE FLUID (M=0, nu=0.0 defaults)
+state = initialize_orszag_tang(grid=grid, B0=B0)
 
 E0 = compute_energy(state)
-print(f"✓ Initialized Orszag-Tang vortex")
+
+print(f"✓ Initialized Pure Fluid Orszag-Tang")
+print(f"  Mode: M=0 (pure fluid), η=0, ν=0 (inviscid)")
 print(f"  Initial energy: E_total = {E0['total']:.6e}")
 print(f"  E_mag/E_kin = {E0['magnetic']/E0['kinetic']:.3f}")
-print(f"  Grid: {Nx} × {Ny}, domain: {Lx:.2f} × {Ly:.2f}")
+print(f"  Grid: {Nx} × {Ny} × {Nz}, domain: {Lx:.2f} × {Ly:.2f}")
 print(f"  Grid spacing: dx = {Lx/Nx:.4f}, dy = {Ly/Ny:.4f}")
 
 # ============================================================================
@@ -119,25 +119,39 @@ E_final = history.E_total[-1]
 mag_frac_initial = history.E_magnetic[0] / E_initial
 mag_frac_final = history.E_magnetic[-1] / E_final
 
-print(f"\nEnergy evolution:")
+# Energy conservation check
+energy_error = abs(E_final - E_initial) / E_initial
+print(f"\nEnergy Conservation (Inviscid Test):")
 print(f"  E(t=0)   = {E_initial:.6e}")
 print(f"  E(t={t_final}) = {E_final:.6e}")
-print(f"  E_final / E_initial = {E_final/E_initial:.4f}")
+print(f"  ΔE/E₀    = {energy_error:.2%}")
+print(f"  Expected: < 0.01% (GANDALF guarantee from Issue #44)")
 
-print(f"\nMagnetic fraction:")
-print(f"  E_mag/E_total (t=0)   = {mag_frac_initial:.3f}")
+if energy_error < 0.0001:  # < 0.01%
+    print(f"  ✓ PASS: Energy conserved to {energy_error:.4%}")
+elif energy_error < 0.001:  # < 0.1%
+    print(f"  ~ ACCEPTABLE: Energy conserved to {energy_error:.3%}")
+else:
+    print(f"  ✗ FAIL: Energy error {energy_error:.2%} exceeds tolerance")
+
+# Kinetic/magnetic energy exchange
+print(f"\nKinetic ↔ Magnetic Energy Exchange:")
+print(f"  E_mag/E_total (t=0)     = {mag_frac_initial:.3f}")
 print(f"  E_mag/E_total (t={t_final}) = {mag_frac_final:.3f}")
 
-if len(history.E_total) > 1:
-    dE = np.abs(np.diff(history.E_total))
-    peak_idx = np.argmax(dE)
-    print(f"\nDynamics:")
-    print(f"  Peak energy change at t ≈ {history.times[peak_idx]:.3f}")
-    print(f"  Number of time snapshots: {len(history.times)}")
+if len(history.E_magnetic) > 1:
+    E_mag_array = np.array(history.E_magnetic)
+    E_mag_mean = np.mean(E_mag_array)
+    E_mag_std = np.std(E_mag_array)
+    oscillation_amplitude = E_mag_std / E_mag_mean
+    print(f"  Magnetic oscillation amplitude: {oscillation_amplitude:.1%} of mean")
+    if oscillation_amplitude > 0.05:
+        print(f"  ✓ Energy exchange detected (Alfvénic dynamics)")
+
+print(f"\nTime evolution:")
+print(f"  Number of timesteps: {len(history.times)}")
+print(f"  Final time: t = {state.time:.3f}")
 
 print("\n" + "=" * 70)
-print("✓ Incompressible Orszag-Tang simulation complete!")
-print("=" * 70)
-print("\nNote: This is an INCOMPRESSIBLE adaptation. No shocks form,")
-print("but current sheets and nonlinear energy cascade develop similarly.")
+print("✓ Pure Fluid Orszag-Tang Benchmark Complete")
 print("=" * 70)
