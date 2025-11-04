@@ -193,6 +193,7 @@ print("=" * 70)
 
 print("\nGenerating plots...")
 import matplotlib.pyplot as plt
+import jax.numpy as jnp
 
 fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
 
@@ -228,6 +229,82 @@ ax2.set_title('Energy Conservation Error', fontsize=12)
 plt.tight_layout()
 plt.savefig('orszag_tang_energy_conservation.png', dpi=150, bbox_inches='tight')
 print("  ✓ Saved: orszag_tang_energy_conservation.png")
+
+# ============================================================================
+# 2D Structure Plots (like Athena test page)
+# ============================================================================
+
+print("\nGenerating 2D structure plots...")
+
+# Get final state fields in Fourier space (kz=0 plane for 2D)
+z_plus_k = state.z_plus[0, :, :]   # Shape: (Ny, Nx//2+1)
+z_minus_k = state.z_minus[0, :, :]
+
+# Convert to physical fields: φ = (z+ + z-)/2, Ψ = (z+ - z-)/2
+phi_k = 0.5 * (z_plus_k + z_minus_k)
+psi_k = 0.5 * (z_plus_k - z_minus_k)
+
+# Compute Laplacians: ω = ∇²φ (vorticity), J∥ = ∇²Ψ (current)
+kx = grid.kx
+ky = grid.ky[:, np.newaxis]  # Broadcast for 2D
+k_perp_sq = kx**2 + ky**2
+
+omega_k = -k_perp_sq * phi_k
+j_parallel_k = -k_perp_sq * psi_k
+
+# Transform to real space using JAX FFT (2D inverse rfft)
+phi_real = jnp.fft.irfft2(phi_k, s=(Ny, Nx))
+psi_real = jnp.fft.irfft2(psi_k, s=(Ny, Nx))
+omega_real = jnp.fft.irfft2(omega_k, s=(Ny, Nx))
+j_parallel_real = jnp.fft.irfft2(j_parallel_k, s=(Ny, Nx))
+
+# Create 2×2 subplot for structures
+fig2, axes2 = plt.subplots(2, 2, figsize=(12, 12))
+
+# Coordinate grids
+x = np.linspace(0, Lx, Nx, endpoint=False)
+y = np.linspace(0, Ly, Ny, endpoint=False)
+X, Y = np.meshgrid(x, y)
+
+# Plot 1: Vorticity (fluid vortex structures)
+ax = axes2[0, 0]
+im1 = ax.pcolormesh(X, Y, np.array(omega_real), cmap='RdBu_r', shading='auto')
+ax.set_title(f'Vorticity ω = ∇²φ at t = {t_final/tau_A:.1f} τ_A', fontsize=12, fontweight='bold')
+ax.set_xlabel('x', fontsize=10)
+ax.set_ylabel('y', fontsize=10)
+ax.set_aspect('equal')
+fig2.colorbar(im1, ax=ax, label='ω')
+
+# Plot 2: Current density (magnetic current sheets)
+ax = axes2[0, 1]
+im2 = ax.pcolormesh(X, Y, np.array(j_parallel_real), cmap='PiYG', shading='auto')
+ax.set_title(f'Current Density J∥ = ∇²Ψ at t = {t_final/tau_A:.1f} τ_A', fontsize=12, fontweight='bold')
+ax.set_xlabel('x', fontsize=10)
+ax.set_ylabel('y', fontsize=10)
+ax.set_aspect('equal')
+fig2.colorbar(im2, ax=ax, label='J∥')
+
+# Plot 3: Stream function (flow potential)
+ax = axes2[1, 0]
+im3 = ax.pcolormesh(X, Y, np.array(phi_real), cmap='viridis', shading='auto')
+ax.set_title(f'Stream Function φ at t = {t_final/tau_A:.1f} τ_A', fontsize=12, fontweight='bold')
+ax.set_xlabel('x', fontsize=10)
+ax.set_ylabel('y', fontsize=10)
+ax.set_aspect('equal')
+fig2.colorbar(im3, ax=ax, label='φ')
+
+# Plot 4: Vector potential (magnetic flux)
+ax = axes2[1, 1]
+im4 = ax.pcolormesh(X, Y, np.array(psi_real), cmap='plasma', shading='auto')
+ax.set_title(f'Vector Potential Ψ at t = {t_final/tau_A:.1f} τ_A', fontsize=12, fontweight='bold')
+ax.set_xlabel('x', fontsize=10)
+ax.set_ylabel('y', fontsize=10)
+ax.set_aspect('equal')
+fig2.colorbar(im4, ax=ax, label='Ψ')
+
+plt.tight_layout()
+plt.savefig('orszag_tang_structures.png', dpi=150, bbox_inches='tight')
+print("  ✓ Saved: orszag_tang_structures.png")
 
 plt.show()
 print("\nPlots displayed. Close window to exit.")
