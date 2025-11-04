@@ -41,8 +41,7 @@ def run_orszag_tang_simulation(save_file: str = "orszag_tang_history.pkl"):
 
     # Grid and parameters (matching examples/orszag_tang.py)
     Nx, Ny, Nz = 64, 64, 2
-    Lx = Ly = 2 * np.pi
-    Lz = 2 * np.pi
+    Lx = Ly = Lz = 1.0  # Unit box (standard convention, see Issue #78)
     B0 = 1.0 / np.sqrt(4 * np.pi)
     v_A = 1.0
     eta = 0.001

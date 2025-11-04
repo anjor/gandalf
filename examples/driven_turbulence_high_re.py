@@ -51,7 +51,7 @@ def main():
 
     # Higher resolution for scale separation
     Nx, Ny, Nz = 128, 128, 64
-    Lx = Ly = Lz = 2 * np.pi
+    Lx = Ly = Lz = 1.0  # Unit box (standard convention, see Issue #78)
 
     # Physics parameters
     v_A = 1.0          # Alfvén velocity

@@ -16,8 +16,9 @@ Initial Conditions (from thesis Eq. 2.31-2.32):
     - In Elsasser variables: z± = φ ± Ψ
 
 Time Normalization (from thesis Section 2.3):
-    - τ_A = Lz/v_A = 2π time units (parallel Alfvén crossing time)
-    - Verified from original GANDALF code (init_func.cu, gandalf.cu)
+    - Box size: Lx = Ly = Lz = 1.0 (unit box, matches thesis)
+    - τ_A = Lz/v_A = 1.0 time units (parallel Alfvén crossing time)
+    - Energy oscillation period: ~1-2 τ_A (thesis Figure 2.1)
 
 FFT Normalization:
     - Original GANDALF uses unnormalized CUFFT

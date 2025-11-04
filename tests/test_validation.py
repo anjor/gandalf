@@ -50,8 +50,8 @@ class TestOrszagTangVortex:
         """
         # Small grid for fast testing
         Nx, Ny, Nz = 32, 32, 2
-        Lx = Ly = 2 * np.pi
-        Lz = 2 * np.pi
+        Lx = Ly = 1.0  # Match thesis normalization (see Issue #78)
+        Lz = 1.0
         B0 = 1.0 / np.sqrt(4 * np.pi)
         v_A = 1.0
         eta = 0.001  # Small dissipation
@@ -85,9 +85,10 @@ class TestOrszagTangVortex:
         mag_frac_final = E_final['magnetic'] / E_final['kinetic']
 
         # Assertions
-        # 1. Energy should be conserved to within 1% (small dissipation)
+        # 1. Energy should be conserved to within 2% (small dissipation, short time)
+        # Note: With Lx=1.0, higher wavenumbers lead to slightly more dissipation
         energy_ratio = E_final['total'] / E_initial['total']
-        assert 0.99 < energy_ratio <= 1.0, \
+        assert 0.98 < energy_ratio <= 1.0, \
             f"Energy not conserved: E_final/E_initial = {energy_ratio:.4f}"
 
         # 2. Magnetic fraction should increase (selective decay) or stay roughly the same
@@ -114,7 +115,7 @@ class TestOrszagTangVortex:
         """
         # Minimal grid
         Nx, Ny, Nz = 16, 16, 2
-        Lx = Ly = Lz = 2 * np.pi
+        Lx = Ly = Lz = 1.0
         B0 = 1.0 / np.sqrt(4 * np.pi)
 
         grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
@@ -134,7 +135,7 @@ class TestOrszagTangVortex:
     def test_initial_energy_components(self):
         """Test that initial energy components have reasonable magnitudes."""
         Nx, Ny, Nz = 32, 32, 2
-        Lx = Ly = Lz = 2 * np.pi
+        Lx = Ly = Lz = 1.0
         B0 = 1.0 / np.sqrt(4 * np.pi)
 
         grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
@@ -177,7 +178,7 @@ class TestOrszagTangVortex:
         This validates the FFT normalization and energy decomposition.
         """
         Nx, Ny, Nz = 32, 32, 2
-        Lx = Ly = Lz = 2 * np.pi
+        Lx = Ly = Lz = 1.0
         B0 = 1.0 / np.sqrt(4 * np.pi)  # ~0.282
 
         grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
@@ -211,7 +212,7 @@ class TestOrszagTangVortex:
         For M=0, all Hermite moments should remain zero throughout evolution.
         """
         Nx, Ny, Nz = 16, 16, 2
-        Lx = Ly = Lz = 2 * np.pi
+        Lx = Ly = Lz = 1.0
         B0 = 1.0 / np.sqrt(4 * np.pi)
 
         grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
@@ -238,7 +239,7 @@ class TestOrszagTangVortex:
         For 2D problems (only kz=0 populated), energy should NOT depend on Nz.
         This validates the 3D-compatible normalization fix.
         """
-        Lx = Ly = Lz = 2 * np.pi
+        Lx = Ly = Lz = 1.0
         B0 = 1.0 / np.sqrt(4 * np.pi)
 
         energies = {}
