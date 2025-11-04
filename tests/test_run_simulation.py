@@ -46,8 +46,8 @@ class TestRunSimulationIntegration:
             # Verify outputs were created
             assert Path(tmpdir).exists()
             assert (Path(tmpdir) / 'config.yaml').exists()
-            assert (Path(tmpdir) / 'energy_history.npz').exists()
-            assert (Path(tmpdir) / 'final_state.npz').exists()
+            assert (Path(tmpdir) / 'energy_history.h5').exists()  # HDF5 format (Issue #13)
+            assert (Path(tmpdir) / 'final_state.h5').exists()  # HDF5 format (Issue #13)
 
             # Verify return values
             assert state is not None
@@ -314,29 +314,25 @@ class TestCheckpointIntervalValidation:
         config = TimeIntegrationConfig(n_steps=100)
         assert config.checkpoint_interval is None
 
-    def test_checkpoint_interval_warns_at_runtime(self):
-        """Test that using checkpoint_interval in simulation issues runtime warning."""
-        import warnings
+    def test_checkpoint_interval_creates_checkpoints(self):
+        """Test that checkpoint_interval creates checkpoint files (Issue #13)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             config = decaying_turbulence_config(
                 grid=GridConfig(Nx=8, Ny=8, Nz=8),
                 time_integration=TimeIntegrationConfig(
-                    n_steps=1,
+                    n_steps=4,
                     save_interval=1,
-                    checkpoint_interval=1  # Should trigger warning
+                    checkpoint_interval=2  # Save checkpoint every 2 steps
                 ),
                 io=IOConfig(output_dir=tmpdir)
             )
 
-            # Should warn at runtime when simulation runs
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                run_simulation(config, verbose=False)
+            # Run simulation
+            run_simulation(config, verbose=False)
 
-                # Check warning was issued
-                checkpoint_warnings = [
-                    warning for warning in w
-                    if "checkpoint_interval" in str(warning.message).lower()
-                ]
-                assert len(checkpoint_warnings) > 0
-                assert "Issue #13" in str(checkpoint_warnings[0].message)
+            # Check that checkpoint files were created at step 2 and step 4
+            assert (Path(tmpdir) / 'checkpoint_step000002.h5').exists()
+            assert (Path(tmpdir) / 'checkpoint_step000004.h5').exists()
+            # Step 1 and 3 should not have checkpoints
+            assert not (Path(tmpdir) / 'checkpoint_step000001.h5').exists()
+            assert not (Path(tmpdir) / 'checkpoint_step000003.h5').exists()
