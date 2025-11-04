@@ -51,7 +51,7 @@ from krmhd.diagnostics import (
 
 # Grid setup
 Nx, Ny, Nz = 64, 64, 64  # Resolution (use 64³ for fast demo, 128³ for better quality)
-Lx, Ly, Lz = 2 * np.pi, 2 * np.pi, 2 * np.pi  # Domain size
+Lx, Ly, Lz = 1.0, 1.0, 1.0  # Unit box (standard convention, see Issue #78)
 
 # Physics parameters
 alpha = 5.0 / 3.0  # Spectral slope (Kolmogorov)

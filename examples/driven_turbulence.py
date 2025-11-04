@@ -64,7 +64,7 @@ def main():
 
     # Grid resolution
     Nx, Ny, Nz = 64, 64, 32
-    Lx = Ly = Lz = 2 * np.pi
+    Lx = Ly = Lz = 1.0  # Unit box (standard convention, see Issue #78)
 
     # Physics parameters
     v_A = 1.0          # Alfvén velocity

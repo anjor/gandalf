@@ -657,7 +657,7 @@ def run_forced_single_mode(
             - 'relative_fluctuation': Energy fluctuation in steady state
     """
     Nx, Ny, Nz = grid_size
-    Lx = Ly = Lz = 2 * np.pi
+    Lx = Ly = Lz = 1.0  # Unit box (standard convention)
 
     # Create grid
     grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)

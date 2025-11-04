@@ -40,7 +40,7 @@ class SpectralGrid2D(BaseModel):
         dealias_mask: Boolean mask for 2/3 rule dealiasing (shape: [Ny, Nx//2+1])
 
     Example:
-        >>> grid = SpectralGrid2D.create(Nx=256, Ny=256, Lx=2*jnp.pi, Ly=2*jnp.pi)
+        >>> grid = SpectralGrid2D.create(Nx=256, Ny=256, Lx=1.0, Ly=1.0)
         >>> grid.Nx
         256
     """
@@ -161,7 +161,7 @@ class SpectralGrid3D(BaseModel):
 
     Example:
         >>> grid = SpectralGrid3D.create(Nx=128, Ny=128, Nz=128,
-        ...                               Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        ...                               Lx=1.0, Ly=1.0, Lz=2*jnp.pi)
         >>> grid.Nx
         128
     """
