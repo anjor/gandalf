@@ -59,13 +59,17 @@ nu = 0.0            # NO collisions (M=0, not used)
 cfl_safety = 0.3    # CFL safety factor
 
 # Time evolution (reference runs to t = 2.0 τ_A)
-t_final = 2.0       # Two Alfvén times (match thesis benchmark)
-save_interval = 0.1  # Save diagnostics every 0.1 time units
+# Alfvén time: τ_A = L_box / v_A = 2π / 1 = 6.28 time units
+# So 2 τ_A = 12.57 time units
+tau_A = 2 * np.pi / v_A
+t_final = 2.0 * tau_A  # Two Alfvén times: t = 12.57
+save_interval = 0.2 * tau_A  # Save every 0.2 τ_A
 
 print(f"\nGrid: {Nx} × {Ny} (2D)")
 print(f"Domain: {Lx:.2f} × {Ly:.2f}")
 print(f"Physics: B0={B0:.3f}, v_A={v_A}, η={eta}")
-print(f"Evolution: t ∈ [0, {t_final}]")
+print(f"Time normalization: τ_A = {tau_A:.4f} time units")
+print(f"Evolution: t ∈ [0, {t_final:.2f}] = [0, 2.0] τ_A")
 
 # ============================================================================
 # Initialize Grid and State
@@ -102,7 +106,8 @@ while state.time < t_final:
         history.append(state)
         E = history.E_total[-1]
         mag_frac = history.E_magnetic[-1] / max(history.E_kinetic[-1], 1e-10)
-        print(f"  t = {state.time:5.3f}, E = {E:.6e}, E_mag/E_kin = {mag_frac:.3f}, steps = {step_count}")
+        t_alfven = state.time / tau_A
+        print(f"  t = {state.time:6.2f} ({t_alfven:.3f} τ_A), E = {E:.6e}, E_mag/E_kin = {mag_frac:.3f}, steps = {step_count}")
         next_save_time += save_interval
 
     dt = compute_cfl_timestep(state, v_A, cfl_safety)
