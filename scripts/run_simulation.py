@@ -60,6 +60,7 @@ from krmhd.diagnostics import (
     plot_energy_history,
     plot_energy_spectrum,
 )
+from krmhd.io import save_checkpoint, save_timeseries
 
 
 def run_simulation(
@@ -169,22 +170,6 @@ def run_simulation(
     t = 0.0
     start_time = time.time()
 
-    # Warn if checkpoint_interval is set but not yet implemented
-    if config.time_integration.checkpoint_interval is not None:
-        import warnings
-        warnings.warn(
-            f"checkpoint_interval={config.time_integration.checkpoint_interval} is set but "
-            "checkpointing is not yet implemented (Issue #13). This setting will be ignored. "
-            "Use save_interval for periodic diagnostics instead.",
-            UserWarning,
-            stacklevel=2
-        )
-
-    # TODO: Implement checkpoint saving when checkpoint_interval is set
-    # GitHub Issue: https://github.com/anjor/gandalf/issues/13 (HDF5 I/O)
-    # if config.time_integration.checkpoint_interval is not None:
-    #     # Save state every checkpoint_interval steps to HDF5
-
     for step in range(config.time_integration.n_steps):
         # Apply forcing if enabled
         if config.forcing.enabled:
@@ -224,6 +209,24 @@ def run_simulation(
                     f"t = {t:.4f}, E = {E['total']:.6e}, "
                     f"E_mag/E_tot = {mag_frac:.3f}"
                 )
+
+        # Save checkpoint if enabled
+        if (config.time_integration.checkpoint_interval is not None and
+            (step + 1) % config.time_integration.checkpoint_interval == 0):
+            checkpoint_file = output_dir / f"checkpoint_step{step+1:06d}.h5"
+            save_checkpoint(
+                state,
+                str(checkpoint_file),
+                metadata={
+                    'step': step + 1,
+                    'time': t,
+                    'config_name': config.name,
+                    'eta': config.physics.eta,
+                    'nu': config.physics.nu,
+                }
+            )
+            if verbose:
+                print(f"    ✓ Saved checkpoint: {checkpoint_file.name}")
 
     elapsed = time.time() - start_time
 
@@ -267,13 +270,19 @@ def run_simulation(
 
     # Save outputs
     if config.io.save_energy_history:
-        energy_dict = energy_history.to_dict()
-        np.savez(
-            output_dir / "energy_history.npz",
-            **energy_dict
+        # Use HDF5 format for energy history (Issue #13)
+        save_timeseries(
+            energy_history,
+            str(output_dir / "energy_history.h5"),
+            metadata={
+                'config_name': config.name,
+                'n_steps': config.time_integration.n_steps,
+                'save_interval': config.time_integration.save_interval,
+            },
+            overwrite=config.io.overwrite
         )
         if verbose:
-            print(f"✓ Saved energy history")
+            print(f"✓ Saved energy history (HDF5)")
 
     if config.io.save_spectra:
         np.savez(
@@ -284,33 +293,20 @@ def run_simulation(
             print(f"✓ Saved energy spectra")
 
     if config.io.save_final_state:
-        # Save final state as NPZ with all fields and metadata for exact restart
-        # NOTE: Using NPZ for now; will migrate to HDF5 for better compression,
-        # metadata support, and partial reads once Issue #13 is implemented
-        np.savez(
-            output_dir / "final_state.npz",
-            # Primary state fields (Fourier space)
-            z_plus=np.array(state.z_plus),
-            z_minus=np.array(state.z_minus),
-            B_parallel=np.array(state.B_parallel),
-            g=np.array(state.g),
-            # Metadata for state reconstruction
-            M=state.M,
-            beta_i=state.beta_i,
-            v_th=state.v_th,
-            nu=state.nu,
-            Lambda=state.Lambda,
-            time=state.time,
-            # Grid parameters for validation
-            Nx=state.grid.Nx,
-            Ny=state.grid.Ny,
-            Nz=state.grid.Nz,
-            Lx=state.grid.Lx,
-            Ly=state.grid.Ly,
-            Lz=state.grid.Lz,
+        # Use HDF5 checkpoint format for final state (Issue #13)
+        save_checkpoint(
+            state,
+            str(output_dir / "final_state.h5"),
+            metadata={
+                'config_name': config.name,
+                'description': 'Final simulation state',
+                'n_steps': config.time_integration.n_steps,
+                'total_time': state.time,
+            },
+            overwrite=config.io.overwrite
         )
         if verbose:
-            print(f"✓ Saved final state (z±, B∥, g, metadata)")
+            print(f"✓ Saved final state (HDF5 checkpoint)")
 
     # Create plots
     if config.io.save_spectra or config.io.save_energy_history:

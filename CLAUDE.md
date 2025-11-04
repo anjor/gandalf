@@ -101,7 +101,7 @@ krmhd/
 ├── hermite.py       # ✅ COMPLETE: Hermite basis for kinetic physics
 ├── diagnostics.py   # ✅ COMPLETE: Energy spectra (1D, k⊥, k∥), history, visualization
 ├── forcing.py       # ✅ COMPLETE: Gaussian white noise forcing, energy injection diagnostics (Issue #29)
-├── io.py           # HDF5 checkpointing (Issue #13)
+├── io.py            # ✅ COMPLETE: HDF5 checkpointing and timeseries I/O (Issue #13)
 └── validation.py    # Linear physics tests (Issue #10)
 
 examples/
@@ -260,7 +260,7 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
 
 ## Current Development Status
 
-**Test Coverage:** 275 passing tests across all modules
+**Test Coverage:** 299 passing tests across all modules (including 24 I/O tests)
 
 ### Completed (Issues #1-3, #21)
 - [x] Basic spectral infrastructure (2D/3D, Issue #2)
@@ -395,10 +395,21 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
   - **Power laws**: Phase mixing m^(-3/2), phase unmixing m^(-1/2) from kinetic theory
 
 ### Production Features (Issues #13-15, #28, #30)
-- [ ] HDF5 I/O (Issue #13)
-- [ ] Hyper-dissipation (Issue #28)
-- [ ] Integrating factor timestepper (Issue #30, optional)
-- [ ] Configuration files and run scripts (Issue #15)
+- [x] HDF5 I/O (Issue #13) ✅
+  - save_checkpoint(), load_checkpoint() for full state
+  - save_timeseries(), load_timeseries() for EnergyHistory
+  - Integrated into run_simulation.py with checkpoint_interval support
+  - Gzip compression (level 4) for efficient storage
+  - 24 comprehensive tests validating roundtrip accuracy, error handling, metadata
+- [x] Hyper-dissipation (Issue #28) ✅
+  - Already implemented in timestepping.py
+  - hyper_r (1, 2, 4, 8) and hyper_n (1, 2, 4) parameters
+  - Overflow validation and warnings
+- [x] Configuration files and run scripts (Issue #15) ✅
+  - YAML configuration system via Pydantic
+  - run_simulation.py with template generation
+  - 7 example config files in configs/ directory
+- [ ] Integrating factor timestepper (Issue #30) - Already implemented as gandalf_step()
 
 ## Reference Parameters
 Typical astrophysical parameters:
