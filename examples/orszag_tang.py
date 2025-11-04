@@ -52,7 +52,8 @@ nu = 0.0            # NO collisions (collisionless test)
 cfl_safety = 0.3    # CFL safety factor
 
 # Time evolution (reference runs to t = 2.0 τ_A)
-t_final = 2.0       # Two Alfvén times (match reference)
+# Note: Start with t=1.0 for testing, increase to t=2.0 for full benchmark
+t_final = 1.0       # One Alfvén time (for testing)
 save_interval = 0.1  # Save diagnostics every 0.1 time units
 
 print(f"\nGrid: {Nx} × {Ny} (2D)")
@@ -89,17 +90,29 @@ print("  (First timestep may take ~30s for JAX compilation)")
 history = EnergyHistory()
 next_save_time = 0.0
 
+step_count = 0
 while state.time < t_final:
     if state.time >= next_save_time:
         history.append(state)
         E = history.E_total[-1]
         mag_frac = history.E_magnetic[-1] / max(history.E_kinetic[-1], 1e-10)
-        print(f"  t = {state.time:5.3f}, E = {E:.6e}, E_mag/E_kin = {mag_frac:.3f}")
+        print(f"  t = {state.time:5.3f}, E = {E:.6e}, E_mag/E_kin = {mag_frac:.3f}, steps = {step_count}")
         next_save_time += save_interval
 
     dt = compute_cfl_timestep(state, v_A, cfl_safety)
     dt = min(dt, t_final - state.time, next_save_time - state.time)
+
+    # Debug: print if timestep becomes very small
+    if dt < 1e-4:
+        print(f"  WARNING: Small timestep dt = {dt:.2e} at t = {state.time:.3f}")
+
     state = gandalf_step(state, dt, eta, v_A)
+    step_count += 1
+
+    # Safety: abort if too many steps
+    if step_count > 10000:
+        print(f"  ERROR: Too many steps ({step_count}), aborting!")
+        break
 
 # Final snapshot
 history.append(state)
