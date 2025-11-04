@@ -155,3 +155,47 @@ print(f"  Final time: t = {state.time:.3f}")
 print("\n" + "=" * 70)
 print("✓ Pure Fluid Orszag-Tang Benchmark Complete")
 print("=" * 70)
+
+# ============================================================================
+# Visualization
+# ============================================================================
+
+print("\nGenerating plots...")
+import matplotlib.pyplot as plt
+
+fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+# Plot 1: Energy components vs time
+ax1 = axes[0]
+times = np.array(history.times)
+E_total = np.array(history.E_total)
+E_kinetic = np.array(history.E_kinetic)
+E_magnetic = np.array(history.E_magnetic)
+
+ax1.plot(times, E_total, 'k-', linewidth=2, label='Total Energy')
+ax1.plot(times, E_kinetic, 'r--', linewidth=2, label='Kinetic Energy')
+ax1.plot(times, E_magnetic, 'b:', linewidth=2, label='Magnetic Energy')
+ax1.set_ylabel('Energy', fontsize=12)
+ax1.legend(loc='best', fontsize=10)
+ax1.grid(True, alpha=0.3)
+ax1.set_title('Pure Fluid Orszag-Tang: Energy Conservation Test', fontsize=14, fontweight='bold')
+
+# Plot 2: Energy conservation error
+ax2 = axes[1]
+E_error = np.abs(E_total - E_total[0]) / E_total[0] * 100  # Percentage
+ax2.plot(times, E_error, 'k-', linewidth=2)
+ax2.axhline(y=0.01, color='g', linestyle='--', linewidth=1, label='Target: 0.01%')
+ax2.axhline(y=0.1, color='orange', linestyle='--', linewidth=1, label='Acceptable: 0.1%')
+ax2.set_xlabel('Time (Alfvén times)', fontsize=12)
+ax2.set_ylabel('|ΔE/E₀| (%)', fontsize=12)
+ax2.set_yscale('log')
+ax2.legend(loc='best', fontsize=10)
+ax2.grid(True, alpha=0.3)
+ax2.set_title('Energy Conservation Error', fontsize=12)
+
+plt.tight_layout()
+plt.savefig('orszag_tang_energy_conservation.png', dpi=150, bbox_inches='tight')
+print("  ✓ Saved: orszag_tang_energy_conservation.png")
+
+plt.show()
+print("\nPlots displayed. Close window to exit.")
