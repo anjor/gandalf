@@ -342,6 +342,24 @@ uv run ruff check
 uv run mypy src/krmhd
 ```
 
+## Normalization Convention
+
+**Box Size and Time:**
+- **Standard**: Use Lx = Ly = Lz = 1.0 (unit box) for benchmarks
+- **Alfvén time**: τ_A = Lz/v_A (parallel Alfvén crossing time)
+- **Wavenumbers**: k = (2π/L) × n for mode number n
+
+**Field Normalization:**
+- **Mean field**: B₀ = 1/√(4π) ≈ 0.282 in code units
+- **Alfvén velocity**: v_A = 1.0 (normalized)
+- **Energy**: Total energy (volume integral), computed via Parseval's theorem
+
+**Important for Benchmarks:**
+- Orszag-Tang vortex uses Lx = Ly = Lz = 1.0 to match thesis Figure 2.1
+- With Lx=1.0, fundamental wavenumber k=2π gives correct energy scale
+- Using Lx=2π would make k=1, reducing energy by factor (2π)² ≈ 39.5
+- See CLAUDE.md for detailed normalization discussion (Issue #78)
+
 ## Typical Physical Parameters
 
 Reference values for astrophysical plasmas:

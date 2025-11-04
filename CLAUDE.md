@@ -62,12 +62,36 @@ RMHD is an asymptotic expansion in the small parameter ε:
 δB⊥/B₀ ~ 1 are **physically incorrect** - such regimes violate RMHD validity.
 
 ### Normalization Convention
-- **Mean field**: B₀ = 1 in code units (normalized Alfvén velocity v_A = 1)
+
+**Thesis Convention (Original GANDALF):**
+- **Box size**: Lx = Ly = Lz = 1.0 (unit box)
+- **Alfvén time**: τ_A = Lz/v_A = 1.0 (unit time)
+- **Wavenumbers**: k = 2πn for integer mode number n
+- **Energy**: Total energy (volume integral), not energy density
+
+**Code Convention (This Implementation):**
+- **Box size**: Can be arbitrary (Lx, Ly, Lz)
+- **For Orszag-Tang benchmark**: Use Lx = Ly = Lz = 1.0 to match thesis
+- **Alfvén time**: τ_A = Lz/v_A (parallel Alfvén crossing time)
+- **Wavenumbers**: k = (2π/L) × n for mode number n
+- **Energy**: Computed via Parseval's theorem with proper FFT normalization
+
+**Field Normalization:**
+- **Mean field**: B₀ = 1/√(4π) ≈ 0.282 in code units (normalized Alfvén velocity v_A = 1)
 - **Magnetic field**: B = B₀ẑ + δB where δB comes from perturbations
   - Perpendicular: δB⊥ = ∇ × (Ψ ẑ) with Ψ = (z⁺ - z⁻)/2
   - Parallel: Bz = 1 + δB∥ (state.B_parallel in Fourier space)
 - **Field line following**: Requires full B field, so B₀ must be added in real space
 - **Important**: Never add constants in Fourier space - only k=0 mode is affected!
+
+**Orszag-Tang Benchmark Normalization (Issue #78):**
+- Thesis Figure 2.1 uses Lx = Ly = Lz = 1.0
+- Energy oscillation period: ~2 Alfvén times (τ_A = 1.0)
+- Initial conditions from thesis Eqs. 2.31-2.32:
+  - φ = -2[cos(2πx) + cos(2πy)]
+  - Ψ = cos(4πx) + 2cos(2πy)
+- With box size Lx=1.0, wavenumber k=2π gives correct energy scale
+- Using Lx=2π would make k=1, reducing energy by factor (2π)² ≈ 39.5
 
 ## Technical Stack
 

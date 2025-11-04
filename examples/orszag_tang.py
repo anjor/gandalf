@@ -58,8 +58,8 @@ print("=" * 70)
 
 # Grid resolution (2D problem - minimal for pure perpendicular physics)
 Nx, Ny, Nz = 32, 32, 2  # 32² × 2 for testing
-Lx = Ly = 2 * np.pi      # Match original Orszag-Tang domain
-Lz = 2 * np.pi           # Arbitrary for 2D problem
+Lx = Ly = 1.0            # Match thesis box size (Eqs. 2.31-2.32)
+Lz = 1.0                 # Match thesis normalization
 
 # Physics parameters
 B0 = 1.0 / np.sqrt(4 * np.pi)  # Magnetic field amplitude (~0.282)
@@ -69,13 +69,12 @@ nu = 0.0            # NO collisions (M=0, not used)
 cfl_safety = 0.3    # CFL safety factor
 
 # Time evolution
-# From thesis Section 2.3: "Time is normalized to L/v_A"
-# For 32² × 1 domain with Lz = 2π and v_A = 1.0:
-#   τ_A = Lz/v_A = 2π/1.0 = 2π time units (parallel Alfvén crossing time)
-# This matches original GANDALF and thesis Figure 2.1
-tau_A = Lz / v_A  # = 2π time units
-t_final = 4.0 * tau_A  # Four Alfvén times to see oscillations develop
-save_interval = 0.05 * tau_A  # Save every 0.05 τ_A for smooth oscillations
+# Time normalization: τ_A = Lz/v_A (thesis Section 2.3)
+# With Lz = 1.0, v_A = 1.0: τ_A = 1.0 time units
+# Thesis Figure 2.1 shows full oscillation over ~2 Alfvén times
+tau_A = Lz / v_A  # = 1.0 time units (matches thesis)
+t_final = 4.0 * tau_A  # Four Alfvén times to see full oscillation
+save_interval = 0.05 * tau_A  # Save every 0.05 τ_A
 
 print(f"\nGrid: {Nx} × {Ny} (2D)")
 print(f"Domain: {Lx:.2f} × {Ly:.2f}")
@@ -133,7 +132,7 @@ while state.time < t_final:
     step_count += 1
 
     # Safety: abort if too many steps
-    if step_count > 10000:
+    if step_count > 50000:
         print(f"  ERROR: Too many steps ({step_count}), aborting!")
         break
 
