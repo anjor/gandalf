@@ -1491,8 +1491,11 @@ def energy(state: KRMHDState) -> Dict[str, float]:
     # - Factor of N makes them match
 
     Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
-    N_total = Nx * Ny * Nz
-    norm_factor = 1.0 / N_total
+    # For perpendicular energy (k⊥² terms), normalize by Nx*Ny only
+    # because we sum over all z-planes. Works for both 2D (only kz=0 populated)
+    # and 3D (all z-planes populated).
+    N_perp = Nx * Ny
+    norm_factor = 1.0 / N_perp
 
     # For rfft, we need to handle three cases:
     # - kx = 0: No negative counterpart, factor = 1
@@ -1514,26 +1517,25 @@ def energy(state: KRMHDState) -> Dict[str, float]:
     # Since z± = φ ± A∥, we have: φ = (z+ + z-)/2,  A∥ = (z+ - z-)/2
     # Therefore: |∇φ|² + |∇A∥|² = (1/2)(|∇z+|² + |∇z-|²)
     #
-    # For 2D problems (like Orszag-Tang), only kz=0 plane is populated
-    z_plus_slice = state.z_plus[0, :, :]  # kz=0 plane
-    z_minus_slice = state.z_minus[0, :, :]  # kz=0 plane
-
-    # Convert to φ and A∥ in Fourier space
-    phi_slice = 0.5 * (z_plus_slice + z_minus_slice)
-    A_par_slice = 0.5 * (z_plus_slice - z_minus_slice)
+    # Works for both 2D (Nz=2, only kz=0 populated) and 3D (all z-planes):
+    # - Sum over ALL z-planes (for 2D, kz≠0 planes are zero and contribute nothing)
+    # - Normalize by N_perp = Nx*Ny (NOT Nx*Ny*Nz)
+    # - This correctly handles both cases automatically
+    phi_3d = 0.5 * (state.z_plus + state.z_minus)  # Shape: (Nz, Ny, Nx//2+1)
+    A_par_3d = 0.5 * (state.z_plus - state.z_minus)
 
     # Compute gradient energies: |∇φ|² and |∇A∥|²
-    phi_grad_squared = k_perp_squared[0, :, :] * jnp.abs(phi_slice) ** 2
-    A_par_grad_squared = k_perp_squared[0, :, :] * jnp.abs(A_par_slice) ** 2
+    phi_grad_squared = k_perp_squared * jnp.abs(phi_3d) ** 2
+    A_par_grad_squared = k_perp_squared * jnp.abs(A_par_3d) ** 2
 
     # Integrate over physical space (Parseval's theorem + rfft factor)
     # Factor of 0.5 from energy definition E = (1/2)∫|∇f|² dx
-    # Multiply by Nz since we're only summing one z-plane
-    E_kinetic = 0.5 * norm_factor * Nz * (
-        jnp.sum(jnp.where(kx_middle[0, :, :], 2.0 * phi_grad_squared, phi_grad_squared))
+    # Sum over all z-planes (includes both populated and empty planes)
+    E_kinetic = 0.5 * norm_factor * (
+        jnp.sum(jnp.where(kx_middle, 2.0 * phi_grad_squared, phi_grad_squared))
     ).real
-    E_magnetic = 0.5 * norm_factor * Nz * (
-        jnp.sum(jnp.where(kx_middle[0, :, :], 2.0 * A_par_grad_squared, A_par_grad_squared))
+    E_magnetic = 0.5 * norm_factor * (
+        jnp.sum(jnp.where(kx_middle, 2.0 * A_par_grad_squared, A_par_grad_squared))
     ).real
 
     # Compressive energy: E_comp = (1/2) ∫ |δB∥|² dx
@@ -1673,8 +1675,10 @@ def initialize_orszag_tang(
     z_minus_k = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex)
 
     # FFT normalization: Original GANDALF uses unnormalized FFT, JAX uses normalized
-    # To match original GANDALF energies (E_total ~ 4.0), scale by Nx (= Ny for square grid)
-    # This compensates for JAX's FFT normalization: JAX divides by N, CUFFT doesn't
+    # To match original GANDALF energies (E_total ~ 4.0), scale by Nx
+    # JAX FFT divides by N on inverse transform, CUFFT doesn't
+    # For 2D problems, Nz=2 and only kz=0 is populated, so scale by Nx compensates
+    # TODO: Verify this scaling works correctly for full 3D turbulence
     scale = float(grid.Nx)
 
     # Set z± coefficients with FFT normalization factor:

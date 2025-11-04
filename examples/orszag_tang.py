@@ -38,6 +38,7 @@ Runtime: ~10 seconds on M1 Pro for 32² × 2 resolution
 """
 
 import numpy as np
+from pathlib import Path
 from krmhd import (
     SpectralGrid3D,
     initialize_orszag_tang,
@@ -46,6 +47,10 @@ from krmhd import (
     energy as compute_energy,
 )
 from krmhd.diagnostics import EnergyHistory
+
+# Create output directory
+output_dir = Path(__file__).parent / "output"
+output_dir.mkdir(exist_ok=True)
 
 print("=" * 70)
 print("Pure Fluid Orszag-Tang: Energy Conservation Benchmark")
@@ -63,13 +68,13 @@ eta = 0.0           # NO resistivity (test inviscid with higher resolution)
 nu = 0.0            # NO collisions (M=0, not used)
 cfl_safety = 0.3    # CFL safety factor
 
-# Time evolution (thesis Figure 2.1 shows evolution to t = 2.0 τ_A)
+# Time evolution
 # From thesis Section 2.3: "Time is normalized to L/v_A"
 # For 32² × 1 domain with Lz = 2π and v_A = 1.0:
 #   τ_A = Lz/v_A = 2π/1.0 = 2π time units (parallel Alfvén crossing time)
 # This matches original GANDALF and thesis Figure 2.1
 tau_A = Lz / v_A  # = 2π time units
-t_final = 2.0 * tau_A  # Two Alfvén times: t = 4π ≈ 12.57 (match thesis Figure 2.1)
+t_final = 4.0 * tau_A  # Four Alfvén times to see oscillations develop
 save_interval = 0.05 * tau_A  # Save every 0.05 τ_A for smooth oscillations
 
 print(f"\nGrid: {Nx} × {Ny} (2D)")
@@ -227,8 +232,9 @@ ax2.grid(True, alpha=0.3)
 ax2.set_title('Energy Conservation Error', fontsize=12)
 
 plt.tight_layout()
-plt.savefig('orszag_tang_energy_conservation.png', dpi=150, bbox_inches='tight')
-print("  ✓ Saved: orszag_tang_energy_conservation.png")
+output_file = output_dir / 'orszag_tang_energy_conservation.png'
+plt.savefig(output_file, dpi=150, bbox_inches='tight')
+print(f"  ✓ Saved: {output_file}")
 
 # ============================================================================
 # 2D Structure Plots (like Athena test page)
@@ -303,8 +309,9 @@ ax.set_aspect('equal')
 fig2.colorbar(im4, ax=ax, label='Ψ')
 
 plt.tight_layout()
-plt.savefig('orszag_tang_structures.png', dpi=150, bbox_inches='tight')
-print("  ✓ Saved: orszag_tang_structures.png")
+output_file = output_dir / 'orszag_tang_structures.png'
+plt.savefig(output_file, dpi=150, bbox_inches='tight')
+print(f"  ✓ Saved: {output_file}")
 
 plt.show()
 print("\nPlots displayed. Close window to exit.")
