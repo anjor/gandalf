@@ -598,6 +598,15 @@ def gandalf_step(
             "Use n=1 for standard collisions, n=2 for typical turbulence studies."
         )
 
+    # Validate M for collision operator (prevents division by zero)
+    # Collision damping rate = ν·(m/M)^(2n) requires M >= 2 for well-defined rates
+    # M=0 would cause division by zero, M=1 would make all rates zero
+    if state.M < 2:
+        raise ValueError(
+            f"M must be >= 2 for collision operators (got M={state.M}). "
+            "Collision damping uses (m/M)^(2n), requiring M >= 2 for meaningful rates."
+        )
+
     # Safety check for hyper-collision overflow with NORMALIZED dissipation
     # With normalization: exp(-ν·(m/M)^(2n)·dt), maximum rate at m=M is simply ν·dt
     # This is RESOLUTION-INDEPENDENT in moment space (matches original GANDALF)

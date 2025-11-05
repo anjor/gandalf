@@ -1084,3 +1084,75 @@ class TestHyperdissipationDegenerateCases:
             hyper_warnings = [warning for warning in w
                              if "damping rate" in str(warning.message)]
             assert len(hyper_warnings) == 0, "Should NOT warn below threshold 20.0"
+
+
+class TestExtremeHyperDissipation:
+    """Test extreme hyper-dissipation parameters (r=8, n=4) for numerical stability."""
+
+    def test_hyper_dissipation_r8_no_overflow(self):
+        """Verify exp(-η·1^8·dt) doesn't produce NaN/Inf for extreme r=8."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kx_mode=1.0, ky_mode=0.0, kz_mode=1.0, amplitude=0.1)
+
+        # Extreme but valid parameters: r=8 (thesis value), η near upper limit
+        eta = 10.0  # High but below η·dt < 50
+        dt = 0.004  # Small timestep: η·dt = 0.04 << 50
+        hyper_r = 8  # Maximum thesis value
+
+        # Should not produce NaN or Inf, even at k = k_max
+        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=hyper_r, hyper_n=2)
+
+        # Check all fields are finite
+        assert jnp.all(jnp.isfinite(state_new.z_plus)), "z_plus contains NaN/Inf with r=8"
+        assert jnp.all(jnp.isfinite(state_new.z_minus)), "z_minus contains NaN/Inf with r=8"
+        assert jnp.all(jnp.isfinite(state_new.g)), "g moments contain NaN/Inf with r=8"
+
+        # Energy should remain finite and positive
+        E_dict = energy(state_new)
+        assert jnp.isfinite(E_dict['total']), "Total energy is NaN/Inf with r=8"
+        assert E_dict['total'] > 0, "Total energy became negative with r=8"
+
+    def test_hyper_collision_n4_no_overflow(self):
+        """Verify exp(-ν·(m/M)^8·dt) doesn't produce NaN/Inf for extreme n=4."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kx_mode=1.0, ky_mode=0.0, kz_mode=1.0, amplitude=0.1)
+
+        # Extreme but valid parameters: n=4, ν near upper limit
+        nu = 10.0  # High but below ν·dt < 50
+        dt = 0.004  # Small timestep: ν·dt = 0.04 << 50
+        hyper_n = 4  # Maximum value
+
+        # Should not produce NaN or Inf at highest moment m=M
+        state_new = rk4_step(state, dt, eta=0.01, nu=nu, v_A=1.0, hyper_r=2, hyper_n=hyper_n)
+
+        # Check all moments are finite
+        assert jnp.all(jnp.isfinite(state_new.g)), "g moments contain NaN/Inf with n=4"
+
+        # Energy should remain finite
+        E_dict = energy(state_new)
+        assert jnp.isfinite(E_dict['total']), "Total energy is NaN/Inf with n=4"
+
+    def test_combined_extreme_parameters(self):
+        """Verify r=8, n=4 together don't cause overflow."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kx_mode=1.0, ky_mode=0.0, kz_mode=1.0, amplitude=0.1)
+
+        # Both extreme parameters simultaneously
+        eta = 10.0
+        nu = 10.0
+        dt = 0.004  # η·dt = ν·dt = 0.04 << 50
+        hyper_r = 8
+        hyper_n = 4
+
+        # Should handle both extreme dissipations without overflow
+        state_new = rk4_step(state, dt, eta=eta, nu=nu, v_A=1.0, hyper_r=hyper_r, hyper_n=hyper_n)
+
+        # All fields must remain finite
+        assert jnp.all(jnp.isfinite(state_new.z_plus)), "z_plus overflow with r=8, n=4"
+        assert jnp.all(jnp.isfinite(state_new.z_minus)), "z_minus overflow with r=8, n=4"
+        assert jnp.all(jnp.isfinite(state_new.g)), "g overflow with r=8, n=4"
+
+        # Energy must remain positive and finite
+        E_dict = energy(state_new)
+        assert jnp.isfinite(E_dict['total']) and E_dict['total'] > 0, \
+            "Energy overflow/underflow with r=8, n=4"

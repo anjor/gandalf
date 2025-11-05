@@ -27,6 +27,12 @@ Steady-State Considerations:
 - For 128³ or publication quality: use --total-time 100 for cleaner results
 - Check "Steady-state check" output during run: target ΔE/⟨E⟩ < 2%
 - Averaging over final 20 τ_A (30-50) provides better statistics than shorter windows
+
+Acceptable Energy Variation During Averaging:
+- Ideal: ΔE/⟨E⟩ < 2% (truly steady state, recommended for publication)
+- Good: ΔE/⟨E⟩ < 5% (weak growth acceptable, spectral slopes reliable)
+- Marginal: ΔE/⟨E⟩ < 10% (spectral shape qualitatively correct, quantitative error ~5-10%)
+- Unacceptable: ΔE/⟨E⟩ > 10% (non-stationary, biased spectra, extend runtime)
 """
 
 import argparse
