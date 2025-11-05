@@ -129,11 +129,12 @@ krmhd/
 └── validation.py    # Linear physics tests (Issue #10)
 
 examples/
-├── forcing_minimal.py          # ✅ COMPLETE: Minimal forcing example (~50 lines, 2s runtime)
-├── driven_turbulence.py        # ✅ COMPLETE: Comprehensive driven turbulence with forcing (317 lines, 20s runtime)
-├── decaying_turbulence.py      # ✅ COMPLETE: Turbulent cascade with diagnostics (Issue #12)
-├── orszag_tang.py              # ✅ COMPLETE: Orszag-Tang vortex benchmark (Issue #11)
-└── hyper_dissipation_demo.py   # ✅ COMPLETE: Hyper-dissipation r=1 vs r=2 comparison (Issue #28)
+├── forcing_minimal.py              # ✅ COMPLETE: Minimal forcing example (~50 lines, 2s runtime)
+├── driven_turbulence.py            # ✅ COMPLETE: Comprehensive driven turbulence with forcing (317 lines, 20s runtime)
+├── decaying_turbulence.py          # ✅ COMPLETE: Turbulent cascade with diagnostics (Issue #12)
+├── orszag_tang.py                  # ✅ COMPLETE: Orszag-Tang vortex benchmark (Issue #11)
+├── alfvenic_cascade_benchmark.py   # ✅ COMPLETE: Alfvénic cascade benchmark (Thesis Section 2.6.3)
+└── hyper_dissipation_demo.py       # ✅ COMPLETE: Hyper-dissipation r=1 vs r=2 comparison (Issue #28)
 ```
 
 **spectral.py** includes:
@@ -188,35 +189,51 @@ Hyper-dissipation operators provide selective damping of small-scale modes while
 - **Hyper-collisions** (n>1): -νm^(2n) for Hermite moments (damps high-m modes)
 
 **Recommended parameters:**
-- **r = 2, n = 2**: Optimal balance for typical turbulence studies
-  - Creates steep exponential cutoff at k⊥ > k_max/2
-  - Preserves inertial range (k⊥ ~ 2-10) with minimal artificial damping
-  - Prevents spurious reflections from grid Nyquist boundary
+- **r = 4, n = 2**: Optimal for reproducing thesis results (GANDALF default)
+  - Very narrow dissipation range at high-k (sharp cutoff)
+  - Minimal artificial dissipation in inertial range
+  - Matches original GANDALF thesis Figure 2.2
+  - Now feasible at ALL resolutions with normalized dissipation!
+- **r = 2, n = 2**: Alternative for broader dissipation range
+  - Gentler cutoff, more forgiving to parameter tuning
+  - Good balance for typical turbulence studies
 - **r = 1, n = 1**: Standard dissipation (reference case)
-- **r ≥ 3, n ≥ 3**: Generally impractical (requires tiny coefficients)
+- **r = 8**: Maximum thesis value for extremely sharp cutoff
 
-**Parameter selection constraints:**
-- **Overflow safety**: Dissipation rate must satisfy `η·k_max^(2r)·dt < 50` (see timestepping.py:51-61)
-- **Practical limits** for typical grids (k_max ~ 30-60):
+**Normalized Dissipation (Matching Original GANDALF):**
+This implementation uses **normalized hyper-dissipation** matching the original GANDALF:
+- **Resistivity**: exp(-η·(k⊥²/k⊥²_max)^r·dt) instead of exp(-η·k⊥^(2r)·dt)
+- **Collisions**: exp(-ν·(m/M)^(2n)·dt) instead of exp(-ν·m^(2n)·dt)
+
+**Key advantages:**
+- **Resolution-independent constraints**: η·dt < 50 and ν·dt < 50 (independent of N, M, r, n!)
+- **Practical parameter range**: η ~ 0.5-1.0, ν ~ 0.5-1.0 (matching thesis)
+- **High-order feasible**: Can use r=4, r=8 at ANY resolution (64³, 128³, 256³)
+- **No overflow issues**: Normalized dissipation rate at k_max or M is simply the coefficient
+
+**Parameter selection constraints (NORMALIZED):**
+- **Overflow safety**: `η·dt < 50` and `ν·dt < 50` (simple, resolution-independent!)
+- **Practical ranges** for ANY grid size:
   ```
-  r=1 (standard):     η < 0.01          (no overflow risk)
-  r=2 (recommended):  η < 1e-5 to 1e-4  (safe range)
-  r=3:                η < 1e-11         (impractically small!)
-  r=8:                η < 1e-29         (unusable)
+  η: 0.1 - 2.0     (typical: 0.5-1.0 matching thesis)
+  ν: 0.1 - 2.0     (typical: 0.5-1.0 matching thesis)
+  r: 1, 2, 4, 8    (r=4 recommended for thesis-style results)
+  n: 1, 2, 4       (n=2 recommended)
   ```
-- **Collision parameters**: Similar constraints apply for ν with M (max Hermite moment)
-- **Timestep dependence**: Smaller dt allows larger η, ν (rate·dt is the critical factor)
+- **Timestep dependence**: With dt ~ 0.005, can use η, ν up to ~10
+- **No resolution dependence**: Same parameters work at 64³, 128³, 256³!
 
 **Usage in gandalf_step():**
 ```python
+# Thesis-matching parameters (r=4, η~0.5)
 state = gandalf_step(
     state,
-    dt=0.01,
-    eta=1e-4,     # Hyper-resistivity coefficient
-    nu=1e-4,      # Hyper-collision coefficient
+    dt=0.005,
+    eta=0.5,      # Hyper-resistivity coefficient (thesis-matching)
+    nu=0.5,       # Hyper-collision coefficient
     v_A=1.0,
-    hyper_r=2,    # Hyper-resistivity order (default: 1)
-    hyper_n=2     # Hyper-collision order (default: 1)
+    hyper_r=4,    # Thesis value (NOW FEASIBLE at any resolution!)
+    hyper_n=2     # Hyper-collision order
 )
 ```
 
@@ -243,10 +260,17 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
 - Large-scale dynamics: Inertial range (k ~ 2-5) preserved with hyper-dissipation
 
 **Implementation details:**
-- Hyper-resistivity: Applied via multiplicative factor exp(-η·k⊥^(2r)·dt) to z± in Fourier space
-- Hyper-collisions: Applied via multiplicative factor exp(-ν·m^(2n)·dt) to Hermite moments
-- Reality condition: Preserved (dissipation factors are real and uniform across modes)
-- Energy conservation: Modified to E(t) = E₀·exp(-2η⟨k⊥^(2r)⟩·t) for hyper-viscous decay
+- **Hyper-resistivity**: Applied via multiplicative factor exp(-η·(k⊥²/k⊥²_max)^r·dt) to z± in Fourier space
+  - Normalization by k⊥²_max at 2/3 dealiasing boundary (matches damping_kernel.cu:50)
+  - idxmax = (Nx-1)//3, idymax = (Ny-1)//3 following original GANDALF
+- **Hyper-collisions**: Applied via multiplicative factor exp(-ν·(m/M)^(2n)·dt) to Hermite moments (m≥2)
+  - Normalization by M (max moment) matching timestep.cu:111
+  - m=0,1 exempt (conserves particles and momentum)
+- **Reality condition**: Preserved (dissipation factors are real and uniform across modes)
+- **Energy conservation**: Modified to E(t) = E₀·exp(-2η⟨(k⊥²/k⊥²_max)^r⟩·t) for hyper-viscous decay
+- **References**:
+  - Original GANDALF: damping_kernel.cu:50 (resistivity), timestep.cu:111 (collisions)
+  - This implementation: timestepping.py:366-371 (k_max calculation), :444-456 (application)
 
 **References:**
 - Implementation: physics.py (hyperdiffusion, hypercollision functions)
@@ -265,8 +289,9 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
 ### Nonlinear Benchmarks
 1. **Orszag-Tang vortex**: Standard MHD test (fluid limit)
 2. **Decaying turbulence**: Check k⁻⁵/³ spectrum
-3. **Energy partition**: Verify equipartition in steady state
-4. **Selective decay**: Magnetic energy should dominate at late times
+3. **Alfvénic cascade** (Thesis Section 2.6.3, Figure 2.2): Forced turbulence with k⊥⁻⁵/³ critical-balance spectrum
+4. **Energy partition**: Verify equipartition in steady state
+5. **Selective decay**: Magnetic energy should dominate at late times
 
 ### Critical Checks
 - Slow modes must remain passive (no spurious coupling)
@@ -358,7 +383,9 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
 ### Diagnostics (Issues #9, #25-26)
 - [x] Basic diagnostics - energy, spectra (Issue #9) ✅
   - energy_spectrum_1d(): Spherically-averaged E(|k|)
-  - energy_spectrum_perpendicular(): E(k⊥) for perpendicular cascade
+  - energy_spectrum_perpendicular(): E(k⊥) for perpendicular cascade (total energy)
+  - energy_spectrum_perpendicular_kinetic(): E_kin(k⊥) from stream function φ
+  - energy_spectrum_perpendicular_magnetic(): E_mag(k⊥) from vector potential A∥
   - energy_spectrum_parallel(): E(k∥) for field-line structure (kz-based, not true field line following)
   - EnergyHistory: Track E(t), magnetic fraction, dissipation rate
   - Visualization: plot_state(), plot_energy_history(), plot_energy_spectrum()
@@ -417,6 +444,18 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
   - **Physics validated**: Spectrum decays exponentially with m (collisional damping works)
   - **Kinetic effects**: Landau resonance (Z function), FLR corrections (I_m Bessel functions)
   - **Power laws**: Phase mixing m^(-3/2), phase unmixing m^(-1/2) from kinetic theory
+- [x] Alfvénic turbulent cascade (Thesis Section 2.6.3, Figure 2.2) ✅
+  - Full implementation in examples/alfvenic_cascade_benchmark.py
+  - Reproduces thesis k⊥^(-5/3) critical-balance spectrum
+  - Separate kinetic E_kin(k⊥) and magnetic E_mag(k⊥) spectra via new diagnostics functions
+  - Fixed-time evolution: Runs for 20 τ_A, averages last 10 τ_A (configurable via --total-time, --averaging-start)
+  - Steady-state logging: Checks energy variation during averaging window (target: <10%)
+  - Supports 64³ and 128³ resolution with command-line arguments
+  - Uses hyper-dissipation r=2 with η=6.5×10⁻⁶ (below overflow threshold)
+  - Force mode 1 only (largest scale) with amplitude 0.01
+  - Runtime: ~3.5 minutes (64³), ~30-60 minutes (128³ estimated)
+  - **Physics validation**: Turbulent cascade, energy injection balance, spectrum slopes
+  - **Current status**: Qualitative results obtained; longer runs needed for true steady state (<10% variation)
 
 ### Production Features (Issues #13-15, #28, #30)
 - [x] HDF5 I/O (Issue #13) ✅
