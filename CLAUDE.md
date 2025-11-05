@@ -193,12 +193,15 @@ Hyper-dissipation operators provide selective damping of small-scale modes while
   - Very narrow dissipation range at high-k (sharp cutoff)
   - Minimal artificial dissipation in inertial range
   - Matches original GANDALF thesis Figure 2.2
-  - Now feasible at ALL resolutions with normalized dissipation!
-- **r = 2, n = 2**: Alternative for broader dissipation range
+  - **CAVEAT**: Despite overflow safety (η·dt < 50), r=4 exhibits numerical instability
+    in forced turbulence at 64³ and 128³. Root cause under investigation (Issue #82).
+    Use r=2 for production runs until resolved.
+- **r = 2, n = 2**: **RECOMMENDED** for stable turbulence studies
   - Gentler cutoff, more forgiving to parameter tuning
-  - Good balance for typical turbulence studies
+  - Proven stable at 32³, 64³, 128³ with appropriate η
+  - Good balance between dissipation range and stability
 - **r = 1, n = 1**: Standard dissipation (reference case)
-- **r = 8**: Maximum thesis value for extremely sharp cutoff
+- **r = 8**: Maximum thesis value for extremely sharp cutoff (overflow-safe, stability TBD)
 
 **Normalized Dissipation (Matching Original GANDALF):**
 This implementation uses **normalized hyper-dissipation** matching the original GANDALF:
@@ -208,8 +211,10 @@ This implementation uses **normalized hyper-dissipation** matching the original 
 **Key advantages:**
 - **Resolution-independent constraints**: η·dt < 50 and ν·dt < 50 (independent of N, M, r, n!)
 - **Practical parameter range**: η ~ 0.5-1.0, ν ~ 0.5-1.0 (matching thesis)
-- **High-order feasible**: Can use r=4, r=8 at ANY resolution (64³, 128³, 256³)
+- **High-order overflow-safe**: r=4, r=8 satisfy overflow constraint at ANY resolution
 - **No overflow issues**: Normalized dissipation rate at k_max or M is simply the coefficient
+- **IMPORTANT**: Overflow safety ≠ numerical stability. High-order (r≥4) may require
+  additional parameter tuning or exhibit instabilities in forced turbulence (see Issue #82)
 
 **Parameter selection constraints (NORMALIZED):**
 - **Overflow safety**: `η·dt < 50` and `ν·dt < 50` (simple, resolution-independent!)

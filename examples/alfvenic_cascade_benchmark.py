@@ -60,7 +60,7 @@ from krmhd.diagnostics import (
 )
 
 
-def detect_steady_state(energy_history, window=100, threshold=0.02):
+def detect_steady_state(energy_history, window=100, threshold=0.02, n_smooth=None):
     """
     Detect if system has reached steady state (energy plateau).
 
@@ -72,6 +72,7 @@ def detect_steady_state(energy_history, window=100, threshold=0.02):
         energy_history: List of total energy values
         window: Number of recent points to check (default 100)
         threshold: Relative energy change threshold (default 2%)
+        n_smooth: Number of points to average for smoothing (default: window//10, min 5)
 
     Returns:
         True if steady state detected (energy plateau), False otherwise
@@ -80,10 +81,12 @@ def detect_steady_state(energy_history, window=100, threshold=0.02):
         return False
 
     recent = energy_history[-window:]
-    # Average over 10 points to smooth out high-frequency fluctuations
-    # while preserving low-frequency trends. This corresponds to ~0.5 τ_A
-    # for typical save_interval=10 and dt~0.005.
-    n_smooth = 10
+    # Average over n_smooth points to smooth out high-frequency fluctuations
+    # while preserving low-frequency trends. Default: use 10% of window size
+    # to adapt to different window lengths, with a minimum of 5 points.
+    if n_smooth is None:
+        n_smooth = max(5, window // 10)
+
     E_start = np.mean(recent[:n_smooth])   # Average of first n_smooth points in window
     E_end = np.mean(recent[-n_smooth:])    # Average of last n_smooth points in window
 
@@ -203,6 +206,21 @@ def main():
     print(f"Forcing: amplitude={force_amplitude}, modes {force_modes}")
     print(f"Evolution: Run for {args.total_time:.1f} τ_A total, average last {args.total_time - args.averaging_start:.1f} τ_A")
     print(f"CFL safety: {cfl_safety}")
+
+    # Diagnostic: Print normalized dissipation parameters for verification
+    # This helps debug resolution-dependent instabilities (Issue #82)
+    print(f"\n--- Normalized Hyper-Dissipation Diagnostics ---")
+    # k_perp_max is computed at 2/3 dealiasing boundary: (N-1)//3
+    idx_max_x = (Nx - 1) // 3
+    idx_max_y = (Ny - 1) // 3
+    k_perp_max_x = (2 * np.pi / Lx) * idx_max_x
+    k_perp_max_y = (2 * np.pi / Ly) * idx_max_y
+    k_perp_max = np.sqrt(k_perp_max_x**2 + k_perp_max_y**2)
+    print(f"k_perp_max (2/3 boundary): {k_perp_max:.2f} (idx={idx_max_x}, {idx_max_y})")
+    print(f"Dissipation rate at k_max: η·dt = {eta * 0.005:.4f} (constraint: < 50)")
+    print(f"Collision rate at M={10}: ν·dt = {nu * 0.005:.4f} (constraint: < 50)")
+    print(f"Normalized exp(-η·1^{hyper_r}·dt) = {np.exp(-eta * 0.005):.6f} (at k_max)")
+    print(f"------------------------------------------------")
 
     if args.resolution == 32:
         print(f"\nEstimated runtime: ~2-5 minutes")
