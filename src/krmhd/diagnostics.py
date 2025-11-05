@@ -313,6 +313,9 @@ def energy_spectrum_perpendicular(
         - k_perp_bins: Array of k⊥ values [n_bins]
         - E_perp: Energy per k⊥ bin [n_bins]
 
+    Raises:
+        ValueError: If n_bins < 2 (would create degenerate bins with zero spacing)
+
     Algorithm:
         1. Compute k⊥ = √(kx² + ky²) for each mode
         2. Bin modes by k⊥
@@ -346,6 +349,10 @@ def energy_spectrum_perpendicular(
     grid = state.grid
     if n_bins is None:
         n_bins = grid.Nx // 2
+
+    # Validate n_bins to prevent degenerate bin spacing (dk_perp = 0)
+    if n_bins < 2:
+        raise ValueError(f"n_bins must be >= 2 to create valid bins, got {n_bins}")
 
     return _compute_energy_spectrum_perpendicular_jit(
         state.z_plus,
@@ -448,6 +455,9 @@ def energy_spectrum_perpendicular_kinetic(
         - k_perp_bins: Array of k⊥ values [n_bins]
         - E_kin_perp: Kinetic energy per k⊥ bin [n_bins]
 
+    Raises:
+        ValueError: If n_bins < 2 (would create degenerate bins with zero spacing)
+
     Physics:
         E_kin(k⊥) = (1/2) ∫ k⊥²|φ(k⊥, k∥)|² dk∥
 
@@ -468,6 +478,10 @@ def energy_spectrum_perpendicular_kinetic(
     grid = state.grid
     if n_bins is None:
         n_bins = grid.Nx // 2
+
+    # Validate n_bins to prevent degenerate bin spacing (dk_perp = 0)
+    if n_bins < 2:
+        raise ValueError(f"n_bins must be >= 2 to create valid bins, got {n_bins}")
 
     return _compute_energy_spectrum_perpendicular_kinetic_jit(
         state.z_plus,
@@ -571,6 +585,9 @@ def energy_spectrum_perpendicular_magnetic(
         - k_perp_bins: Array of k⊥ values [n_bins]
         - E_mag_perp: Magnetic energy per k⊥ bin [n_bins]
 
+    Raises:
+        ValueError: If n_bins < 2 (would create degenerate bins with zero spacing)
+
     Physics:
         E_mag(k⊥) = (1/2) ∫ k⊥²|A∥(k⊥, k∥)|² dk∥
 
@@ -592,6 +609,10 @@ def energy_spectrum_perpendicular_magnetic(
     grid = state.grid
     if n_bins is None:
         n_bins = grid.Nx // 2
+
+    # Validate n_bins to prevent degenerate bin spacing (dk_perp = 0)
+    if n_bins < 2:
+        raise ValueError(f"n_bins must be >= 2 to create valid bins, got {n_bins}")
 
     return _compute_energy_spectrum_perpendicular_magnetic_jit(
         state.z_plus,

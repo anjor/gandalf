@@ -181,6 +181,16 @@ def main():
     steady_state_window = 100
     steady_state_threshold = 0.02  # 2% relative change
 
+    # Warn user if runtime may be insufficient for steady state
+    if args.total_time < 50.0:
+        print("\n" + "!" * 70)
+        print("⚠️  WARNING: Runtime may be insufficient for true steady state!")
+        print(f"    Current: {args.total_time} τ_A")
+        print("    Recommended: ≥50 τ_A (or ≥100 τ_A for publication quality)")
+        print("    Use --total-time 100 for reliable results")
+        print("    Monitor 'Steady-state check' output during run (target: ΔE/⟨E⟩ < 2%)")
+        print("!" * 70)
+
     print(f"\nGrid: {Nx} × {Ny} × {Nz}")
     print(f"Domain: [{Lx:.1f}, {Ly:.1f}, {Lz:.1f}]")
     print(f"Physics: v_A={v_A}, η={eta:.1e}, ν={nu:.1e}")
