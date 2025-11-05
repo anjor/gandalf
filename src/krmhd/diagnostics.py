@@ -141,10 +141,12 @@ def _compute_energy_spectrum_1d_jit(
     energy_flat = energy_density.flatten()
     E_k = segment_sum(energy_flat, k_indices, num_segments=n_bins)
 
-    # Normalize
-    N_total = Nx * Ny * Nz
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
     dk = jnp.maximum(k_bins[1] - k_bins[0], 1e-10)
-    E_k = E_k / (N_total * dk)
+    E_k = E_k / (N_perp * dk)
 
     return k_centers, E_k
 
@@ -278,10 +280,12 @@ def _compute_energy_spectrum_perpendicular_jit(
     energy_flat = energy_density.flatten()
     E_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
 
-    # Normalize
-    N_total = Nx * Ny * Nz
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
     dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
-    E_perp = E_perp / (N_total * dk_perp)
+    E_perp = E_perp / (N_perp * dk_perp)
 
     return k_perp_centers, E_perp
 
@@ -415,10 +419,12 @@ def _compute_energy_spectrum_perpendicular_kinetic_jit(
     energy_flat = energy_density.flatten()
     E_kin_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
 
-    # Normalize
-    N_total = Nx * Ny * Nz
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
     dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
-    E_kin_perp = E_kin_perp / (N_total * dk_perp)
+    E_kin_perp = E_kin_perp / (N_perp * dk_perp)
 
     return k_perp_centers, E_kin_perp
 
@@ -535,10 +541,12 @@ def _compute_energy_spectrum_perpendicular_magnetic_jit(
     energy_flat = energy_density.flatten()
     E_mag_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
 
-    # Normalize
-    N_total = Nx * Ny * Nz
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
     dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
-    E_mag_perp = E_mag_perp / (N_total * dk_perp)
+    E_mag_perp = E_mag_perp / (N_perp * dk_perp)
 
     return k_perp_centers, E_mag_perp
 

@@ -4,22 +4,30 @@ Alfvénic Turbulent Cascade Benchmark (Thesis Section 2.6.3, Figure 2.2)
 
 Reproduces the thesis benchmark showing k⊥^(-5/3) critical-balance spectrum
 for kinetic and magnetic energy. Runs to steady state and time-averages
-spectra over 2 Alfvén times.
+spectra over the final window.
 
 Thesis parameters:
 - Resolutions: 64³ and 128³
 - Hyper-diffusion: r=4 and r=8 (thesis)
 - This implementation:
   - 32³: r=4 (k⊥⁸ damping, matches thesis)
-  - 64³: r=2 (r=4 causes numerical overflow)
-  - 128³: r=2 (r=4 definitely overflows)
+  - 64³: r=2 (r=4 yields instability despite no overflow: η·dt=0.1<<50)
+  - 128³: r=2 (r=4 also unstable, not overflow-limited)
 - Run to saturation (steady state)
-- Time-averaged spectra over 2 τ_A
+- Time-averaged spectra over final window (default: 10-20 τ_A)
 
 Expected runtime:
 - 32³:  ~2-5 minutes
 - 64³:  ~5-10 minutes
 - 128³: ~30-60 minutes
+
+Steady-State Considerations:
+- True steady state requires energy injection = dissipation (plateau in E(t))
+- Current default runtime (20 τ_A) may NOT achieve full steady state
+- Energy may grow slowly during averaging window (biased spectra possible)
+- For reliable results: increase --total-time to 50-100 τ_A until energy plateaus
+- Check "Steady-state check" output during run: target ΔE/⟨E⟩ < 2%
+- Alternatively, use larger averaging window (e.g., --averaging-start 30, --total-time 50)
 """
 
 import argparse
@@ -67,8 +75,12 @@ def detect_steady_state(energy_history, window=100, threshold=0.02):
         return False
 
     recent = energy_history[-window:]
-    E_start = np.mean(recent[:10])  # Average of first 10 points in window
-    E_end = np.mean(recent[-10:])   # Average of last 10 points in window
+    # Average over 10 points to smooth out high-frequency fluctuations
+    # while preserving low-frequency trends. This corresponds to ~0.5 τ_A
+    # for typical save_interval=10 and dt~0.005.
+    n_smooth = 10
+    E_start = np.mean(recent[:n_smooth])   # Average of first n_smooth points in window
+    E_end = np.mean(recent[-n_smooth:])    # Average of last n_smooth points in window
 
     if E_start == 0:
         return False
@@ -89,6 +101,8 @@ def main():
                         help='Total simulation time in Alfvén times (default: 20)')
     parser.add_argument('--averaging-start', type=float, default=10.0,
                         help='When to start averaging in Alfvén times (default: 10)')
+    parser.add_argument('--output-dir', type=str, default='examples/output',
+                        help='Output directory for plots (default: examples/output)')
     args = parser.parse_args()
 
     print("=" * 70)
@@ -113,7 +127,13 @@ def main():
         hyper_r = 2       # Practical choice: stable with clean inertial range
         hyper_n = 2
     elif args.resolution == 64:
-        eta = 20.0        # Extremely strong dissipation for stability
+        # ANOMALY: 64³ requires 10× stronger dissipation than expected
+        # Expected η ~ 1.5 (scaling from 32³), but needs η = 20.0 for stability
+        # Root cause unclear - may be specific wavenumber resonance or
+        # critical balance violation at this intermediate resolution.
+        # See PR #81 for full parameter search history (7 failed attempts).
+        # TODO: Investigate why 64³ is anomalously unstable
+        eta = 20.0        # Anomalously strong dissipation required for stability
         nu = 1.0          # Doesn't matter (Hermite moments not evolved)
         hyper_r = 2       # Stable and practical for turbulence studies
         hyper_n = 2
@@ -407,8 +427,9 @@ def main():
     print("\n" + "-" * 70)
     print("Creating visualizations...")
 
-    output_dir = Path("examples/output")
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output directory: {output_dir}")
 
     # Convert k⊥ to mode numbers: n = k⊥ L / (2π)
     n_perp = k_perp * Lx / (2 * np.pi)
