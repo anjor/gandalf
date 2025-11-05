@@ -14,20 +14,19 @@ Thesis parameters:
   - 64³: r=2 (r=4 yields instability despite no overflow: η·dt=0.1<<50)
   - 128³: r=2 (r=4 also unstable, not overflow-limited)
 - Run to saturation (steady state)
-- Time-averaged spectra over final window (default: 10-20 τ_A)
+- Time-averaged spectra over final window (default: 30-50 τ_A)
 
-Expected runtime:
-- 32³:  ~2-5 minutes
-- 64³:  ~5-10 minutes
-- 128³: ~30-60 minutes
+Expected runtime (default 50 τ_A):
+- 32³:  ~5-10 minutes
+- 64³:  ~15-25 minutes
+- 128³: ~1-2 hours
 
 Steady-State Considerations:
 - True steady state requires energy injection = dissipation (plateau in E(t))
-- Current default runtime (20 τ_A) may NOT achieve full steady state
-- Energy may grow slowly during averaging window (biased spectra possible)
-- For reliable results: increase --total-time to 50-100 τ_A until energy plateaus
+- Default runtime (50 τ_A) should achieve steady state for 32³ and 64³
+- For 128³ or publication quality: use --total-time 100 for cleaner results
 - Check "Steady-state check" output during run: target ΔE/⟨E⟩ < 2%
-- Alternatively, use larger averaging window (e.g., --averaging-start 30, --total-time 50)
+- Averaging over final 20 τ_A (30-50) provides better statistics than shorter windows
 """
 
 import argparse
@@ -97,10 +96,10 @@ def main():
     parser = argparse.ArgumentParser(description='Alfvénic Turbulent Cascade Benchmark')
     parser.add_argument('--resolution', type=int, default=64, choices=[32, 64, 128],
                         help='Grid resolution (32, 64, or 128)')
-    parser.add_argument('--total-time', type=float, default=20.0,
-                        help='Total simulation time in Alfvén times (default: 20)')
-    parser.add_argument('--averaging-start', type=float, default=10.0,
-                        help='When to start averaging in Alfvén times (default: 10)')
+    parser.add_argument('--total-time', type=float, default=50.0,
+                        help='Total simulation time in Alfvén times (default: 50)')
+    parser.add_argument('--averaging-start', type=float, default=30.0,
+                        help='When to start averaging in Alfvén times (default: 30)')
     parser.add_argument('--output-dir', type=str, default='examples/output',
                         help='Output directory for plots (default: examples/output)')
     args = parser.parse_args()
@@ -182,12 +181,12 @@ def main():
     steady_state_threshold = 0.02  # 2% relative change
 
     # Warn user if runtime may be insufficient for steady state
-    if args.total_time < 50.0:
+    if args.total_time < 30.0:
         print("\n" + "!" * 70)
         print("⚠️  WARNING: Runtime may be insufficient for true steady state!")
         print(f"    Current: {args.total_time} τ_A")
-        print("    Recommended: ≥50 τ_A (or ≥100 τ_A for publication quality)")
-        print("    Use --total-time 100 for reliable results")
+        print("    Recommended: ≥50 τ_A (default) or ≥100 τ_A for publication quality")
+        print("    Use --total-time 50 or higher for reliable results")
         print("    Monitor 'Steady-state check' output during run (target: ΔE/⟨E⟩ < 2%)")
         print("!" * 70)
 

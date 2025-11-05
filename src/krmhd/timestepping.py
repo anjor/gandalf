@@ -441,6 +441,7 @@ def _gandalf_step_jit(
     # This makes the overflow constraint resolution-independent: η·dt < 50 (not η·k_max^(2r)·dt!)
     # Standard (r=1): ξ± → ξ± * exp(-η (k⊥²/k⊥²_max) Δt)
     # Hyper (r>1): ξ± → ξ± * exp(-η (k⊥²/k⊥²_max)^r Δt)
+    # Note: Overflow validation is performed in gandalf_step() wrapper before JIT compilation
     k_perp_2r_normalized = (k_perp_squared / k_perp_max_squared) ** hyper_r
     perp_dissipation_factor = jnp.exp(-eta * k_perp_2r_normalized * dt)
     z_plus_new = z_plus_new * perp_dissipation_factor
@@ -465,6 +466,7 @@ def _gandalf_step_jit(
     #   Standard (n=1): g_m → g_m * exp(-ν·(m/M)·δt)
     #   Hyper (n>1):    g_m → g_m * exp(-ν·(m/M)^(2n)·δt)
     # Conservation: m=0 (particle number) and m=1 (momentum) are exempt from collisions
+    # Note: Overflow validation is performed in gandalf_step() wrapper before JIT compilation
     moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
     # For hyper-collisions: normalized by M to match original GANDALF
     collision_damping_rate = nu * ((moment_indices / M) ** (2 * hyper_n))
