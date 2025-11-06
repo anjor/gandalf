@@ -207,7 +207,7 @@ def main():
     print(f"Evolution: Run for {args.total_time:.1f} τ_A total, average last {args.total_time - args.averaging_start:.1f} τ_A")
     print(f"CFL safety: {cfl_safety}")
 
-    # Diagnostic: Print normalized dissipation parameters for verification
+    # Diagnostic: Print k_perp_max (dt-dependent diagnostics moved below)
     # This helps debug resolution-dependent instabilities (Issue #82)
     print(f"\n--- Normalized Hyper-Dissipation Diagnostics ---")
     # k_perp_max is computed at 2/3 dealiasing boundary: (N-1)//3
@@ -217,10 +217,6 @@ def main():
     k_perp_max_y = (2 * np.pi / Ly) * idx_max_y
     k_perp_max = np.sqrt(k_perp_max_x**2 + k_perp_max_y**2)
     print(f"k_perp_max (2/3 boundary): {k_perp_max:.2f} (idx={idx_max_x}, {idx_max_y})")
-    print(f"Dissipation rate at k_max: η·dt = {eta * 0.005:.4f} (constraint: < 50)")
-    print(f"Collision rate at M={10}: ν·dt = {nu * 0.005:.4f} (constraint: < 50)")
-    print(f"Normalized exp(-η·1^{hyper_r}·dt) = {np.exp(-eta * 0.005):.6f} (at k_max)")
-    print(f"------------------------------------------------")
 
     if args.resolution == 32:
         print(f"\nEstimated runtime: ~2-5 minutes")
@@ -271,6 +267,12 @@ def main():
     print(f"  Total runtime: {total_time:.1f} time units = {int(total_time/dt)} timesteps")
     print(f"  Averaging starts at: {averaging_start:.1f} time units ({args.averaging_start:.1f} τ_A)")
     print(f"  Averaging duration: {total_time - averaging_start:.1f} time units ({args.total_time - args.averaging_start:.1f} τ_A)")
+
+    # Print dt-dependent dissipation diagnostics (now that dt is computed)
+    print(f"\n  Dissipation rate at k_max: η·dt = {eta * dt:.4f} (constraint: < 50)")
+    print(f"  Collision rate at M={M}: ν·dt = {nu * dt:.4f} (constraint: < 50)")
+    print(f"  Normalized damping factor: exp(-η·1^{hyper_r}·dt) = {np.exp(-eta * dt):.6f} (at k_max)")
+    print(f"  ------------------------------------------------")
 
     # ==========================================================================
     # Time Evolution with Forcing
@@ -339,6 +341,13 @@ def main():
 
             # Print progress
             if step % 50 == 0:
+                # Check for NaN/Inf (robustness check)
+                if not np.isfinite(E_total):
+                    print(f"\n  ERROR: NaN/Inf detected at step {step}, t={state.time:.2f} τ_A")
+                    print(f"         E_total = {E_total}, E_kin = {E_kin}, E_mag = {E_mag}")
+                    print(f"         Terminating evolution early.")
+                    break
+
                 mag_frac = E_mag / E_total if E_total > 0 else 0
                 avg_inj = np.mean(injection_rates[-50:]) if len(injection_rates) >= 50 else 0
                 phase = "[AVERAGING]" if averaging_started else "[SPIN-UP]"
@@ -441,10 +450,12 @@ def main():
         E_kin_fit = E_kin_avg[mask]
         E_mag_fit = E_mag_avg[mask]
 
-        # Log-log linear fit
+        # Log-log linear fit (use relative floor for numerical stability)
         log_k = np.log10(k_fit)
-        log_E_kin = np.log10(E_kin_fit + 1e-20)
-        log_E_mag = np.log10(E_mag_fit + 1e-20)
+        floor_kin = 1e-12 * np.max(E_kin_fit)
+        floor_mag = 1e-12 * np.max(E_mag_fit)
+        log_E_kin = np.log10(np.maximum(E_kin_fit, floor_kin))
+        log_E_mag = np.log10(np.maximum(E_mag_fit, floor_mag))
 
         slope_kin = np.polyfit(log_k, log_E_kin, 1)[0]
         slope_mag = np.polyfit(log_k, log_E_mag, 1)[0]
