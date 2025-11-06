@@ -62,7 +62,11 @@ from krmhd.diagnostics import (
 
 def detect_steady_state(energy_history, window=100, threshold=0.02, n_smooth=None):
     """
-    Detect if system has reached steady state (energy plateau).
+    Detect if system has reached steady state (energy plateau) - DIAGNOSTIC ONLY.
+
+    This function is used for logging/monitoring purposes only and does NOT
+    control simulation runtime. The simulation always runs for the fixed
+    total_time specified by the user, regardless of steady-state status.
 
     Checks if energy has stopped growing by looking at the trend over
     a long window. True steady state requires energy to plateau, not
@@ -76,6 +80,11 @@ def detect_steady_state(energy_history, window=100, threshold=0.02, n_smooth=Non
 
     Returns:
         True if steady state detected (energy plateau), False otherwise
+
+    Note:
+        This is used only for informational logging during the run. To ensure
+        steady state is achieved, users should increase --total-time or monitor
+        the ΔE/⟨E⟩ values printed during averaging.
     """
     if len(energy_history) < window:
         return False

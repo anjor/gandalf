@@ -453,14 +453,14 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
   - Full implementation in examples/alfvenic_cascade_benchmark.py
   - Reproduces thesis k⊥^(-5/3) critical-balance spectrum
   - Separate kinetic E_kin(k⊥) and magnetic E_mag(k⊥) spectra via new diagnostics functions
-  - Fixed-time evolution: Runs for 20 τ_A, averages last 10 τ_A (configurable via --total-time, --averaging-start)
-  - Steady-state logging: Checks energy variation during averaging window (target: <10%)
-  - Supports 64³ and 128³ resolution with command-line arguments
-  - Uses hyper-dissipation r=2 with η=6.5×10⁻⁶ (below overflow threshold)
-  - Force mode 1 only (largest scale) with amplitude 0.01
-  - Runtime: ~3.5 minutes (64³), ~30-60 minutes (128³ estimated)
+  - Fixed-time evolution: Runs for 50 τ_A, averages last 20 τ_A (30-50) (configurable via --total-time, --averaging-start)
+  - Steady-state detection: Logs energy variation during averaging window (target: <2% ideal, <10% acceptable) - diagnostic only, does not control runtime
+  - Supports 32³, 64³, and 128³ resolution with command-line arguments
+  - Resolution-dependent parameters: 32³ (η=1.0), 64³ (η=20.0, anomalous, see Issue #82), 128³ (η=2.0), all with r=2
+  - Force modes 1-2 (largest scales) with resolution-dependent amplitude (64³: 0.01, others: 0.05)
+  - Runtime: ~5-10 min (32³), ~15-25 min (64³), ~1-2 hours (128³ estimated)
   - **Physics validation**: Turbulent cascade, energy injection balance, spectrum slopes
-  - **Current status**: Qualitative results obtained; longer runs needed for true steady state (<10% variation)
+  - **Current status**: Achieves k⊥^(-5/3) scaling with true steady state at 64³ (ΔE/⟨E⟩ < 10%)
 
 ### Production Features (Issues #13-15, #28, #30)
 - [x] HDF5 I/O (Issue #13) ✅
