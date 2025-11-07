@@ -82,6 +82,9 @@ FIELD_LINE_SAFETY_FACTOR = 10
 
 
 @partial(jax.jit, static_argnames=('n_bins',))
+# Note: With KRMHDState registered as a pytree, grid dimensions (Nx, Ny, Nz)
+# are automatically inferred from aux_data during tracing. Only n_bins needs to
+# be explicitly marked as static since it affects array shapes.
 def energy_spectrum_1d(
     state: KRMHDState,
     n_bins: Optional[int] = None,
