@@ -177,10 +177,12 @@ def energy_spectrum_1d(
     energy_flat = energy_density.flatten()
     E_k = segment_sum(energy_flat, k_indices, num_segments=n_bins)
 
-    # Normalize
-    N_total = Nx * Ny * Nz
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
     dk = jnp.maximum(k_bins[1] - k_bins[0], 1e-10)
-    E_k = E_k / (N_total * dk)
+    E_k = E_k / (N_perp * dk)
 
     return k_centers, E_k
 
@@ -271,17 +273,22 @@ def energy_spectrum_perpendicular(
     k_perp_max = jnp.sqrt(kx[-1]**2 + ky[Ny//2]**2)
     k_perp_bins = jnp.linspace(0, k_perp_max, n_bins + 1)
     k_perp_centers = 0.5 * (k_perp_bins[:-1] + k_perp_bins[1:])
-    
+
+    # Broadcast k_perp to full 3D shape to match energy_density
+    k_perp = jnp.broadcast_to(k_perp, (Nz, Ny, Nx//2+1))
+
     # Bin and sum energy
     k_perp_indices = jnp.digitize(k_perp.flatten(), k_perp_bins) - 1
     k_perp_indices = jnp.clip(k_perp_indices, 0, n_bins - 1)
     energy_flat = energy_density.flatten()
     E_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
-    
-    # Normalize
-    N_total = Nx * Ny * Nz
+
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
     dk = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
-    E_perp = E_perp / (N_total * dk)
+    E_perp = E_perp / (N_perp * dk)
     
     return k_perp_centers, E_perp
 
