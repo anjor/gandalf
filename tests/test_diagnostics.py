@@ -415,6 +415,58 @@ class TestAlfvenicEquipartition:
         assert max_rel_error < 0.01, \
             f"E_kin + E_mag != E_total: max relative error = {max_rel_error:.2%}"
 
+    def test_kinetic_magnetic_decomposition(self):
+        """Test that kinetic and magnetic functions compute DIFFERENT energies.
+
+        This validates that:
+        1. energy_spectrum_perpendicular_kinetic uses φ = (z⁺ + z⁻)/2
+        2. energy_spectrum_perpendicular_magnetic uses A∥ = (z⁺ - z⁻)/2
+        3. For non-equipartition states, E_kin ≠ E_mag
+
+        Note: For Alfvén waves, E_kin = E_mag by physics (equipartition),
+        but the functions are computing different quantities that happen to
+        have equal magnitudes.
+        """
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+
+        # Test 1: Kinetic-only state (z⁺ = z⁻ → φ ≠ 0, A∥ = 0)
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        z_plus = z_plus.at[1, 0, 1].set(0.1 + 0.1j)
+        z_minus = z_plus  # Same sign → A∥ = 0
+
+        state_kin = KRMHDState(
+            grid=grid, z_plus=z_plus, z_minus=z_minus,
+            B_parallel=jnp.zeros_like(z_plus),
+            g=jnp.zeros((10, grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
+            M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0, time=0.0,
+        )
+
+        k_kin, E_kin = energy_spectrum_perpendicular_kinetic(state_kin, n_bins=32)
+        k_mag, E_mag = energy_spectrum_perpendicular_magnetic(state_kin, n_bins=32)
+
+        # Should have kinetic energy but no magnetic energy
+        assert jnp.sum(E_kin) > 1e-10, "Kinetic energy should be nonzero"
+        assert jnp.sum(E_mag) < 1e-10, "Magnetic energy should be zero"
+
+        # Test 2: Magnetic-only state (z⁺ = -z⁻ → φ = 0, A∥ ≠ 0)
+        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex)
+        z_plus = z_plus.at[1, 0, 1].set(0.1 + 0.1j)
+        z_minus = -z_plus  # Opposite sign → φ = 0
+
+        state_mag = KRMHDState(
+            grid=grid, z_plus=z_plus, z_minus=z_minus,
+            B_parallel=jnp.zeros_like(z_plus),
+            g=jnp.zeros((10, grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
+            M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0, time=0.0,
+        )
+
+        k_kin, E_kin = energy_spectrum_perpendicular_kinetic(state_mag, n_bins=32)
+        k_mag, E_mag = energy_spectrum_perpendicular_magnetic(state_mag, n_bins=32)
+
+        # Should have magnetic energy but no kinetic energy
+        assert jnp.sum(E_kin) < 1e-10, "Kinetic energy should be zero"
+        assert jnp.sum(E_mag) > 1e-10, "Magnetic energy should be nonzero"
+
 
 class TestEnergySpectrumParallel:
     """Test parallel energy spectrum E(k∥)."""

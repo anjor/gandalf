@@ -81,34 +81,73 @@ FIELD_LINE_SAFETY_FACTOR = 10
 # =============================================================================
 
 
-@partial(jax.jit, static_argnames=('n_bins', 'Nx', 'Ny', 'Nz'))
-def _compute_energy_spectrum_1d_jit(
-    z_plus: Array,
-    z_minus: Array,
-    kx: Array,
-    ky: Array,
-    kz: Array,
-    Nx: int,
-    Ny: int,
-    Nz: int,
-    n_bins: int,
+@partial(jax.jit, static_argnames=('n_bins',))
+# Note: With KRMHDState registered as a pytree, grid dimensions (Nx, Ny, Nz)
+# are automatically inferred from aux_data during tracing. Only n_bins needs to
+# be explicitly marked as static since it affects array shapes.
+def energy_spectrum_1d(
+    state: KRMHDState,
+    n_bins: Optional[int] = None,
 ) -> Tuple[Array, Array]:
     """
-    JIT-compiled helper for 1D energy spectrum computation.
+    Compute 1D spherically-averaged energy spectrum E(k) vs |k|.
 
-    This function extracts the core computation logic from energy_spectrum_1d()
-    to enable JIT compilation. Takes raw arrays instead of KRMHDState.
+    Shell-averages energy over all wavenumbers with the same magnitude
+    |k| = √(kx² + ky² + kz²). Useful for isotropic turbulence analysis.
+
+    Now JIT-compiled directly thanks to KRMHDState pytree registration!
 
     Args:
-        z_plus: Elsasser z+ field in Fourier space [Nz, Ny, Nx//2+1]
-        z_minus: Elsasser z- field in Fourier space [Nz, Ny, Nx//2+1]
-        kx, ky, kz: Wavenumber arrays
-        Nx, Ny, Nz: Grid dimensions
-        n_bins: Number of spectral bins
+        state: KRMHD state containing z_plus, z_minus fields
+        n_bins: Number of radial bins for spectrum (default: Nx//2)
 
     Returns:
-        Tuple of (k_centers, E_k) arrays
+        Tuple of (k_bins, E_k) where:
+        - k_bins: Array of wavenumber magnitudes [n_bins]
+        - E_k: Energy per wavenumber bin [n_bins]
+
+    Algorithm:
+        1. Compute |k| for each Fourier mode
+        2. Bin modes by |k| into shells
+        3. Sum energy in each shell (vectorized with segment_sum)
+        4. Normalize by bin width and account for rfft doubling
+
+    Properties:
+        - Integral ∑E(k)Δk ≈ E_total (Parseval's theorem)
+        - E(k) ≥ 0 (energy is non-negative)
+        - E(k → ∞) → 0 (energy concentrated at low k)
+
+    Example:
+        >>> k, E_k = energy_spectrum_1d(state)
+        >>> # Plot on log-log scale
+        >>> plt.loglog(k, E_k)
+        >>> plt.loglog(k, k**(-5/3), 'k--', label='k^(-5/3)')
+        >>> plt.xlabel('|k|')
+        >>> plt.ylabel('E(k)')
+        >>> plt.legend()
+
+    Physics:
+        For isotropic turbulence, E(k) represents the kinetic + magnetic
+        energy per unit wavenumber in a spherical shell of radius k.
+        The Kolmogorov spectrum E(k) ∝ k^(-5/3) appears in 3D turbulence.
+
+    Performance:
+        JIT-compiled with KRMHDState as pytree (eliminates wrapper overhead).
+        Segment_sum provides 10-100× speedup vs Python loops.
     """
+    # Extract grid info (static arguments inferred from state structure)
+    grid = state.grid
+    if n_bins is None:
+        n_bins = grid.Nx // 2
+
+    # Extract fields and grid arrays
+    z_plus = state.z_plus
+    z_minus = state.z_minus
+    kx = grid.kx
+    ky = grid.ky
+    kz = grid.kz
+    Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
+
     # Create 3D wavenumber arrays
     kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # Shape: [1, 1, Nx//2+1]
     ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # Shape: [1, Ny, 1]
@@ -151,145 +190,7 @@ def _compute_energy_spectrum_1d_jit(
     return k_centers, E_k
 
 
-def energy_spectrum_1d(
-    state: KRMHDState,
-    n_bins: Optional[int] = None,
-) -> Tuple[Array, Array]:
-    """
-    Compute 1D spherically-averaged energy spectrum E(k) vs |k|.
-
-    Shell-averages energy over all wavenumbers with the same magnitude
-    |k| = √(kx² + ky² + kz²). Useful for isotropic turbulence analysis.
-
-    This function is a thin wrapper around the JIT-compiled helper
-    _compute_energy_spectrum_1d_jit() to enable efficient computation
-    while accepting a KRMHDState Pydantic model.
-
-    Args:
-        state: KRMHD state containing z_plus, z_minus fields
-        n_bins: Number of radial bins for spectrum (default: Nx//2)
-
-    Returns:
-        Tuple of (k_bins, E_k) where:
-        - k_bins: Array of wavenumber magnitudes [n_bins]
-        - E_k: Energy per wavenumber bin [n_bins]
-
-    Algorithm:
-        1. Compute |k| for each Fourier mode
-        2. Bin modes by |k| into shells
-        3. Sum energy in each shell (vectorized with segment_sum)
-        4. Normalize by bin width and account for rfft doubling
-
-    Properties:
-        - Integral ∑E(k)Δk ≈ E_total (Parseval's theorem)
-        - E(k) ≥ 0 (energy is non-negative)
-        - E(k → ∞) → 0 (energy concentrated at low k)
-
-    Example:
-        >>> k, E_k = energy_spectrum_1d(state)
-        >>> # Plot on log-log scale
-        >>> plt.loglog(k, E_k)
-        >>> plt.loglog(k, k**(-5/3), 'k--', label='k^(-5/3)')
-        >>> plt.xlabel('|k|')
-        >>> plt.ylabel('E(k)')
-        >>> plt.legend()
-
-    Physics:
-        For isotropic turbulence, E(k) represents the kinetic + magnetic
-        energy per unit wavenumber in a spherical shell of radius k.
-        The Kolmogorov spectrum E(k) ∝ k^(-5/3) appears in 3D turbulence.
-
-    Performance:
-        Core computation is JIT-compiled for ~2-5× speedup compared to
-        non-JIT version. Segment_sum provides 10-100× speedup vs Python loops.
-    """
-    grid = state.grid
-    if n_bins is None:
-        n_bins = grid.Nx // 2
-
-    return _compute_energy_spectrum_1d_jit(
-        state.z_plus,
-        state.z_minus,
-        grid.kx,
-        grid.ky,
-        grid.kz,
-        grid.Nx,
-        grid.Ny,
-        grid.Nz,
-        n_bins,
-    )
-
-
-@partial(jax.jit, static_argnames=('n_bins', 'Nx', 'Ny', 'Nz'))
-def _compute_energy_spectrum_perpendicular_jit(
-    z_plus: Array,
-    z_minus: Array,
-    kx: Array,
-    ky: Array,
-    kz: Array,
-    Nx: int,
-    Ny: int,
-    Nz: int,
-    n_bins: int,
-) -> Tuple[Array, Array]:
-    """
-    JIT-compiled helper for perpendicular energy spectrum computation.
-
-    This function extracts the core computation logic from energy_spectrum_perpendicular()
-    to enable JIT compilation. Takes raw arrays instead of KRMHDState.
-
-    Args:
-        z_plus: Elsasser z+ field in Fourier space [Nz, Ny, Nx//2+1]
-        z_minus: Elsasser z- field in Fourier space [Nz, Ny, Nx//2+1]
-        kx, ky, kz: Wavenumber arrays
-        Nx, Ny, Nz: Grid dimensions
-        n_bins: Number of spectral bins
-
-    Returns:
-        Tuple of (k_perp_centers, E_perp) arrays
-    """
-    # Create 3D wavenumber arrays
-    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # Shape: [1, 1, Nx//2+1]
-    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # Shape: [1, Ny, 1]
-    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
-
-    # Compute perpendicular wavenumber k⊥ (broadcast to full 3D shape)
-    k_perp_squared = kx_3d**2 + ky_3d**2 + 0*kz_3d
-    k_perp = jnp.sqrt(k_perp_squared)
-
-    # Compute energy density (perpendicular derivatives only for RMHD)
-    phi = (z_plus + z_minus) / 2.0
-    A_parallel = (z_plus - z_minus) / 2.0
-    energy_density = 0.5 * k_perp_squared * (jnp.abs(phi)**2 + jnp.abs(A_parallel)**2)
-
-    # Handle rfft doubling for reality condition
-    kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
-    kx_middle = ~(kx_zero | kx_nyquist)
-    doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
-    energy_density = energy_density * doubling_factor
-
-    # Create bins for k⊥
-    k_perp_max = jnp.sqrt(kx[-1]**2 + ky[Ny//2]**2)
-    k_perp_bins = jnp.linspace(0, k_perp_max, n_bins + 1)
-    k_perp_centers = 0.5 * (k_perp_bins[:-1] + k_perp_bins[1:])
-
-    # Bin and sum energy using segment_sum
-    k_perp_indices = jnp.digitize(k_perp.flatten(), k_perp_bins) - 1
-    k_perp_indices = jnp.clip(k_perp_indices, 0, n_bins - 1)
-    energy_flat = energy_density.flatten()
-    E_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
-
-    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
-    # The energy() function normalizes by N_perp when computing perpendicular energies
-    # because it sums over all z-planes. We do the same here.
-    N_perp = Nx * Ny
-    dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
-    E_perp = E_perp / (N_perp * dk_perp)
-
-    return k_perp_centers, E_perp
-
-
+@partial(jax.jit, static_argnames=('n_bins',))
 def energy_spectrum_perpendicular(
     state: KRMHDState,
     n_bins: Optional[int] = None,
@@ -297,12 +198,15 @@ def energy_spectrum_perpendicular(
     """
     Compute perpendicular energy spectrum E(k⊥) vs k⊥ = √(kx² + ky²).
 
-    Sums energy over all parallel (k∥ = kz) modes for each k⊥. This is the
-    critical diagnostic for RMHD, where perpendicular cascade dominates.
+    Sums **total energy** (kinetic + magnetic) over all parallel (k∥ = kz) modes
+    for each k⊥. This is the critical diagnostic for RMHD, where perpendicular
+    cascade dominates.
 
-    This function is a thin wrapper around the JIT-compiled helper
-    _compute_energy_spectrum_perpendicular_jit() to enable efficient computation
-    while accepting a KRMHDState Pydantic model.
+    **Note:** This computes E_total(k⊥) = E_kin(k⊥) + E_mag(k⊥). For separate
+    kinetic and magnetic contributions, use `energy_spectrum_perpendicular_kinetic()`
+    and `energy_spectrum_perpendicular_magnetic()`.
+
+    Now JIT-compiled directly thanks to KRMHDState pytree registration!
 
     Args:
         state: KRMHD state containing z_plus, z_minus fields
@@ -313,9 +217,6 @@ def energy_spectrum_perpendicular(
         - k_perp_bins: Array of k⊥ values [n_bins]
         - E_perp: Energy per k⊥ bin [n_bins]
 
-    Raises:
-        ValueError: If n_bins < 2 (would create degenerate bins with zero spacing)
-
     Algorithm:
         1. Compute k⊥ = √(kx² + ky²) for each mode
         2. Bin modes by k⊥
@@ -325,26 +226,21 @@ def energy_spectrum_perpendicular(
     Properties:
         - Integral ∑E(k⊥)Δk⊥ ≈ E_total
         - E(k⊥) shows perpendicular cascade rate
-        - Typically steeper than 1D spectrum due to anisotropy
+        - Typically steeper than E(k) for anisotropic turbulence
 
     Example:
         >>> k_perp, E_perp = energy_spectrum_perpendicular(state)
         >>> plt.loglog(k_perp, E_perp)
-        >>> plt.xlabel('k⊥')
-        >>> plt.ylabel('E(k⊥)')
+        >>> plt.xlabel('k_perp')
+        >>> plt.ylabel('E(k_perp)')
 
     Physics:
-        In RMHD with strong guide field B₀∥ẑ, the perpendicular cascade
-        dominates because:
-        - Alfvén wave propagation along B₀ is linear (no cascade)
-        - Perpendicular Poisson bracket {φ, ·} drives turbulent cascade
-        - Critical balance: τ_nl ~ τ_A at each scale
-
-        Expected spectrum: E(k⊥) ∝ k⊥^(-3/2) (Goldreich-Sridhar, 1995)
+        RMHD turbulence exhibits anisotropic cascade with k⊥ >> k∥.
+        The perpendicular spectrum E(k⊥) captures this dominant cascade.
+        Critical balance predicts k∥ ~ k⊥^(2/3) in inertial range.
 
     Performance:
-        Core computation is JIT-compiled for ~2-5× speedup compared to
-        non-JIT version. Segment_sum provides 10-100× speedup vs Python loops.
+        JIT-compiled with KRMHDState as pytree (eliminates wrapper overhead).
     """
     grid = state.grid
     if n_bins is None:
@@ -354,88 +250,58 @@ def energy_spectrum_perpendicular(
     if n_bins < 2:
         raise ValueError(f"n_bins must be >= 2 to create valid bins, got {n_bins}")
 
-    return _compute_energy_spectrum_perpendicular_jit(
-        state.z_plus,
-        state.z_minus,
-        grid.kx,
-        grid.ky,
-        grid.kz,
-        grid.Nx,
-        grid.Ny,
-        grid.Nz,
-        n_bins,
-    )
+    # Extract fields
+    z_plus = state.z_plus
+    z_minus = state.z_minus
+    kx = grid.kx
+    ky = grid.ky
+    Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
 
+    # Create 3D perpendicular wavenumber arrays (need 3D to match state shape)
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # [1, 1, Nx//2+1]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # [1, Ny, 1]
 
-@partial(jax.jit, static_argnames=('n_bins', 'Nx', 'Ny', 'Nz'))
-def _compute_energy_spectrum_perpendicular_kinetic_jit(
-    z_plus: Array,
-    z_minus: Array,
-    kx: Array,
-    ky: Array,
-    kz: Array,
-    Nx: int,
-    Ny: int,
-    Nz: int,
-    n_bins: int,
-) -> Tuple[Array, Array]:
-    """
-    JIT-compiled helper for perpendicular kinetic energy spectrum computation.
-
-    Computes E_kin(k⊥) = (1/2) ∫ k⊥²|φ(k⊥, k∥)|² dk∥, where φ = (z⁺ + z⁻)/2
-    is the stream function for perpendicular flow.
-
-    Args:
-        z_plus: Elsasser z+ field in Fourier space [Nz, Ny, Nx//2+1]
-        z_minus: Elsasser z- field in Fourier space [Nz, Ny, Nx//2+1]
-        kx, ky, kz: Wavenumber arrays
-        Nx, Ny, Nz: Grid dimensions
-        n_bins: Number of spectral bins
-
-    Returns:
-        Tuple of (k_perp_centers, E_kin_perp) arrays
-    """
-    # Create 3D wavenumber arrays
-    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # Shape: [1, 1, Nx//2+1]
-    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # Shape: [1, Ny, 1]
-    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
-
-    # Compute perpendicular wavenumber k⊥ (broadcast to full 3D shape)
-    k_perp_squared = kx_3d**2 + ky_3d**2 + 0*kz_3d
-    k_perp = jnp.sqrt(k_perp_squared)
-
-    # Compute kinetic energy density from stream function φ = (z⁺ + z⁻)/2
+    # Compute perpendicular wavenumber k⊥ (will broadcast to [Nz, Ny, Nx//2+1])
+    k_perp = jnp.sqrt(kx_3d**2 + ky_3d**2)
+    
+    # Compute energy density (perpendicular gradients)
+    k_perp_squared = kx_3d**2 + ky_3d**2
     phi = (z_plus + z_minus) / 2.0
-    energy_density = 0.5 * k_perp_squared * jnp.abs(phi)**2
-
-    # Handle rfft doubling for reality condition
+    A_parallel = (z_plus - z_minus) / 2.0
+    energy_density = 0.5 * k_perp_squared * (jnp.abs(phi)**2 + jnp.abs(A_parallel)**2)
+    
+    # Handle rfft doubling
     kx_zero = (kx_3d == 0.0)
     kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
-
+    
     # Create bins for k⊥
     k_perp_max = jnp.sqrt(kx[-1]**2 + ky[Ny//2]**2)
     k_perp_bins = jnp.linspace(0, k_perp_max, n_bins + 1)
     k_perp_centers = 0.5 * (k_perp_bins[:-1] + k_perp_bins[1:])
 
-    # Bin and sum energy using segment_sum
+    # Broadcast k_perp to full 3D shape to match energy_density
+    k_perp = jnp.broadcast_to(k_perp, (Nz, Ny, Nx//2+1))
+
+    # Bin and sum energy
     k_perp_indices = jnp.digitize(k_perp.flatten(), k_perp_bins) - 1
     k_perp_indices = jnp.clip(k_perp_indices, 0, n_bins - 1)
     energy_flat = energy_density.flatten()
-    E_kin_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
+    E_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
 
     # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
     # The energy() function normalizes by N_perp when computing perpendicular energies
     # because it sums over all z-planes. We do the same here.
     N_perp = Nx * Ny
-    dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
-    E_kin_perp = E_kin_perp / (N_perp * dk_perp)
+    dk = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
+    E_perp = E_perp / (N_perp * dk)
+    
+    return k_perp_centers, E_perp
 
-    return k_perp_centers, E_kin_perp
 
-
+@partial(jax.jit, static_argnames=('n_bins',))
 def energy_spectrum_perpendicular_kinetic(
     state: KRMHDState,
     n_bins: Optional[int] = None,
@@ -445,6 +311,8 @@ def energy_spectrum_perpendicular_kinetic(
 
     This function isolates the kinetic energy contribution from the perpendicular
     flow φ = (z⁺ + z⁻)/2, summing over all parallel (k∥ = kz) modes for each k⊥.
+
+    Now JIT-compiled directly thanks to KRMHDState pytree registration!
 
     Args:
         state: KRMHD state containing z_plus, z_minus fields
@@ -471,6 +339,9 @@ def energy_spectrum_perpendicular_kinetic(
         >>> plt.loglog(k_perp, E_mag, label='Magnetic')
         >>> plt.loglog(k_perp, k_perp**(-5/3), 'k--', label='k⊥^(-5/3)')
 
+    Performance:
+        JIT-compiled with KRMHDState as pytree for ~2-5× speedup.
+
     See Also:
         - energy_spectrum_perpendicular_magnetic: Magnetic energy spectrum
         - energy_spectrum_perpendicular: Total energy spectrum
@@ -483,59 +354,24 @@ def energy_spectrum_perpendicular_kinetic(
     if n_bins < 2:
         raise ValueError(f"n_bins must be >= 2 to create valid bins, got {n_bins}")
 
-    return _compute_energy_spectrum_perpendicular_kinetic_jit(
-        state.z_plus,
-        state.z_minus,
-        grid.kx,
-        grid.ky,
-        grid.kz,
-        grid.Nx,
-        grid.Ny,
-        grid.Nz,
-        n_bins,
-    )
+    # Extract fields
+    z_plus = state.z_plus
+    z_minus = state.z_minus
+    kx = grid.kx
+    ky = grid.ky
+    Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
 
-
-@partial(jax.jit, static_argnames=('n_bins', 'Nx', 'Ny', 'Nz'))
-def _compute_energy_spectrum_perpendicular_magnetic_jit(
-    z_plus: Array,
-    z_minus: Array,
-    kx: Array,
-    ky: Array,
-    kz: Array,
-    Nx: int,
-    Ny: int,
-    Nz: int,
-    n_bins: int,
-) -> Tuple[Array, Array]:
-    """
-    JIT-compiled helper for perpendicular magnetic energy spectrum computation.
-
-    Computes E_mag(k⊥) = (1/2) ∫ k⊥²|A∥(k⊥, k∥)|² dk∥, where A∥ = (z⁺ - z⁻)/2
-    is the parallel vector potential for perpendicular magnetic field.
-
-    Args:
-        z_plus: Elsasser z+ field in Fourier space [Nz, Ny, Nx//2+1]
-        z_minus: Elsasser z- field in Fourier space [Nz, Ny, Nx//2+1]
-        kx, ky, kz: Wavenumber arrays
-        Nx, Ny, Nz: Grid dimensions
-        n_bins: Number of spectral bins
-
-    Returns:
-        Tuple of (k_perp_centers, E_mag_perp) arrays
-    """
     # Create 3D wavenumber arrays
-    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # Shape: [1, 1, Nx//2+1]
-    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # Shape: [1, Ny, 1]
-    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # [1, 1, Nx//2+1]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # [1, Ny, 1]
 
-    # Compute perpendicular wavenumber k⊥ (broadcast to full 3D shape)
-    k_perp_squared = kx_3d**2 + ky_3d**2 + 0*kz_3d
-    k_perp = jnp.sqrt(k_perp_squared)
+    # Compute perpendicular wavenumber k⊥
+    k_perp = jnp.sqrt(kx_3d**2 + ky_3d**2)
+    k_perp_squared = kx_3d**2 + ky_3d**2
 
-    # Compute magnetic energy density from A∥ = (z⁺ - z⁻)/2
-    A_parallel = (z_plus - z_minus) / 2.0
-    energy_density = 0.5 * k_perp_squared * jnp.abs(A_parallel)**2
+    # Compute kinetic energy density from stream function φ = (z⁺ + z⁻)/2
+    phi = (z_plus + z_minus) / 2.0
+    energy_density = 0.5 * k_perp_squared * jnp.abs(phi)**2
 
     # Handle rfft doubling for reality condition
     kx_zero = (kx_3d == 0.0)
@@ -549,22 +385,26 @@ def _compute_energy_spectrum_perpendicular_magnetic_jit(
     k_perp_bins = jnp.linspace(0, k_perp_max, n_bins + 1)
     k_perp_centers = 0.5 * (k_perp_bins[:-1] + k_perp_bins[1:])
 
-    # Bin and sum energy using segment_sum
+    # Broadcast k_perp to full 3D shape to match energy_density
+    k_perp = jnp.broadcast_to(k_perp, (Nz, Ny, Nx//2+1))
+
+    # Bin and sum energy
     k_perp_indices = jnp.digitize(k_perp.flatten(), k_perp_bins) - 1
     k_perp_indices = jnp.clip(k_perp_indices, 0, n_bins - 1)
     energy_flat = energy_density.flatten()
-    E_mag_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
+    E_kin_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
 
     # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
     # The energy() function normalizes by N_perp when computing perpendicular energies
     # because it sums over all z-planes. We do the same here.
     N_perp = Nx * Ny
     dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
-    E_mag_perp = E_mag_perp / (N_perp * dk_perp)
+    E_kin_perp = E_kin_perp / (N_perp * dk_perp)
 
-    return k_perp_centers, E_mag_perp
+    return k_perp_centers, E_kin_perp
 
 
+@partial(jax.jit, static_argnames=('n_bins',))
 def energy_spectrum_perpendicular_magnetic(
     state: KRMHDState,
     n_bins: Optional[int] = None,
@@ -575,6 +415,8 @@ def energy_spectrum_perpendicular_magnetic(
     This function isolates the magnetic energy contribution from the parallel
     vector potential A∥ = (z⁺ - z⁻)/2, summing over all parallel (k∥ = kz)
     modes for each k⊥.
+
+    Now JIT-compiled directly thanks to KRMHDState pytree registration!
 
     Args:
         state: KRMHD state containing z_plus, z_minus fields
@@ -592,15 +434,16 @@ def energy_spectrum_perpendicular_magnetic(
         E_mag(k⊥) = (1/2) ∫ k⊥²|A∥(k⊥, k∥)|² dk∥
 
         In Alfvénic turbulence, kinetic and magnetic energies should be
-        approximately equal (equipartition) in the inertial range. At late
-        times, selective decay favors magnetic energy dominance.
+        approximately equal (equipartition) in the inertial range.
 
     Example:
         >>> k_perp, E_kin = energy_spectrum_perpendicular_kinetic(state)
         >>> k_perp, E_mag = energy_spectrum_perpendicular_magnetic(state)
-        >>> plt.loglog(k_perp, E_kin, label='Kinetic')
-        >>> plt.loglog(k_perp, E_mag, label='Magnetic')
-        >>> plt.loglog(k_perp, k_perp**(-5/3), 'k--', label='k⊥^(-5/3)')
+        >>> ratio = E_mag / E_kin
+        >>> print(f"Magnetic/Kinetic ratio: {ratio.mean():.3f}")  # Should be ~1
+
+    Performance:
+        JIT-compiled with KRMHDState as pytree for ~2-5× speedup.
 
     See Also:
         - energy_spectrum_perpendicular_kinetic: Kinetic energy spectrum
@@ -614,53 +457,24 @@ def energy_spectrum_perpendicular_magnetic(
     if n_bins < 2:
         raise ValueError(f"n_bins must be >= 2 to create valid bins, got {n_bins}")
 
-    return _compute_energy_spectrum_perpendicular_magnetic_jit(
-        state.z_plus,
-        state.z_minus,
-        grid.kx,
-        grid.ky,
-        grid.kz,
-        grid.Nx,
-        grid.Ny,
-        grid.Nz,
-        n_bins,
-    )
+    # Extract fields
+    z_plus = state.z_plus
+    z_minus = state.z_minus
+    kx = grid.kx
+    ky = grid.ky
+    Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
 
-
-@partial(jax.jit, static_argnames=('Nx', 'Ny'))
-def _compute_energy_spectrum_parallel_jit(
-    z_plus: Array,
-    z_minus: Array,
-    kx: Array,
-    ky: Array,
-    kz: Array,
-    Nx: int,
-    Ny: int,
-) -> Tuple[Array, Array]:
-    """
-    JIT-compiled helper for parallel energy spectrum computation.
-
-    This function extracts the core computation logic from energy_spectrum_parallel()
-    to enable JIT compilation. Takes raw arrays instead of KRMHDState.
-
-    Args:
-        z_plus: Elsasser z+ field in Fourier space [Nz, Ny, Nx//2+1]
-        z_minus: Elsasser z- field in Fourier space [Nz, Ny, Nx//2+1]
-        kx, ky, kz: Wavenumber arrays
-        Nx, Ny: Grid dimensions (Nz inferred from kz.shape[0])
-
-    Returns:
-        Tuple of (kz, E_parallel) arrays
-    """
     # Create 3D wavenumber arrays
-    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
-    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # [1, 1, Nx//2+1]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # [1, Ny, 1]
+
+    # Compute perpendicular wavenumber k⊥
+    k_perp = jnp.sqrt(kx_3d**2 + ky_3d**2)
     k_perp_squared = kx_3d**2 + ky_3d**2
 
-    # Compute energy density (perpendicular derivatives only for RMHD)
-    phi = (z_plus + z_minus) / 2.0
+    # Compute magnetic energy density from vector potential A∥ = (z⁺ - z⁻)/2
     A_parallel = (z_plus - z_minus) / 2.0
-    energy_density = 0.5 * k_perp_squared * (jnp.abs(phi)**2 + jnp.abs(A_parallel)**2)
+    energy_density = 0.5 * k_perp_squared * jnp.abs(A_parallel)**2
 
     # Handle rfft doubling for reality condition
     kx_zero = (kx_3d == 0.0)
@@ -669,16 +483,31 @@ def _compute_energy_spectrum_parallel_jit(
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
 
-    # Sum over perpendicular modes for each kz
-    E_parallel = jnp.sum(energy_density, axis=(1, 2))  # Sum over ky, kx → [Nz]
+    # Create bins for k⊥
+    k_perp_max = jnp.sqrt(kx[-1]**2 + ky[Ny//2]**2)
+    k_perp_bins = jnp.linspace(0, k_perp_max, n_bins + 1)
+    k_perp_centers = 0.5 * (k_perp_bins[:-1] + k_perp_bins[1:])
 
-    # Normalize by number of perpendicular modes
+    # Broadcast k_perp to full 3D shape to match energy_density
+    k_perp = jnp.broadcast_to(k_perp, (Nz, Ny, Nx//2+1))
+
+    # Bin and sum energy
+    k_perp_indices = jnp.digitize(k_perp.flatten(), k_perp_bins) - 1
+    k_perp_indices = jnp.clip(k_perp_indices, 0, n_bins - 1)
+    energy_flat = energy_density.flatten()
+    E_mag_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
+
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
     N_perp = Nx * Ny
-    E_parallel = E_parallel / N_perp
+    dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
+    E_mag_perp = E_mag_perp / (N_perp * dk_perp)
 
-    return kz, E_parallel
+    return k_perp_centers, E_mag_perp
 
 
+@partial(jax.jit)
 def energy_spectrum_parallel(
     state: KRMHDState,
 ) -> Tuple[Array, Array]:
@@ -688,9 +517,7 @@ def energy_spectrum_parallel(
     Sums energy over all perpendicular (k⊥) modes for each kz. Shows
     energy distribution along field lines from Alfvén wave propagation.
 
-    This function is a thin wrapper around the JIT-compiled helper
-    _compute_energy_spectrum_parallel_jit() to enable efficient computation
-    while accepting a KRMHDState Pydantic model.
+    Now JIT-compiled directly thanks to KRMHDState pytree registration!
 
     Args:
         state: KRMHD state containing z_plus, z_minus fields
@@ -713,40 +540,52 @@ def energy_spectrum_parallel(
     Example:
         >>> kz, E_parallel = energy_spectrum_parallel(state)
         >>> plt.semilogy(kz, E_parallel)
-        >>> plt.xlabel('k∥ (kz)')
-        >>> plt.ylabel('E(k∥)')
+        >>> plt.xlabel('k_parallel')
+        >>> plt.ylabel('E(k_parallel)')
 
     Physics:
-        In RMHD, parallel structure comes from:
-        - Linear Alfvén wave propagation (ω = k∥v_A)
-        - No direct parallel cascade (anisotropic turbulence)
-        - Field line wandering from perpendicular turbulence
-
-        E(k∥) typically shows discrete peaks from resonant modes or
-        broad distribution from phase mixing.
-
-    Normalization:
-        Unlike binned spectra (1D, perpendicular), this is a discrete spectrum
-        where each kz corresponds to a specific Fourier mode. Therefore we
-        normalize by N_perp only, not by dkz:
-        - Parallel spectrum: E_parallel / N_perp
-        - To verify energy: sum(E_parallel) * (2π/Lz) ≈ E_total
+        Weak parallel cascade in RMHD leads to flatter E(k∥) compared
+        to perpendicular spectrum. Energy transfer along field lines
+        dominated by Alfvén wave propagation rather than cascade.
 
     Performance:
-        Core computation is JIT-compiled for ~2-5× speedup compared to
-        non-JIT version.
+        JIT-compiled with KRMHDState as pytree for ~2-5× speedup.
     """
+    # Extract fields
+    z_plus = state.z_plus
+    z_minus = state.z_minus
     grid = state.grid
+    kx = grid.kx
+    ky = grid.ky
+    kz = grid.kz
+    Nx, Ny = grid.Nx, grid.Ny
+    
+    # Compute energy density
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # [1, 1, Nx//2+1]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # [1, Ny, 1]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+    
+    phi = (z_plus + z_minus) / 2.0
+    A_parallel = (z_plus - z_minus) / 2.0
+    energy_density = 0.5 * k_perp_squared * (jnp.abs(phi)**2 + jnp.abs(A_parallel)**2)
+    
+    # Handle rfft doubling
+    kx_zero = (kx_3d == 0.0)
+    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_middle = ~(kx_zero | kx_nyquist)
+    doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
+    energy_density = energy_density * doubling_factor
+    
+    # Sum over perpendicular modes for each kz
+    E_parallel = jnp.sum(energy_density, axis=(1, 2))  # Sum over ky, kx
 
-    return _compute_energy_spectrum_parallel_jit(
-        state.z_plus,
-        state.z_minus,
-        grid.kx,
-        grid.ky,
-        grid.kz,
-        grid.Nx,
-        grid.Ny,
-    )
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
+    E_parallel = E_parallel / N_perp
+
+    return kz, E_parallel
 
 
 # =============================================================================
@@ -1779,19 +1618,14 @@ def plot_parallel_spectrum_comparison(
 # =============================================================================
 
 # Note on JIT Compilation Architecture:
-# The diagnostic functions (energy_spectrum_*, hermite_flux, etc.) accept KRMHDState
-# as input, which is a Pydantic BaseModel that cannot be directly passed to JIT-compiled
-# functions. To enable JIT compilation without changing the state representation:
+# With KRMHDState and SpectralGrid registered as JAX pytrees, diagnostic functions
+# can be JIT-compiled directly while accepting these Pydantic models as inputs.
 #
-# 1. Public API functions (energy_spectrum_1d, etc.) accept KRMHDState
-# 2. They extract raw arrays and call private JIT-compiled helpers (_*_jit)
-# 3. The helpers are fully JIT-compiled for optimal performance
-#
-# This architecture provides:
-# - ~2-5× speedup from JIT compilation
-# - Clean API (users still pass KRMHDState)
-# - No need to make KRMHDState a JAX pytree
-# - Additional 10-100× speedup from vectorized segment_sum (vs Python loops)
+# This provides:
+# - Clean API: Functions directly accept KRMHDState objects
+# - Performance: Eliminates wrapper function overhead
+# - Simplicity: No need for separate JIT helper functions
+# - Compatibility: Works seamlessly with jax.jit, jax.vmap, and jax.tree_map
 
 
 def hermite_flux(state: KRMHDState) -> Array:

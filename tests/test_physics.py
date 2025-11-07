@@ -29,6 +29,8 @@ from krmhd.physics import (
     gm_rhs,
     hyperdiffusion,
     hyperresistivity,
+    KRMHDState,
+    initialize_alfven_wave,
 )
 
 
@@ -2244,3 +2246,251 @@ class TestHyperdiffusion:
                         continue  # Skip k=0 mode
                     assert result[ikz, iky, ikx].real <= 0.0, \
                         f"Dissipation at ({ikz},{iky},{ikx}) should be ≤0, got {result[ikz, iky, ikx].real}"
+
+
+class TestKRMHDStatePytree:
+    """Test suite for JAX pytree registration of KRMHDState."""
+
+    def test_krmhd_state_tree_flatten_unflatten(self):
+        """Test that KRMHDState can be flattened and unflattened."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        state = initialize_alfven_wave(
+            grid=grid,
+            kx_mode=1.0,
+            ky_mode=0.0,
+            kz_mode=2.0,
+            amplitude=0.1,
+            M=5,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+        )
+
+        # Flatten
+        from krmhd.physics import _krmhd_state_flatten, _krmhd_state_unflatten
+        children, aux_data = _krmhd_state_flatten(state)
+
+        # Check children are arrays or pytrees (5 fields: z_plus, z_minus, B_parallel, g, grid)
+        assert len(children) == 5
+        # First 4 should be arrays
+        assert all(isinstance(c, jax.Array) for c in children[:4])
+        # Last one is grid (also a pytree)
+        assert isinstance(children[4], SpectralGrid3D)
+
+        # Check aux_data contains static fields
+        M, beta_i, v_th, nu, Lambda, time = aux_data
+        assert M == 5
+        assert beta_i == 1.0
+        assert v_th == 1.0
+        assert nu == 0.01
+        assert time == 0.0
+
+        # Unflatten and verify roundtrip
+        state_reconstructed = _krmhd_state_unflatten(aux_data, children)
+        assert state_reconstructed.M == state.M
+        assert state_reconstructed.beta_i == state.beta_i
+        assert state_reconstructed.time == state.time
+        assert jnp.allclose(state_reconstructed.z_plus, state.z_plus)
+        assert jnp.allclose(state_reconstructed.z_minus, state.z_minus)
+        assert jnp.allclose(state_reconstructed.g, state.g)
+
+    def test_krmhd_state_tree_map(self):
+        """Test that jax.tree_map works on KRMHDState."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        state = initialize_alfven_wave(
+            grid=grid,
+            kx_mode=1.0,
+            ky_mode=0.0,
+            kz_mode=2.0,
+            amplitude=0.1,
+            M=5,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+        )
+
+        # Apply tree_map to scale all arrays by 2
+        state_scaled = jax.tree.map(lambda x: x * 2, state)
+
+        # Check that field arrays were scaled
+        assert jnp.allclose(state_scaled.z_plus, state.z_plus * 2)
+        assert jnp.allclose(state_scaled.z_minus, state.z_minus * 2)
+        assert jnp.allclose(state_scaled.g, state.g * 2)
+
+        # Check that grid arrays were scaled
+        assert jnp.allclose(state_scaled.grid.kx, state.grid.kx * 2)
+
+        # Check that static fields are preserved
+        assert state_scaled.M == state.M
+        assert state_scaled.beta_i == state.beta_i
+        assert state_scaled.grid.Nx == state.grid.Nx
+
+    def test_krmhd_state_jit_acceptance(self):
+        """Test that KRMHDState can be passed to JIT-compiled functions."""
+
+        @jax.jit
+        def compute_total_energy(state: KRMHDState) -> float:
+            """Simple JIT function that accesses state fields."""
+            z_plus_energy = jnp.sum(jnp.abs(state.z_plus) ** 2)
+            z_minus_energy = jnp.sum(jnp.abs(state.z_minus) ** 2)
+            return z_plus_energy + z_minus_energy
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        state = initialize_alfven_wave(
+            grid=grid,
+            kx_mode=1.0,
+            ky_mode=0.0,
+            kz_mode=2.0,
+            amplitude=0.1,
+            M=5,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+        )
+
+        # Should not raise an error
+        result = compute_total_energy(state)
+        assert result > 0
+
+    def test_krmhd_state_jit_with_grid_access(self):
+        """Test that nested grid can be accessed in JIT functions."""
+
+        @jax.jit
+        def compute_max_wavenumber(state: KRMHDState) -> float:
+            """Access nested grid fields in JIT function."""
+            kx_max = jnp.max(jnp.abs(state.grid.kx))
+            ky_max = jnp.max(jnp.abs(state.grid.ky))
+            return jnp.sqrt(kx_max**2 + ky_max**2)
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        state = initialize_alfven_wave(
+            grid=grid,
+            kx_mode=1.0,
+            ky_mode=0.0,
+            kz_mode=2.0,
+            amplitude=0.1,
+            M=5,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+        )
+
+        # Should not raise an error
+        result = compute_max_wavenumber(state)
+        assert result > 0
+
+    @pytest.mark.skip(reason="Pre-existing vmap incompatibility in initialize_hermite_moments (Issue #83)")
+    def test_krmhd_state_vmap(self):
+        """Test that KRMHDState can be used with jax.vmap."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+
+        # Create a batch of states with different amplitudes
+        amplitudes = jnp.array([0.1, 0.2, 0.3])
+
+        def create_state(amp):
+            return initialize_alfven_wave(
+                grid=grid,
+                kx_mode=1.0,
+                ky_mode=0.0,
+                kz_mode=2.0,
+                amplitude=amp,
+                M=3,
+                beta_i=1.0,
+                v_th=1.0,
+                nu=0.01,
+            )
+
+        # vmap over amplitudes
+        states = jax.vmap(create_state)(amplitudes)
+
+        # Check that we get 3 states
+        assert states.z_plus.shape[0] == 3
+        assert states.z_minus.shape[0] == 3
+
+        # Check that amplitudes are different
+        energies = jnp.sum(jnp.abs(states.z_plus) ** 2, axis=(1, 2, 3))
+        assert not jnp.allclose(energies[0], energies[1])
+        assert not jnp.allclose(energies[1], energies[2])
+
+    def test_krmhd_state_pydantic_validation_preserved(self):
+        """Test that Pydantic validation still works after pytree registration."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+
+        # Valid state should work
+        state = KRMHDState(
+            z_plus=jnp.zeros((32, 32, 17), dtype=complex),
+            z_minus=jnp.zeros((32, 32, 17), dtype=complex),
+            B_parallel=jnp.zeros((32, 32, 17), dtype=complex),
+            g=jnp.zeros((32, 32, 17, 6), dtype=complex),
+            M=5,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+        assert state.M == 5
+
+        # Invalid M should raise error
+        with pytest.raises(Exception):  # Pydantic validation error
+            KRMHDState(
+                z_plus=jnp.zeros((32, 32, 17), dtype=complex),
+                z_minus=jnp.zeros((32, 32, 17), dtype=complex),
+                B_parallel=jnp.zeros((32, 32, 17), dtype=complex),
+                g=jnp.zeros((32, 32, 17, 6), dtype=complex),
+                M=-1,  # Invalid: must be >= 0
+                beta_i=1.0,
+                v_th=1.0,
+                nu=0.01,
+                Lambda=1.0,
+                time=0.0,
+                grid=grid,
+            )
+
+    def test_krmhd_state_gandalf_step_integration(self):
+        """Test that KRMHDState works with gandalf_step timestepper (integration test)."""
+        from krmhd.timestepping import gandalf_step
+        from krmhd.physics import energy
+
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        state = initialize_alfven_wave(
+            grid=grid,
+            kx_mode=1.0,
+            ky_mode=0.0,
+            kz_mode=2.0,
+            amplitude=0.1,
+            M=3,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+        )
+
+        # Take a single timestep with gandalf_step
+        dt = 0.01
+        state_new = gandalf_step(
+            state,
+            dt=dt,
+            eta=0.01,
+            nu=0.01,
+            v_A=1.0,
+            hyper_r=1,
+            hyper_n=1,
+        )
+
+        # Verify output is still a valid KRMHDState
+        assert isinstance(state_new, KRMHDState)
+        assert state_new.grid is grid  # Grid should be unchanged
+        assert jnp.allclose(state_new.time, dt, rtol=1e-6)  # Time should be updated
+
+        # Verify fields have reasonable values (not NaN or Inf)
+        assert jnp.all(jnp.isfinite(state_new.z_plus))
+        assert jnp.all(jnp.isfinite(state_new.z_minus))
+        assert jnp.all(jnp.isfinite(state_new.g))
+
+        # Verify energy is conserved to reasonable precision (with dissipation)
+        E_initial = energy(state)['total']
+        E_final = energy(state_new)['total']
+        # With dissipation eta=0.01, nu=0.01, energy should decrease slightly
+        assert E_final < E_initial
+        assert E_final > 0.9 * E_initial  # Should not lose more than 10% in one timestep
