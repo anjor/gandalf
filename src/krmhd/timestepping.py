@@ -466,9 +466,10 @@ def _gandalf_step_jit(
     #   Standard (n=1): g_m → g_m * exp(-ν·(m/M)·δt)
     #   Hyper (n>1):    g_m → g_m * exp(-ν·(m/M)^(2n)·δt)
     # Conservation: m=0 (particle number) and m=1 (momentum) are exempt from collisions
-    # Note: Overflow validation is performed in gandalf_step() wrapper before JIT compilation
+    # Note: M>=2 validation and overflow checks performed in gandalf_step() wrapper before JIT compilation
+    # (M<2 would cause degenerate normalized rates and is rejected at wrapper level)
     moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
-    # For hyper-collisions: normalized by M to match original GANDALF
+    # For hyper-collisions: normalized by M to match original GANDALF (requires M>=2)
     collision_damping_rate = nu * ((moment_indices / M) ** (2 * hyper_n))
     collision_factors = jnp.where(
         moment_indices >= 2,

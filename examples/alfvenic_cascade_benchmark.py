@@ -10,7 +10,7 @@ Thesis parameters:
 - Resolutions: 64³ and 128³
 - Hyper-diffusion: r=4 and r=8 (thesis)
 - This implementation:
-  - 32³: r=4 (k⊥⁸ damping, matches thesis)
+  - 32³: r=2 (stable and practical for turbulence studies)
   - 64³: r=2 (r=4 yields instability despite no overflow: η·dt=0.1<<50)
   - 128³: r=2 (r=4 also unstable, not overflow-limited)
 - Run to saturation (steady state)
@@ -193,8 +193,9 @@ def main():
     cfl_safety = 0.3
     save_interval = 10
 
-    # Steady-state logging (for informational purposes only, doesn't affect runtime)
+    # Diagnostic intervals (for logging/monitoring only, doesn't affect physics)
     steady_state_check_interval = 50  # Check every N steps during averaging
+    progress_print_interval = 50      # Print progress every N steps (includes NaN detection)
     steady_state_window = 100
     steady_state_threshold = 0.02  # 2% relative change
 
@@ -311,13 +312,11 @@ def main():
 
     # Main loop: run until we reach total_time
     while state.time < total_time:
-        # Compute current energy
+        # Compute total energy (needed every step for steady-state tracking)
         E_dict = compute_energy(state)
         E_total = E_dict['total']
-        E_mag = E_dict['magnetic']
-        E_kin = E_dict['kinetic']
 
-        # Track history
+        # Track history (needed for steady-state detection)
         energy_values.append(E_total)
 
         if step % save_interval == 0:
@@ -348,15 +347,20 @@ def main():
                     status_symbol = "✓" if is_steady else "✗"
                     print(f"  {status_symbol} Steady-state check: ΔE/⟨E⟩ = {energy_variation:.1f}% ({'PASS' if is_steady else 'FAIL'})")
 
-            # Print progress
-            if step % 50 == 0:
+            # Print progress (also check for NaN/Inf at this interval)
+            if step % progress_print_interval == 0:
                 # Check for NaN/Inf (robustness check)
                 if not np.isfinite(E_total):
+                    # Extract breakdown for error message
+                    E_kin = E_dict['kinetic']
+                    E_mag = E_dict['magnetic']
                     print(f"\n  ERROR: NaN/Inf detected at step {step}, t={state.time:.2f} τ_A")
                     print(f"         E_total = {E_total}, E_kin = {E_kin}, E_mag = {E_mag}")
                     print(f"         Terminating evolution early.")
                     break
 
+                # Extract energy breakdown for progress display (only when printing)
+                E_mag = E_dict['magnetic']
                 mag_frac = E_mag / E_total if E_total > 0 else 0
                 avg_inj = np.mean(injection_rates[-50:]) if len(injection_rates) >= 50 else 0
                 phase = "[AVERAGING]" if averaging_started else "[SPIN-UP]"
