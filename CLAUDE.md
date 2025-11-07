@@ -334,7 +334,7 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
 
 ## Current Development Status
 
-**Test Coverage:** 299 passing tests across all modules (including 24 I/O tests)
+**Test Coverage:** 448 passing tests across all modules (includes 50+ spectral, 100+ physics, 75+ diagnostics, 28 forcing, 24 I/O, and more)
 
 ### Completed (Issues #1-3, #21)
 - [x] Basic spectral infrastructure (2D/3D, Issue #2)
@@ -497,7 +497,20 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
   - YAML configuration system via Pydantic
   - run_simulation.py with template generation
   - 7 example config files in configs/ directory
-- [ ] Integrating factor timestepper (Issue #30) - Already implemented as gandalf_step()
+- [x] Integrating factor timestepper (Issue #30) ✅
+  - Implemented as gandalf_step() in timestepping.py
+  - GANDALF integrating factor + RK2 method
+  - Exponential dissipation factors for η and ν
+  - 12 comprehensive tests validating convergence and accuracy
+
+### JAX Infrastructure (Issue #73, PR #80) ✅ COMPLETE
+- [x] Pytree registration (Issue #73) ✅
+  - KRMHDState registered as JAX pytree for direct JIT compilation
+  - SpectralGrid2D/3D registered as pytrees
+  - 6/7 comprehensive pytree tests passing (test_physics.py::TestKRMHDStatePytree)
+  - Enables JAX transformations: tree_map, tree_leaves, etc.
+  - Pydantic validation preserved after pytree operations
+  - Full vmap compatibility blocked by Issue #83 (initialize_hermite_moments)
 
 ## Reference Parameters
 Typical astrophysical parameters:
