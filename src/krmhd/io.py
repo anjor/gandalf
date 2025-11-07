@@ -85,7 +85,7 @@ import jax.numpy as jnp
 
 from krmhd.physics import KRMHDState
 from krmhd.spectral import SpectralGrid3D
-from krmhd.diagnostics import EnergyHistory
+from krmhd.diagnostics import EnergyHistory, TurbulenceDiagnostics
 
 # File format version for compatibility checking
 # Increment when making breaking changes to file structure
@@ -536,3 +536,153 @@ def load_timeseries(filename: str) -> Tuple[EnergyHistory, Dict[str, Any]]:
         metadata = dict(f.attrs)
 
     return history, metadata
+
+
+def save_turbulence_diagnostics(
+    diagnostics_list: list[TurbulenceDiagnostics],
+    filename: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Save turbulence diagnostics time series to HDF5 file.
+
+    Designed for Issue #82 investigation: stores comprehensive turbulence
+    diagnostics computed by compute_turbulence_diagnostics() for post-analysis.
+
+    File format:
+        /times: Time array (Alfvén times)
+        /max_velocity: Maximum perpendicular velocity |v⊥|
+        /cfl_number: CFL number (stability metric)
+        /max_nonlinear: Maximum nonlinear term |{z∓, ∇²z±}|
+        /energy_highk: Fraction of energy at high-k
+        /critical_balance_ratio: Mean τ_nl/τ_A in inertial range
+        /energy_total: Total energy
+        attributes: Metadata, timestamps, version
+
+    Args:
+        diagnostics_list: List of TurbulenceDiagnostics from simulation
+        filename: Output HDF5 filename (will be created or overwritten)
+        metadata: Optional dictionary of user metadata to store
+
+    Example:
+        >>> diagnostics_list = []
+        >>> for i in range(n_steps):
+        ...     diag = compute_turbulence_diagnostics(state, dt=0.005)
+        ...     diagnostics_list.append(diag)
+        ...     state = gandalf_step(state, dt=0.005, eta=1.0, v_A=1.0)
+        >>> save_turbulence_diagnostics(
+        ...     diagnostics_list,
+        ...     "turbulence_diag_64cubed.h5",
+        ...     metadata={"resolution": 64, "eta": 2.0}
+        ... )
+
+    See also:
+        load_turbulence_diagnostics: Load diagnostics from file
+        compute_turbulence_diagnostics: Compute diagnostics from state
+    """
+    # Convert list of diagnostics to arrays
+    times = np.array([d.time for d in diagnostics_list])
+    max_velocity = np.array([d.max_velocity for d in diagnostics_list])
+    cfl_number = np.array([d.cfl_number for d in diagnostics_list])
+    max_nonlinear = np.array([d.max_nonlinear for d in diagnostics_list])
+    energy_highk = np.array([d.energy_highk for d in diagnostics_list])
+    critical_balance_ratio = np.array([d.critical_balance_ratio for d in diagnostics_list])
+    energy_total = np.array([d.energy_total for d in diagnostics_list])
+
+    # Create HDF5 file
+    with h5py.File(filename, 'w') as f:
+        # Save time series data with compression
+        f.create_dataset('times', data=times, compression='gzip', compression_opts=COMPRESSION_LEVEL)
+        f.create_dataset('max_velocity', data=max_velocity, compression='gzip', compression_opts=COMPRESSION_LEVEL)
+        f.create_dataset('cfl_number', data=cfl_number, compression='gzip', compression_opts=COMPRESSION_LEVEL)
+        f.create_dataset('max_nonlinear', data=max_nonlinear, compression='gzip', compression_opts=COMPRESSION_LEVEL)
+        f.create_dataset('energy_highk', data=energy_highk, compression='gzip', compression_opts=COMPRESSION_LEVEL)
+        f.create_dataset('critical_balance_ratio', data=critical_balance_ratio, compression='gzip', compression_opts=COMPRESSION_LEVEL)
+        f.create_dataset('energy_total', data=energy_total, compression='gzip', compression_opts=COMPRESSION_LEVEL)
+
+        # Save metadata
+        f.attrs['format_version'] = IO_FORMAT_VERSION
+        f.attrs['created_at'] = datetime.now().isoformat()
+        f.attrs['n_samples'] = len(diagnostics_list)
+        f.attrs['time_start'] = float(times[0])
+        f.attrs['time_end'] = float(times[-1])
+
+        if metadata:
+            for key, value in metadata.items():
+                f.attrs[key] = value
+
+
+def load_turbulence_diagnostics(filename: str) -> Tuple[list[TurbulenceDiagnostics], Dict[str, Any]]:
+    """
+    Load turbulence diagnostics time series from HDF5 file.
+
+    Reads diagnostics saved by save_turbulence_diagnostics() for post-analysis
+    and visualization.
+
+    Args:
+        filename: HDF5 file to load
+
+    Returns:
+        diagnostics_list: List of TurbulenceDiagnostics objects
+        metadata: Dictionary of metadata from file attributes
+
+    Example:
+        >>> diag_list, meta = load_turbulence_diagnostics("turbulence_diag_64cubed.h5")
+        >>> print(f"Loaded {len(diag_list)} samples from t={meta['time_start']:.1f} to t={meta['time_end']:.1f}")
+        >>> # Plot CFL number over time
+        >>> times = [d.time for d in diag_list]
+        >>> cfl = [d.cfl_number for d in diag_list]
+        >>> plt.plot(times, cfl)
+        >>> plt.xlabel("Time (τ_A)")
+        >>> plt.ylabel("CFL number")
+
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        KeyError: If file is missing required datasets
+
+    See also:
+        save_turbulence_diagnostics: Save diagnostics to file
+        compute_turbulence_diagnostics: Compute diagnostics from state
+    """
+    # Check file exists
+    if not Path(filename).exists():
+        raise FileNotFoundError(f"Turbulence diagnostics file not found: {filename}")
+
+    with h5py.File(filename, 'r') as f:
+        # Check version
+        version = f.attrs.get('format_version', 'unknown')
+        if version != IO_FORMAT_VERSION:
+            warnings.warn(
+                f"Turbulence diagnostics file version ({version}) differs from current "
+                f"version ({IO_FORMAT_VERSION}). Loading may fail or produce "
+                "unexpected results.",
+                UserWarning
+            )
+
+        # Load time series data
+        times = f['times'][:]
+        max_velocity = f['max_velocity'][:]
+        cfl_number = f['cfl_number'][:]
+        max_nonlinear = f['max_nonlinear'][:]
+        energy_highk = f['energy_highk'][:]
+        critical_balance_ratio = f['critical_balance_ratio'][:]
+        energy_total = f['energy_total'][:]
+
+        # Convert to list of TurbulenceDiagnostics objects
+        diagnostics_list = [
+            TurbulenceDiagnostics(
+                time=float(times[i]),
+                max_velocity=float(max_velocity[i]),
+                cfl_number=float(cfl_number[i]),
+                max_nonlinear=float(max_nonlinear[i]),
+                energy_highk=float(energy_highk[i]),
+                critical_balance_ratio=float(critical_balance_ratio[i]),
+                energy_total=float(energy_total[i]),
+            )
+            for i in range(len(times))
+        ]
+
+        # Load metadata
+        metadata = dict(f.attrs)
+
+    return diagnostics_list, metadata

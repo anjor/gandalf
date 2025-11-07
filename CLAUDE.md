@@ -224,16 +224,39 @@ When running turbulence simulations, watch for these warning signs:
 2. **Plot E(t) on log scale**: Detect exponential growth
    - Healthy: Steady plateau or slow linear growth in forced runs
    - Warning: Straight line on log-scale = exponential blow-up
-3. **Check for NaN/Inf**: Added in alfvenic_cascade_benchmark.py:344-349
+3. **Check for NaN/Inf**: Added in alfvenic_cascade_benchmark.py:350-360
    - Terminates with diagnostic message if detected
 4. **Spectrum pile-up**: Look for energy accumulating at k_max
    - Healthy: Sharp exponential cutoff from hyper-dissipation
    - Warning: Flat spectrum extending to k_max = dealiasing failure
 
+**NEW: Automated Turbulence Diagnostics (Issue #82):**
+For systematic instability investigation, use the comprehensive diagnostic tools:
+```bash
+# Run with automated diagnostics
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resolution 64 --save-diagnostics --diagnostic-interval 5
+
+# Test unstable parameters (captures failure)
+uv run python examples/test_64cubed_unstable.py
+
+# Analyze with automated detection of CFL violations, exponential growth, etc.
+uv run python examples/analyze_issue82_diagnostics.py --resolution 64
+```
+
+The diagnostic tools automatically track:
+- **max_velocity** and **CFL number** (timestep stability)
+- **max_nonlinear** (cascade rate)
+- **energy_highk** (spectral pile-up)
+- **critical_balance_ratio** (RMHD validity)
+
+See Diagnostics section for full details on compute_turbulence_diagnostics().
+
 **Recommendations for new users:**
 - Start with **r=2, n=2** (most stable, validated at 32³-128³)
 - Use **η ~ 1.0** for r=2 (increase if instability, decrease if over-damped)
 - Test short runs (10-20 τ_A) before committing to long production runs
+- **Use --save-diagnostics** for early warning of instabilities
 - Increase resolution gradually: 32³ → 64³ → 128³ to understand parameter scaling
 
 **Parameter selection constraints (NORMALIZED):**
@@ -431,6 +454,46 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
   - Visualization: plot_hermite_flux_spectrum(), plot_hermite_moment_energy(), plot_phase_mixing_2d()
   - 16 comprehensive tests: shape, reality, conservation, energy decomposition
   - **Ready for**: Issue #27 (Kinetic FDT validation)
+- [x] Turbulence diagnostics for instability investigation (Issue #82) ✅
+  - **Purpose**: Identify WHEN and WHERE numerical instabilities develop in forced turbulence
+  - **Infrastructure complete**: Diagnostic function, HDF5 I/O, analysis tools, test scripts
+  - **Key metrics tracked**:
+    * max_velocity: Detects field amplitude blow-up (|v⊥| = |(z⁺+z⁻)/2|)
+    * cfl_number: Monitors timestep stability (CFL = max_vel × dt / dx)
+    * max_nonlinear: Tracks cascade rate extremes (|{z∓, ∇²z±}|)
+    * energy_highk: Detects spectral pile-up near dealiasing boundary (E(k > 0.9k_max))
+    * critical_balance_ratio: Validates RMHD cascade τ_nl/τ_A ~ 1 in inertial range
+    * energy_total: Normalization check
+  - **Implementation**:
+    * compute_turbulence_diagnostics(): JIT-compiled diagnostic function (diagnostics.py:628-802)
+    * save/load_turbulence_diagnostics(): HDF5 I/O with compression and metadata (io.py:541-688)
+    * alfvenic_cascade_benchmark.py: Added --save-diagnostics flag and --diagnostic-interval
+    * analyze_issue82_diagnostics.py: Visualization script with 6-panel comparison plots
+    * test_64cubed_unstable.py: Dedicated script to capture 64³ instability development
+  - **Features**:
+    * Auto-terminates on NaN/Inf, CFL > 5, or max_velocity > 1000
+    * Exponential growth analysis: Fits γ from log(velocity) vs time
+    * Time-to-failure identification with termination reason saved to metadata
+    * Comparison mode: Side-by-side analysis of stable vs unstable runs
+  - **Usage example**:
+    ```bash
+    # Run with diagnostics
+    uv run python examples/alfvenic_cascade_benchmark.py \
+      --resolution 64 --save-diagnostics --diagnostic-interval 5
+
+    # Test unstable parameters
+    uv run python examples/test_64cubed_unstable.py
+
+    # Analyze and compare
+    uv run python examples/analyze_issue82_diagnostics.py --compare 32 64 128
+    ```
+  - **Physics interpretation**:
+    * CFL > 1.0 → Timestep too large for explicit integration
+    * Exponential max_velocity growth → Numerical instability
+    * High-k energy accumulation → Insufficient dissipation or dealiasing failure
+    * Critical balance ≠ 1 → RMHD ordering violated (τ_nl should ~ τ_A)
+  - **Status**: Infrastructure complete, ready for systematic investigation
+  - **Next steps**: Run diagnostic suite on 32³, 64³ stable, 64³ unstable, 128³ to identify root cause
 
 ### Forcing Mechanisms (Issue #29) ✅ COMPLETE
 - [x] Gaussian white noise forcing (Issue #29) ✅

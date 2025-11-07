@@ -57,7 +57,9 @@ from krmhd.diagnostics import (
     energy_spectrum_perpendicular_kinetic,
     energy_spectrum_perpendicular_magnetic,
     plot_energy_history,
+    compute_turbulence_diagnostics,
 )
+from krmhd.io import save_turbulence_diagnostics
 
 
 def detect_steady_state(energy_history, window=100, threshold=0.02, n_smooth=None):
@@ -120,6 +122,10 @@ def main():
                         help='When to start averaging in Alfvén times (default: 30)')
     parser.add_argument('--output-dir', type=str, default='examples/output',
                         help='Output directory for plots (default: examples/output)')
+    parser.add_argument('--save-diagnostics', action='store_true',
+                        help='Save detailed turbulence diagnostics for Issue #82 investigation')
+    parser.add_argument('--diagnostic-interval', type=int, default=5,
+                        help='Compute diagnostics every N steps (default: 5, lower = more frequent)')
     args = parser.parse_args()
 
     print("=" * 70)
@@ -298,6 +304,18 @@ def main():
     # Store energy injection rates
     injection_rates = []
 
+    # Turbulence diagnostics for Issue #82 investigation
+    diagnostics_list = [] if args.save_diagnostics else None
+    if args.save_diagnostics:
+        print("\n" + "=" * 70)
+        print("⚠️  DIAGNOSTIC MODE ENABLED (Issue #82 Investigation)")
+        print("=" * 70)
+        print(f"  Computing turbulence diagnostics every {args.diagnostic_interval} steps")
+        print("  Tracking: max_velocity, CFL, max_nonlinear, energy_highk, critical_balance")
+        print("  Output will be saved to: turbulence_diagnostics_{resolution}.h5")
+        print("  This will increase runtime by ~10-15%")
+        print("=" * 70 + "\n")
+
     # Time-averaged spectra (accumulated during averaging window)
     spectrum_kinetic_list = []
     spectrum_magnetic_list = []
@@ -318,6 +336,17 @@ def main():
 
         # Track history (needed for steady-state detection)
         energy_values.append(E_total)
+
+        # Compute turbulence diagnostics for Issue #82 investigation
+        if args.save_diagnostics and step % args.diagnostic_interval == 0:
+            diag = compute_turbulence_diagnostics(state, dt=dt, v_A=v_A)
+            diagnostics_list.append(diag)
+
+            # Print warning if CFL > 1.0 or max_velocity is very large
+            if diag.cfl_number > 1.0:
+                print(f"  ⚠️  CFL VIOLATION at step {step}, t={state.time:.2f}: CFL = {diag.cfl_number:.3f}")
+            if diag.max_velocity > 100.0:
+                print(f"  ⚠️  HIGH VELOCITY at step {step}, t={state.time:.2f}: max_vel = {diag.max_velocity:.2e}")
 
         if step % save_interval == 0:
             history.append(state)
@@ -611,6 +640,52 @@ def main():
     filepath_thesis = output_dir / filename_thesis
     plt.savefig(filepath_thesis, dpi=150, bbox_inches='tight')
     print(f"✓ Saved thesis-style figure: {filepath_thesis}")
+
+    # ==========================================================================
+    # Save Turbulence Diagnostics (Issue #82 Investigation)
+    # ==========================================================================
+
+    if args.save_diagnostics and diagnostics_list:
+        print("\n" + "=" * 70)
+        print("Saving turbulence diagnostics (Issue #82 Investigation)")
+        print("=" * 70)
+
+        diag_filename = f"turbulence_diagnostics_{args.resolution}cubed.h5"
+        diag_filepath = output_dir / diag_filename
+
+        # Prepare metadata
+        metadata = {
+            'resolution': args.resolution,
+            'eta': float(eta),
+            'nu': float(nu),
+            'hyper_r': int(hyper_r),
+            'hyper_n': int(hyper_n),
+            'force_amplitude': float(force_amplitude),
+            'dt': float(dt),
+            'total_time': float(total_time),
+            'n_steps': int(step),
+            'description': f'Turbulence diagnostics for {args.resolution}³ resolution (Issue #82)'
+        }
+
+        save_turbulence_diagnostics(diagnostics_list, str(diag_filepath), metadata=metadata)
+        print(f"✓ Saved {len(diagnostics_list)} diagnostic samples to: {diag_filepath}")
+        print(f"  Time range: t={diagnostics_list[0].time:.2f} to {diagnostics_list[-1].time:.2f} τ_A")
+        print(f"  Sampling interval: every {args.diagnostic_interval} steps")
+
+        # Print summary statistics
+        max_velocities = [d.max_velocity for d in diagnostics_list]
+        cfl_numbers = [d.cfl_number for d in diagnostics_list]
+        energy_highk = [d.energy_highk for d in diagnostics_list]
+
+        print(f"\n  Summary Statistics:")
+        print(f"    max_velocity:  min={min(max_velocities):.3f}, max={max(max_velocities):.3f}, mean={np.mean(max_velocities):.3f}")
+        print(f"    CFL number:    min={min(cfl_numbers):.3f}, max={max(cfl_numbers):.3f}, mean={np.mean(cfl_numbers):.3f}")
+        print(f"    High-k energy: min={min(energy_highk):.4f}, max={max(energy_highk):.4f}, mean={np.mean(energy_highk):.4f}")
+
+        if max(cfl_numbers) > 1.0:
+            print(f"\n  ⚠️  WARNING: CFL number exceeded 1.0 (max={max(cfl_numbers):.3f})")
+        if max(max_velocities) > 100.0:
+            print(f"  ⚠️  WARNING: Very high velocities detected (max={max(max_velocities):.2e})")
 
     print("\n" + "=" * 70)
     print("Benchmark complete!")
