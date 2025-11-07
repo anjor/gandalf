@@ -216,6 +216,26 @@ This implementation uses **normalized hyper-dissipation** matching the original 
 - **IMPORTANT**: Overflow safety ≠ numerical stability. High-order (r≥4) may require
   additional parameter tuning or exhibit instabilities in forced turbulence (see Issue #82)
 
+**Detecting Numerical Instabilities:**
+When running turbulence simulations, watch for these warning signs:
+1. **Monitor max field amplitude**: Track `max(|z±|)` during evolution
+   - Healthy: Saturates to O(1-10) values in forced turbulence
+   - Warning: Exponential growth beyond O(100) indicates instability
+2. **Plot E(t) on log scale**: Detect exponential growth
+   - Healthy: Steady plateau or slow linear growth in forced runs
+   - Warning: Straight line on log-scale = exponential blow-up
+3. **Check for NaN/Inf**: Added in alfvenic_cascade_benchmark.py:344-349
+   - Terminates with diagnostic message if detected
+4. **Spectrum pile-up**: Look for energy accumulating at k_max
+   - Healthy: Sharp exponential cutoff from hyper-dissipation
+   - Warning: Flat spectrum extending to k_max = dealiasing failure
+
+**Recommendations for new users:**
+- Start with **r=2, n=2** (most stable, validated at 32³-128³)
+- Use **η ~ 1.0** for r=2 (increase if instability, decrease if over-damped)
+- Test short runs (10-20 τ_A) before committing to long production runs
+- Increase resolution gradually: 32³ → 64³ → 128³ to understand parameter scaling
+
 **Parameter selection constraints (NORMALIZED):**
 - **Overflow safety**: `η·dt < 50` and `ν·dt < 50` (simple, resolution-independent!)
 - **Practical ranges** for ANY grid size:
