@@ -129,7 +129,7 @@ def energy_spectrum_1d(
         The Kolmogorov spectrum E(k) ∝ k^(-5/3) appears in 3D turbulence.
 
     Performance:
-        JIT-compiled with KRMHDState as pytree for ~2-5× speedup.
+        JIT-compiled with KRMHDState as pytree (eliminates wrapper overhead).
         Segment_sum provides 10-100× speedup vs Python loops.
     """
     # Extract grid info (static arguments inferred from state structure)
@@ -237,7 +237,7 @@ def energy_spectrum_perpendicular(
         Critical balance predicts k∥ ~ k⊥^(2/3) in inertial range.
 
     Performance:
-        JIT-compiled with KRMHDState as pytree for ~2-5× speedup.
+        JIT-compiled with KRMHDState as pytree (eliminates wrapper overhead).
     """
     grid = state.grid
     if n_bins is None:
@@ -1615,19 +1615,14 @@ def plot_parallel_spectrum_comparison(
 # =============================================================================
 
 # Note on JIT Compilation Architecture:
-# The diagnostic functions (energy_spectrum_*, hermite_flux, etc.) accept KRMHDState
-# as input, which is a Pydantic BaseModel that cannot be directly passed to JIT-compiled
-# functions. To enable JIT compilation without changing the state representation:
+# With KRMHDState and SpectralGrid registered as JAX pytrees, diagnostic functions
+# can be JIT-compiled directly while accepting these Pydantic models as inputs.
 #
-# 1. Public API functions (energy_spectrum_1d, etc.) accept KRMHDState
-# 2. They extract raw arrays and call private JIT-compiled helpers (_*_jit)
-# 3. The helpers are fully JIT-compiled for optimal performance
-#
-# This architecture provides:
-# - ~2-5× speedup from JIT compilation
-# - Clean API (users still pass KRMHDState)
-# - No need to make KRMHDState a JAX pytree
-# - Additional 10-100× speedup from vectorized segment_sum (vs Python loops)
+# This provides:
+# - Clean API: Functions directly accept KRMHDState objects
+# - Performance: Eliminates wrapper function overhead
+# - Simplicity: No need for separate JIT helper functions
+# - Compatibility: Works seamlessly with jax.jit, jax.vmap, and jax.tree_map
 
 
 def hermite_flux(state: KRMHDState) -> Array:
