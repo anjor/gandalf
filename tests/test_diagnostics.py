@@ -26,6 +26,8 @@ from krmhd.physics import (
 from krmhd.diagnostics import (
     energy_spectrum_1d,
     energy_spectrum_perpendicular,
+    energy_spectrum_perpendicular_kinetic,
+    energy_spectrum_perpendicular_magnetic,
     energy_spectrum_parallel,
     EnergyHistory,
     plot_state,
@@ -196,6 +198,222 @@ class TestEnergySpectrumPerpendicular:
         k_perp, E_perp = energy_spectrum_perpendicular(state, n_bins=32)
 
         assert jnp.allclose(E_perp, 0.0, atol=1e-10), "Zero state has non-zero perpendicular spectrum"
+
+
+class TestEnergySpectrumPerpendicularKinetic:
+    """Test perpendicular kinetic energy spectrum E_kin(k⊥) from φ."""
+
+    def test_kinetic_spectrum_shape(self):
+        """Test that kinetic spectrum has correct shape."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=1.0, seed=42)
+
+        n_bins = 32
+        k_perp, E_kin = energy_spectrum_perpendicular_kinetic(state, n_bins=n_bins)
+
+        # Check shapes
+        assert k_perp.shape == (n_bins,), f"k_perp shape {k_perp.shape} != ({n_bins},)"
+        assert E_kin.shape == (n_bins,), f"E_kin shape {E_kin.shape} != ({n_bins},)"
+
+        # k_perp should be monotonically increasing
+        assert jnp.all(jnp.diff(k_perp) > 0), "k_perp is not monotonically increasing"
+
+        # E_kin should be non-negative
+        assert jnp.all(E_kin >= 0), "E_kin has negative values"
+
+    def test_kinetic_single_mode(self):
+        """Test kinetic spectrum for single Alfvén wave mode."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+
+        # Initialize pure Alfvén wave: z+ and z- have same amplitude → pure velocity
+        state = initialize_alfven_wave(grid, M=10, kx_mode=2.0, ky_mode=0.0, kz_mode=1.0, amplitude=0.1)
+
+        k_perp, E_kin = energy_spectrum_perpendicular_kinetic(state, n_bins=32)
+
+        # Spectrum should be positive
+        assert jnp.all(E_kin >= 0), "Spectrum has negative values"
+
+        # Most energy should be concentrated near k⊥ = 2.0
+        k_expected = 2.0
+        peak_idx = jnp.argmax(E_kin)
+        k_peak = k_perp[peak_idx]
+
+        # Peak should be within 2 bins of expected value
+        dk = k_perp[1] - k_perp[0]
+        assert jnp.abs(k_peak - k_expected) < 2 * dk, \
+            f"Peak at k⊥={k_peak:.2f}, expected k⊥={k_expected:.2f}"
+
+    def test_kinetic_normalization(self):
+        """Test that kinetic spectrum integrates to kinetic energy."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=1.0, seed=42)
+
+        k_perp, E_kin_spectrum = energy_spectrum_perpendicular_kinetic(state, n_bins=32)
+
+        # Integrate spectrum
+        dk_perp = k_perp[1] - k_perp[0]
+        E_from_spectrum = jnp.sum(E_kin_spectrum) * dk_perp
+
+        # Compute kinetic energy directly
+        energies = compute_energy(state)
+        E_kinetic_direct = energies['kinetic']
+
+        # Should match within 10% (coarse binning)
+        rel_error = jnp.abs(E_from_spectrum - E_kinetic_direct) / E_kinetic_direct
+        assert rel_error < 0.1, \
+            f"Kinetic spectrum integral {E_from_spectrum:.6f} != E_kinetic {E_kinetic_direct:.6f} (error {rel_error:.2%})"
+
+    def test_kinetic_zero_state(self):
+        """Zero state should have zero kinetic spectrum."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+
+        state = KRMHDState(
+            z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
+            M=10,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        k_perp, E_kin = energy_spectrum_perpendicular_kinetic(state, n_bins=32)
+
+        assert jnp.allclose(E_kin, 0.0, atol=1e-10), "Zero state has non-zero kinetic spectrum"
+
+
+class TestEnergySpectrumPerpendicularMagnetic:
+    """Test perpendicular magnetic energy spectrum E_mag(k⊥) from A∥."""
+
+    def test_magnetic_spectrum_shape(self):
+        """Test that magnetic spectrum has correct shape."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=1.0, seed=42)
+
+        n_bins = 32
+        k_perp, E_mag = energy_spectrum_perpendicular_magnetic(state, n_bins=n_bins)
+
+        # Check shapes
+        assert k_perp.shape == (n_bins,), f"k_perp shape {k_perp.shape} != ({n_bins},)"
+        assert E_mag.shape == (n_bins,), f"E_mag shape {E_mag.shape} != ({n_bins},)"
+
+        # k_perp should be monotonically increasing
+        assert jnp.all(jnp.diff(k_perp) > 0), "k_perp is not monotonically increasing"
+
+        # E_mag should be non-negative
+        assert jnp.all(E_mag >= 0), "E_mag has negative values"
+
+    def test_magnetic_single_mode(self):
+        """Test magnetic spectrum for single Alfvén wave mode."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+
+        # Initialize pure Alfvén wave
+        state = initialize_alfven_wave(grid, M=10, kx_mode=2.0, ky_mode=0.0, kz_mode=1.0, amplitude=0.1)
+
+        k_perp, E_mag = energy_spectrum_perpendicular_magnetic(state, n_bins=32)
+
+        # Spectrum should be positive
+        assert jnp.all(E_mag >= 0), "Spectrum has negative values"
+
+        # Most energy should be concentrated near k⊥ = 2.0
+        k_expected = 2.0
+        peak_idx = jnp.argmax(E_mag)
+        k_peak = k_perp[peak_idx]
+
+        # Peak should be within 2 bins of expected value
+        dk = k_perp[1] - k_perp[0]
+        assert jnp.abs(k_peak - k_expected) < 2 * dk, \
+            f"Peak at k⊥={k_peak:.2f}, expected k⊥={k_expected:.2f}"
+
+    def test_magnetic_normalization(self):
+        """Test that magnetic spectrum integrates to magnetic energy."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=1.0, seed=42)
+
+        k_perp, E_mag_spectrum = energy_spectrum_perpendicular_magnetic(state, n_bins=32)
+
+        # Integrate spectrum
+        dk_perp = k_perp[1] - k_perp[0]
+        E_from_spectrum = jnp.sum(E_mag_spectrum) * dk_perp
+
+        # Compute magnetic energy directly
+        energies = compute_energy(state)
+        E_magnetic_direct = energies['magnetic']
+
+        # Should match within 10% (coarse binning)
+        rel_error = jnp.abs(E_from_spectrum - E_magnetic_direct) / E_magnetic_direct
+        assert rel_error < 0.1, \
+            f"Magnetic spectrum integral {E_from_spectrum:.6f} != E_magnetic {E_magnetic_direct:.6f} (error {rel_error:.2%})"
+
+    def test_magnetic_zero_state(self):
+        """Zero state should have zero magnetic spectrum."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+
+        state = KRMHDState(
+            z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
+            M=10,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        k_perp, E_mag = energy_spectrum_perpendicular_magnetic(state, n_bins=32)
+
+        assert jnp.allclose(E_mag, 0.0, atol=1e-10), "Zero state has non-zero magnetic spectrum"
+
+
+class TestAlfvenicEquipartition:
+    """Test Alfvénic equipartition: E_kin ≈ E_mag for Alfvén waves."""
+
+    def test_alfven_wave_equipartition(self):
+        """Test that Alfvén wave has equal kinetic and magnetic energy."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+
+        # Pure Alfvén wave: z+ propagates, z- = 0 → equal E_kin and E_mag
+        state = initialize_alfven_wave(grid, M=10, kx_mode=1.0, ky_mode=0.0, kz_mode=1.0, amplitude=0.1)
+
+        k_perp_kin, E_kin = energy_spectrum_perpendicular_kinetic(state, n_bins=32)
+        k_perp_mag, E_mag = energy_spectrum_perpendicular_magnetic(state, n_bins=32)
+
+        # k_perp arrays should match
+        assert jnp.allclose(k_perp_kin, k_perp_mag), "k_perp arrays don't match"
+
+        # Integrate spectra to get total energies
+        dk = k_perp_kin[1] - k_perp_kin[0]
+        E_kin_total = jnp.sum(E_kin) * dk
+        E_mag_total = jnp.sum(E_mag) * dk
+
+        # For Alfvén waves: E_kin ≈ E_mag (equipartition)
+        ratio = E_kin_total / (E_mag_total + 1e-10)
+        assert jnp.abs(ratio - 1.0) < 0.1, \
+            f"Alfvén wave should have equipartition: E_kin/E_mag = {ratio:.3f} (expected ≈1.0)"
+
+    def test_total_energy_conservation(self):
+        """Test that E_kin + E_mag ≈ E_total."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=1.0, seed=42)
+
+        k_perp_kin, E_kin = energy_spectrum_perpendicular_kinetic(state, n_bins=32)
+        k_perp_mag, E_mag = energy_spectrum_perpendicular_magnetic(state, n_bins=32)
+        k_perp_total, E_total = energy_spectrum_perpendicular(state, n_bins=32)
+
+        # E_total should equal E_kin + E_mag at each k⊥
+        E_sum = E_kin + E_mag
+
+        # Check bin-by-bin (some tolerance for numerical precision)
+        max_rel_error = jnp.max(jnp.abs(E_sum - E_total) / (E_total + 1e-10))
+        assert max_rel_error < 0.01, \
+            f"E_kin + E_mag != E_total: max relative error = {max_rel_error:.2%}"
 
 
 class TestEnergySpectrumParallel:

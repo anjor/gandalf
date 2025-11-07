@@ -141,10 +141,12 @@ def _compute_energy_spectrum_1d_jit(
     energy_flat = energy_density.flatten()
     E_k = segment_sum(energy_flat, k_indices, num_segments=n_bins)
 
-    # Normalize
-    N_total = Nx * Ny * Nz
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
     dk = jnp.maximum(k_bins[1] - k_bins[0], 1e-10)
-    E_k = E_k / (N_total * dk)
+    E_k = E_k / (N_perp * dk)
 
     return k_centers, E_k
 
@@ -278,10 +280,12 @@ def _compute_energy_spectrum_perpendicular_jit(
     energy_flat = energy_density.flatten()
     E_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
 
-    # Normalize
-    N_total = Nx * Ny * Nz
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
     dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
-    E_perp = E_perp / (N_total * dk_perp)
+    E_perp = E_perp / (N_perp * dk_perp)
 
     return k_perp_centers, E_perp
 
@@ -308,6 +312,9 @@ def energy_spectrum_perpendicular(
         Tuple of (k_perp_bins, E_perp) where:
         - k_perp_bins: Array of k⊥ values [n_bins]
         - E_perp: Energy per k⊥ bin [n_bins]
+
+    Raises:
+        ValueError: If n_bins < 2 (would create degenerate bins with zero spacing)
 
     Algorithm:
         1. Compute k⊥ = √(kx² + ky²) for each mode
@@ -343,7 +350,271 @@ def energy_spectrum_perpendicular(
     if n_bins is None:
         n_bins = grid.Nx // 2
 
+    # Validate n_bins to prevent degenerate bin spacing (dk_perp = 0)
+    if n_bins < 2:
+        raise ValueError(f"n_bins must be >= 2 to create valid bins, got {n_bins}")
+
     return _compute_energy_spectrum_perpendicular_jit(
+        state.z_plus,
+        state.z_minus,
+        grid.kx,
+        grid.ky,
+        grid.kz,
+        grid.Nx,
+        grid.Ny,
+        grid.Nz,
+        n_bins,
+    )
+
+
+@partial(jax.jit, static_argnames=('n_bins', 'Nx', 'Ny', 'Nz'))
+def _compute_energy_spectrum_perpendicular_kinetic_jit(
+    z_plus: Array,
+    z_minus: Array,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    Nx: int,
+    Ny: int,
+    Nz: int,
+    n_bins: int,
+) -> Tuple[Array, Array]:
+    """
+    JIT-compiled helper for perpendicular kinetic energy spectrum computation.
+
+    Computes E_kin(k⊥) = (1/2) ∫ k⊥²|φ(k⊥, k∥)|² dk∥, where φ = (z⁺ + z⁻)/2
+    is the stream function for perpendicular flow.
+
+    Args:
+        z_plus: Elsasser z+ field in Fourier space [Nz, Ny, Nx//2+1]
+        z_minus: Elsasser z- field in Fourier space [Nz, Ny, Nx//2+1]
+        kx, ky, kz: Wavenumber arrays
+        Nx, Ny, Nz: Grid dimensions
+        n_bins: Number of spectral bins
+
+    Returns:
+        Tuple of (k_perp_centers, E_kin_perp) arrays
+    """
+    # Create 3D wavenumber arrays
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # Shape: [1, 1, Nx//2+1]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # Shape: [1, Ny, 1]
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
+
+    # Compute perpendicular wavenumber k⊥ (broadcast to full 3D shape)
+    k_perp_squared = kx_3d**2 + ky_3d**2 + 0*kz_3d
+    k_perp = jnp.sqrt(k_perp_squared)
+
+    # Compute kinetic energy density from stream function φ = (z⁺ + z⁻)/2
+    phi = (z_plus + z_minus) / 2.0
+    energy_density = 0.5 * k_perp_squared * jnp.abs(phi)**2
+
+    # Handle rfft doubling for reality condition
+    kx_zero = (kx_3d == 0.0)
+    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_middle = ~(kx_zero | kx_nyquist)
+    doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
+    energy_density = energy_density * doubling_factor
+
+    # Create bins for k⊥
+    k_perp_max = jnp.sqrt(kx[-1]**2 + ky[Ny//2]**2)
+    k_perp_bins = jnp.linspace(0, k_perp_max, n_bins + 1)
+    k_perp_centers = 0.5 * (k_perp_bins[:-1] + k_perp_bins[1:])
+
+    # Bin and sum energy using segment_sum
+    k_perp_indices = jnp.digitize(k_perp.flatten(), k_perp_bins) - 1
+    k_perp_indices = jnp.clip(k_perp_indices, 0, n_bins - 1)
+    energy_flat = energy_density.flatten()
+    E_kin_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
+
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
+    dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
+    E_kin_perp = E_kin_perp / (N_perp * dk_perp)
+
+    return k_perp_centers, E_kin_perp
+
+
+def energy_spectrum_perpendicular_kinetic(
+    state: KRMHDState,
+    n_bins: Optional[int] = None,
+) -> Tuple[Array, Array]:
+    """
+    Compute perpendicular kinetic energy spectrum E_kin(k⊥).
+
+    This function isolates the kinetic energy contribution from the perpendicular
+    flow φ = (z⁺ + z⁻)/2, summing over all parallel (k∥ = kz) modes for each k⊥.
+
+    Args:
+        state: KRMHD state containing z_plus, z_minus fields
+        n_bins: Number of k⊥ bins (default: Nx//2)
+
+    Returns:
+        Tuple of (k_perp_bins, E_kin_perp) where:
+        - k_perp_bins: Array of k⊥ values [n_bins]
+        - E_kin_perp: Kinetic energy per k⊥ bin [n_bins]
+
+    Raises:
+        ValueError: If n_bins < 2 (would create degenerate bins with zero spacing)
+
+    Physics:
+        E_kin(k⊥) = (1/2) ∫ k⊥²|φ(k⊥, k∥)|² dk∥
+
+        In Alfvénic turbulence, kinetic and magnetic energies should be
+        approximately equal (equipartition) in the inertial range.
+
+    Example:
+        >>> k_perp, E_kin = energy_spectrum_perpendicular_kinetic(state)
+        >>> k_perp, E_mag = energy_spectrum_perpendicular_magnetic(state)
+        >>> plt.loglog(k_perp, E_kin, label='Kinetic')
+        >>> plt.loglog(k_perp, E_mag, label='Magnetic')
+        >>> plt.loglog(k_perp, k_perp**(-5/3), 'k--', label='k⊥^(-5/3)')
+
+    See Also:
+        - energy_spectrum_perpendicular_magnetic: Magnetic energy spectrum
+        - energy_spectrum_perpendicular: Total energy spectrum
+    """
+    grid = state.grid
+    if n_bins is None:
+        n_bins = grid.Nx // 2
+
+    # Validate n_bins to prevent degenerate bin spacing (dk_perp = 0)
+    if n_bins < 2:
+        raise ValueError(f"n_bins must be >= 2 to create valid bins, got {n_bins}")
+
+    return _compute_energy_spectrum_perpendicular_kinetic_jit(
+        state.z_plus,
+        state.z_minus,
+        grid.kx,
+        grid.ky,
+        grid.kz,
+        grid.Nx,
+        grid.Ny,
+        grid.Nz,
+        n_bins,
+    )
+
+
+@partial(jax.jit, static_argnames=('n_bins', 'Nx', 'Ny', 'Nz'))
+def _compute_energy_spectrum_perpendicular_magnetic_jit(
+    z_plus: Array,
+    z_minus: Array,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    Nx: int,
+    Ny: int,
+    Nz: int,
+    n_bins: int,
+) -> Tuple[Array, Array]:
+    """
+    JIT-compiled helper for perpendicular magnetic energy spectrum computation.
+
+    Computes E_mag(k⊥) = (1/2) ∫ k⊥²|A∥(k⊥, k∥)|² dk∥, where A∥ = (z⁺ - z⁻)/2
+    is the parallel vector potential for perpendicular magnetic field.
+
+    Args:
+        z_plus: Elsasser z+ field in Fourier space [Nz, Ny, Nx//2+1]
+        z_minus: Elsasser z- field in Fourier space [Nz, Ny, Nx//2+1]
+        kx, ky, kz: Wavenumber arrays
+        Nx, Ny, Nz: Grid dimensions
+        n_bins: Number of spectral bins
+
+    Returns:
+        Tuple of (k_perp_centers, E_mag_perp) arrays
+    """
+    # Create 3D wavenumber arrays
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # Shape: [1, 1, Nx//2+1]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # Shape: [1, Ny, 1]
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]  # Shape: [Nz, 1, 1]
+
+    # Compute perpendicular wavenumber k⊥ (broadcast to full 3D shape)
+    k_perp_squared = kx_3d**2 + ky_3d**2 + 0*kz_3d
+    k_perp = jnp.sqrt(k_perp_squared)
+
+    # Compute magnetic energy density from A∥ = (z⁺ - z⁻)/2
+    A_parallel = (z_plus - z_minus) / 2.0
+    energy_density = 0.5 * k_perp_squared * jnp.abs(A_parallel)**2
+
+    # Handle rfft doubling for reality condition
+    kx_zero = (kx_3d == 0.0)
+    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_middle = ~(kx_zero | kx_nyquist)
+    doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
+    energy_density = energy_density * doubling_factor
+
+    # Create bins for k⊥
+    k_perp_max = jnp.sqrt(kx[-1]**2 + ky[Ny//2]**2)
+    k_perp_bins = jnp.linspace(0, k_perp_max, n_bins + 1)
+    k_perp_centers = 0.5 * (k_perp_bins[:-1] + k_perp_bins[1:])
+
+    # Bin and sum energy using segment_sum
+    k_perp_indices = jnp.digitize(k_perp.flatten(), k_perp_bins) - 1
+    k_perp_indices = jnp.clip(k_perp_indices, 0, n_bins - 1)
+    energy_flat = energy_density.flatten()
+    E_mag_perp = segment_sum(energy_flat, k_perp_indices, num_segments=n_bins)
+
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
+    dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
+    E_mag_perp = E_mag_perp / (N_perp * dk_perp)
+
+    return k_perp_centers, E_mag_perp
+
+
+def energy_spectrum_perpendicular_magnetic(
+    state: KRMHDState,
+    n_bins: Optional[int] = None,
+) -> Tuple[Array, Array]:
+    """
+    Compute perpendicular magnetic energy spectrum E_mag(k⊥).
+
+    This function isolates the magnetic energy contribution from the parallel
+    vector potential A∥ = (z⁺ - z⁻)/2, summing over all parallel (k∥ = kz)
+    modes for each k⊥.
+
+    Args:
+        state: KRMHD state containing z_plus, z_minus fields
+        n_bins: Number of k⊥ bins (default: Nx//2)
+
+    Returns:
+        Tuple of (k_perp_bins, E_mag_perp) where:
+        - k_perp_bins: Array of k⊥ values [n_bins]
+        - E_mag_perp: Magnetic energy per k⊥ bin [n_bins]
+
+    Raises:
+        ValueError: If n_bins < 2 (would create degenerate bins with zero spacing)
+
+    Physics:
+        E_mag(k⊥) = (1/2) ∫ k⊥²|A∥(k⊥, k∥)|² dk∥
+
+        In Alfvénic turbulence, kinetic and magnetic energies should be
+        approximately equal (equipartition) in the inertial range. At late
+        times, selective decay favors magnetic energy dominance.
+
+    Example:
+        >>> k_perp, E_kin = energy_spectrum_perpendicular_kinetic(state)
+        >>> k_perp, E_mag = energy_spectrum_perpendicular_magnetic(state)
+        >>> plt.loglog(k_perp, E_kin, label='Kinetic')
+        >>> plt.loglog(k_perp, E_mag, label='Magnetic')
+        >>> plt.loglog(k_perp, k_perp**(-5/3), 'k--', label='k⊥^(-5/3)')
+
+    See Also:
+        - energy_spectrum_perpendicular_kinetic: Kinetic energy spectrum
+        - energy_spectrum_perpendicular: Total energy spectrum
+    """
+    grid = state.grid
+    if n_bins is None:
+        n_bins = grid.Nx // 2
+
+    # Validate n_bins to prevent degenerate bin spacing (dk_perp = 0)
+    if n_bins < 2:
+        raise ValueError(f"n_bins must be >= 2 to create valid bins, got {n_bins}")
+
+    return _compute_energy_spectrum_perpendicular_magnetic_jit(
         state.z_plus,
         state.z_minus,
         grid.kx,
