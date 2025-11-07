@@ -570,11 +570,13 @@ def energy_spectrum_parallel(
     
     # Sum over perpendicular modes for each kz
     E_parallel = jnp.sum(energy_density, axis=(1, 2))  # Sum over ky, kx
-    
-    # Normalize
-    N_total = Nx * Ny * grid.Nz
-    E_parallel = E_parallel / N_total
-    
+
+    # Normalize: Use N_perp = Nx * Ny (NOT Nx * Ny * Nz) to match energy() function
+    # The energy() function normalizes by N_perp when computing perpendicular energies
+    # because it sums over all z-planes. We do the same here.
+    N_perp = Nx * Ny
+    E_parallel = E_parallel / N_perp
+
     return kz, E_parallel
 
 
