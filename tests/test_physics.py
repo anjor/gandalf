@@ -2446,3 +2446,50 @@ class TestKRMHDStatePytree:
                 time=0.0,
                 grid=grid,
             )
+
+    def test_krmhd_state_gandalf_step_integration(self):
+        """Test that KRMHDState works with gandalf_step timestepper (integration test)."""
+        from krmhd.timestepping import gandalf_step
+        from krmhd.physics import energy
+
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        state = initialize_alfven_wave(
+            grid=grid,
+            kx_mode=1.0,
+            ky_mode=0.0,
+            kz_mode=2.0,
+            amplitude=0.1,
+            M=3,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+        )
+
+        # Take a single timestep with gandalf_step
+        dt = 0.01
+        state_new = gandalf_step(
+            state,
+            dt=dt,
+            eta=0.01,
+            nu=0.01,
+            v_A=1.0,
+            hyper_r=1,
+            hyper_n=1,
+        )
+
+        # Verify output is still a valid KRMHDState
+        assert isinstance(state_new, KRMHDState)
+        assert state_new.grid is grid  # Grid should be unchanged
+        assert jnp.allclose(state_new.time, dt, rtol=1e-6)  # Time should be updated
+
+        # Verify fields have reasonable values (not NaN or Inf)
+        assert jnp.all(jnp.isfinite(state_new.z_plus))
+        assert jnp.all(jnp.isfinite(state_new.z_minus))
+        assert jnp.all(jnp.isfinite(state_new.g))
+
+        # Verify energy is conserved to reasonable precision (with dissipation)
+        E_initial = energy(state)['total']
+        E_final = energy(state_new)['total']
+        # With dissipation eta=0.01, nu=0.01, energy should decrease slightly
+        assert E_final < E_initial
+        assert E_final > 0.9 * E_initial  # Should not lose more than 10% in one timestep

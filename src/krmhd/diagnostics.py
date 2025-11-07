@@ -195,8 +195,13 @@ def energy_spectrum_perpendicular(
     """
     Compute perpendicular energy spectrum E(k⊥) vs k⊥ = √(kx² + ky²).
 
-    Sums energy over all parallel (k∥ = kz) modes for each k⊥. This is the
-    critical diagnostic for RMHD, where perpendicular cascade dominates.
+    Sums **total energy** (kinetic + magnetic) over all parallel (k∥ = kz) modes
+    for each k⊥. This is the critical diagnostic for RMHD, where perpendicular
+    cascade dominates.
+
+    **Note:** This computes E_total(k⊥) = E_kin(k⊥) + E_mag(k⊥). For separate
+    kinetic and magnetic contributions, use `energy_spectrum_perpendicular_kinetic()`
+    and `energy_spectrum_perpendicular_magnetic()`.
 
     Now JIT-compiled directly thanks to KRMHDState pytree registration!
 
