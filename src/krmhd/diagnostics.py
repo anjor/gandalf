@@ -625,7 +625,6 @@ class TurbulenceDiagnostics:
     energy_total: float
 
 
-@jax.jit
 def compute_turbulence_diagnostics(
     state: KRMHDState,
     dt: float,
@@ -634,6 +633,10 @@ def compute_turbulence_diagnostics(
 ) -> TurbulenceDiagnostics:
     """
     Compute comprehensive turbulence diagnostics for instability investigation.
+
+    Note: This function is NOT JIT-compiled because it returns a Python dataclass
+    with float fields, which requires converting JAX arrays to Python floats outside
+    of a tracing context.
 
     Designed for Issue #82: identifies WHEN and WHERE numerical instabilities
     develop in forced Alfvénic turbulence. Tracks key metrics:

@@ -138,7 +138,7 @@ def main():
     print(f"  Initial energy: E_total = {E_init:.6e}")
 
     # Compute timestep
-    dt = compute_cfl_timestep(state, v_A=v_A, safety_factor=cfl_safety)
+    dt = compute_cfl_timestep(state, v_A=v_A, cfl_safety=cfl_safety)
     n_steps = int(total_time / dt)
     print(f"\n  Using dt = {dt:.4f} (CFL-limited)")
     print(f"  Total runtime: {total_time:.1f} time units = {n_steps} timesteps")
