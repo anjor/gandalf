@@ -644,7 +644,8 @@ def compute_turbulence_diagnostics(
     1. **Max velocity**: Detects field amplitude blow-up
     2. **CFL number**: Checks timestep stability constraint
     3. **Max nonlinear term**: Identifies cascade rate extremes
-    4. **High-k energy**: Detects spectral pile-up near dealiasing boundary
+    4. **High-k energy fraction**: Fraction (0-1) of energy at high-k, detects
+       spectral pile-up near dealiasing boundary
     5. **Critical balance**: Validates RMHD cascade assumptions τ_nl ~ τ_A
 
     Args:
@@ -668,9 +669,13 @@ def compute_turbulence_diagnostics(
 
     Physics:
         - **CFL condition**: CFL = max(|v|) × dt / dx < 0.5 for stability
-        - **Critical balance**: τ_nl/τ_A ~ 1 in inertial range (Goldreich-Sridhar)
+        - **Critical balance**: τ_nl/τ_A ~ 1 in inertial range (Goldreich-Sridhar).
+          Returns 0.0 if ratio > 1e10 (indicates insufficient modes in inertial range
+          or near-zero k_parallel/velocity). Most reliable for fully developed turbulence.
         - **High-k pile-up**: Energy accumulation at k ~ k_max indicates
           insufficient dissipation or dealiasing failure
+        - **k_threshold**: Fraction of k_max (default 0.9 = 90%) for high-k definition,
+          detects pile-up before reaching dealiasing boundary at k_max ≈ (2/3)k_nyquist
 
     References:
         - Issue #82: 64³ resolution instability investigation
@@ -780,9 +785,12 @@ def compute_turbulence_diagnostics(
     high_k_mask = k_perp > (k_threshold * k_max)
 
     # Sum with rfft symmetry
-    energy_highk_total = jnp.sum(jnp.where(high_k_mask, rfft_factor * energy_density, 0.0))
-    energy_total_check = jnp.sum(rfft_factor * energy_density) / (Nx * Ny)  # Should match energy_total_physical
-    energy_highk_fraction = energy_highk_total / (energy_total_check * Nx * Ny + 1e-30)
+    # Normalize both energies consistently before taking fraction
+    energy_highk_normalized = jnp.sum(jnp.where(high_k_mask, rfft_factor * energy_density, 0.0)) / (Nx * Ny)
+    energy_total_from_gradient = jnp.sum(rfft_factor * energy_density) / (Nx * Ny)
+
+    # Fraction of energy at high-k (should be between 0 and 1)
+    energy_highk_fraction = energy_highk_normalized / (energy_total_from_gradient + 1e-30)
 
     # 5. Critical balance ratio: τ_nl/τ_A in inertial range (k ~ 5-10)
     # τ_nl = 1 / (k_perp * v_perp) - nonlinear time
@@ -792,11 +800,12 @@ def compute_turbulence_diagnostics(
     # Define inertial range: resolution-dependent (10-30% of k_nyquist)
     # k_nyquist = π * Nx / Lx, k_max (dealiased) = (2/3) * k_nyquist
     k_nyquist = jnp.pi * Nx / Lx
-    k_inertial_min = 0.1 * k_nyquist  # 10% of Nyquist
-    k_inertial_max = 0.3 * k_nyquist  # 30% of Nyquist
+    k_inertial_min = 0.1 * k_nyquist  # 10% of Nyquist (avoids large-scale forcing)
+    k_inertial_max = 0.3 * k_nyquist  # 30% of Nyquist (avoids dissipation range)
 
     # Exclude nearly-2D modes (kz ≈ 0) which have infinite τ_A
-    k_parallel_min = 0.1 * k_inertial_min  # Minimum k_parallel for valid cascade
+    # Strengthen threshold to avoid division by near-zero k_parallel
+    k_parallel_min = jnp.maximum(0.5 * k_inertial_min, 0.01 * k_nyquist)
     inertial_mask = (
         (k_perp >= k_inertial_min) &
         (k_perp <= k_inertial_max) &
@@ -823,13 +832,28 @@ def compute_turbulence_diagnostics(
     valid_cb = cb_ratio_inertial_values[jnp.isfinite(cb_ratio_inertial_values)]
     cb_ratio_median = jnp.median(valid_cb) if valid_cb.size > 0 else 0.0
 
+    # Validate critical balance is physically reasonable
+    # Values > 1e10 indicate numerical issues (division by near-zero k_parallel or v_perp)
+    cb_ratio_value = float(cb_ratio_median.item() if hasattr(cb_ratio_median, 'item') else cb_ratio_median)
+    if cb_ratio_value > 1e10 or jnp.isnan(cb_ratio_value):
+        import warnings
+        warnings.warn(
+            f"Critical balance ratio unreliable ({cb_ratio_value:.2e}): "
+            f"likely too few modes in inertial range or near-zero k_parallel. "
+            f"Inertial range: k_perp ∈ [{k_inertial_min:.3f}, {k_inertial_max:.3f}], "
+            f"k_parallel min: {k_parallel_min:.3e}. Setting to 0.0.",
+            UserWarning,
+            stacklevel=2
+        )
+        cb_ratio_value = 0.0
+
     return TurbulenceDiagnostics(
         time=float(state.time.item() if hasattr(state.time, 'item') else state.time),
         max_velocity=float(max_velocity.item()),
         cfl_number=float(cfl_number.item()),
         max_nonlinear=float(max_nonlinear.item()),
         energy_highk=float(energy_highk_fraction.item()),
-        critical_balance_ratio=float(cb_ratio_median.item() if hasattr(cb_ratio_median, 'item') else cb_ratio_median),
+        critical_balance_ratio=cb_ratio_value,  # Already converted to float and validated
         energy_total=float(energy_total_physical),  # Use physics.energy() for consistency
     )
 
