@@ -795,13 +795,13 @@ def compute_turbulence_diagnostics(
     energy_total_normalized = energy_total / N_perp
 
     return TurbulenceDiagnostics(
-        time=float(state.time),
-        max_velocity=float(max_velocity),
-        cfl_number=float(cfl_number),
-        max_nonlinear=float(max_nonlinear),
-        energy_highk=float(energy_highk_fraction),
-        critical_balance_ratio=float(cb_ratio_mean),
-        energy_total=float(energy_total_normalized),
+        time=float(state.time.item() if hasattr(state.time, 'item') else state.time),
+        max_velocity=float(max_velocity.item()),
+        cfl_number=float(cfl_number.item()),
+        max_nonlinear=float(max_nonlinear.item()),
+        energy_highk=float(energy_highk_fraction.item()),
+        critical_balance_ratio=float(cb_ratio_mean.item()),
+        energy_total=float(energy_total_normalized.item()),
     )
 
 
