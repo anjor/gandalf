@@ -1523,3 +1523,156 @@ class TestPhaseMixingVisualization:
 
         # Should run without errors and close figure
         plot_phase_mixing_2d(state, m=0, kz_index=0, show=False)
+
+
+class TestTurbulenceDiagnostics:
+    """Test compute_turbulence_diagnostics() for Issue #82 investigation."""
+
+    def test_compute_diagnostics_returns_correct_type(self):
+        """Test that diagnostics return TurbulenceDiagnostics dataclass."""
+        from krmhd.diagnostics import compute_turbulence_diagnostics, TurbulenceDiagnostics
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=0.1, seed=42)
+        state = state.model_copy(update={"time": 5.0})  # Set non-zero time
+
+        dt = 0.01
+        diag = compute_turbulence_diagnostics(state, dt=dt, v_A=1.0)
+
+        # Check type
+        assert isinstance(diag, TurbulenceDiagnostics), f"Expected TurbulenceDiagnostics, got {type(diag)}"
+
+        # Check all fields are present and finite
+        assert isinstance(diag.time, float)
+        assert jnp.isfinite(diag.time)
+        assert isinstance(diag.max_velocity, float)
+        assert jnp.isfinite(diag.max_velocity)
+        assert isinstance(diag.cfl_number, float)
+        assert jnp.isfinite(diag.cfl_number)
+        assert isinstance(diag.max_nonlinear, float)
+        assert jnp.isfinite(diag.max_nonlinear)
+        assert isinstance(diag.energy_highk, float)
+        assert jnp.isfinite(diag.energy_highk)
+        assert isinstance(diag.critical_balance_ratio, float)
+        assert jnp.isfinite(diag.critical_balance_ratio)
+        assert isinstance(diag.energy_total, float)
+        assert jnp.isfinite(diag.energy_total)
+
+    def test_diagnostics_zero_state(self):
+        """Test diagnostics on zero state (should not crash)."""
+        from krmhd.diagnostics import compute_turbulence_diagnostics
+
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        state = KRMHDState(
+            z_plus=jnp.zeros((8, 16, 9), dtype=complex),
+            z_minus=jnp.zeros((8, 16, 9), dtype=complex),
+            B_parallel=jnp.zeros((8, 16, 9), dtype=complex),
+            g=jnp.zeros((10, 8, 16, 9), dtype=complex),
+            M=10,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.01,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        dt = 0.01
+        diag = compute_turbulence_diagnostics(state, dt=dt, v_A=1.0)
+
+        # Zero state should give zero diagnostics
+        assert diag.max_velocity == 0.0, "Zero state should have zero velocity"
+        assert diag.cfl_number == 0.0, "Zero state should have zero CFL"
+        assert diag.energy_total == 0.0, "Zero state should have zero energy"
+        assert diag.energy_highk == 0.0, "Zero state should have zero high-k energy"
+
+    def test_cfl_calculation(self):
+        """Test CFL number calculation with known velocity."""
+        from krmhd.diagnostics import compute_turbulence_diagnostics
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+
+        # Create state with known velocity: v = (z+ + z-)/2
+        # Set single mode with amplitude A → velocity A
+        state = initialize_alfven_wave(
+            grid=grid,
+            M=10,
+            kx_mode=1.0,
+            ky_mode=0.0,
+            kz_mode=1.0,
+            amplitude=0.5,  # Velocity amplitude
+        )
+
+        dt = 0.01
+        diag = compute_turbulence_diagnostics(state, dt=dt, v_A=1.0)
+
+        # CFL = max_velocity * dt / dx
+        # dx = Lx / Nx = 2π / 32 ≈ 0.196
+        dx = grid.Lx / grid.Nx
+        expected_cfl = diag.max_velocity * dt / dx
+
+        # Allow for numerical precision
+        assert jnp.abs(diag.cfl_number - expected_cfl) < 0.01, \
+            f"CFL mismatch: got {diag.cfl_number}, expected ~{expected_cfl}"
+
+    def test_energy_consistency(self):
+        """Test that diagnostic energy matches energy() function."""
+        from krmhd.diagnostics import compute_turbulence_diagnostics
+        from krmhd.physics import energy
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=0.1, seed=42)
+
+        # Compute energy via diagnostics
+        dt = 0.01
+        diag = compute_turbulence_diagnostics(state, dt=dt, v_A=1.0)
+
+        # Compute energy via physics module (returns dict)
+        energy_dict = energy(state)
+        E_total = energy_dict["magnetic"] + energy_dict["kinetic"] + energy_dict["compressive"]
+
+        # Should match (within numerical precision)
+        rel_error = jnp.abs(diag.energy_total - E_total) / (E_total + 1e-30)
+        assert rel_error < 0.01, \
+            f"Energy mismatch: diagnostic={diag.energy_total}, energy()={E_total}, rel_error={rel_error}"
+
+    def test_highk_energy_fraction(self):
+        """Test that high-k energy is a fraction of total energy."""
+        from krmhd.diagnostics import compute_turbulence_diagnostics
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=0.1, seed=42)
+
+        dt = 0.01
+        diag = compute_turbulence_diagnostics(state, dt=dt, v_A=1.0)
+
+        # High-k energy should be between 0 and total energy
+        assert 0 <= diag.energy_highk <= diag.energy_total, \
+            f"High-k energy {diag.energy_highk} not in range [0, {diag.energy_total}]"
+
+        # For k^-5/3 spectrum, most energy is at low-k, so high-k should be small
+        # (unless there's significant pile-up)
+        fraction = diag.energy_highk / (diag.energy_total + 1e-30)
+        assert fraction < 0.5, f"High-k energy fraction {fraction} unexpectedly large"
+
+    def test_diagnostics_with_single_mode(self):
+        """Test diagnostics with a single Alfvén wave mode."""
+        from krmhd.diagnostics import compute_turbulence_diagnostics
+
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        state = initialize_alfven_wave(
+            grid=grid,
+            M=10,
+            kx_mode=2.0,
+            ky_mode=2.0,
+            kz_mode=1.0,
+            amplitude=0.1,
+        )
+
+        dt = 0.01
+        diag = compute_turbulence_diagnostics(state, dt=dt, v_A=1.0)
+
+        # All diagnostics should be well-defined
+        assert diag.max_velocity > 0, "Single mode should have non-zero velocity"
+        assert diag.energy_total > 0, "Single mode should have non-zero energy"
+        assert diag.cfl_number > 0, "Single mode should have non-zero CFL"
