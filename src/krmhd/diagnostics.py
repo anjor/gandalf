@@ -752,16 +752,37 @@ def compute_turbulence_diagnostics(
     k_max_y = (2 * jnp.pi / Ly) * idx_max_y
     k_max = jnp.sqrt(k_max_x**2 + k_max_y**2)
 
-    # Energy density per mode (from Elsasser variables)
-    energy_density = jnp.abs(state.z_plus)**2 + jnp.abs(state.z_minus)**2
+    # 4. High-k energy fraction and total energy
+    # Use physics.energy() for consistent calculation with gradient energy |∇φ|² + |∇A∥|²
+    from krmhd.physics import energy as compute_energy_components
 
-    # Mask for high-k modes
+    energy_dict = compute_energy_components(state)
+    energy_total_physical = energy_dict["total"]
+
+    # For high-k pile-up detection, compute energy density WITH gradient factor
+    # E ~ k_perp^2 * |z±|^2 (gradient energy)
+    kx_3d = state.grid.kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = state.grid.ky[jnp.newaxis, :, jnp.newaxis]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+
+    # Elsasser → φ, A∥ gradient energy
+    phi_3d = 0.5 * (state.z_plus + state.z_minus)
+    A_par_3d = 0.5 * (state.z_plus - state.z_minus)
+    energy_density = 0.5 * k_perp_squared * (jnp.abs(phi_3d)**2 + jnp.abs(A_par_3d)**2)
+
+    # rfft symmetry factors
+    kx_zero = (kx_3d == 0.0)
+    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_middle = ~(kx_zero | kx_nyquist)
+    rfft_factor = jnp.where(kx_middle, 2.0, 1.0)
+
+    # High-k mask
     high_k_mask = k_perp > (k_threshold * k_max)
 
-    # Sum energy in high-k vs total
-    energy_highk_total = jnp.sum(jnp.where(high_k_mask, energy_density, 0.0))
-    energy_total = jnp.sum(energy_density)
-    energy_highk_fraction = energy_highk_total / (energy_total + 1e-30)  # Avoid division by zero
+    # Sum with rfft symmetry
+    energy_highk_total = jnp.sum(jnp.where(high_k_mask, rfft_factor * energy_density, 0.0))
+    energy_total_check = jnp.sum(rfft_factor * energy_density) / (Nx * Ny)  # Should match energy_total_physical
+    energy_highk_fraction = energy_highk_total / (energy_total_check * Nx * Ny + 1e-30)
 
     # 5. Critical balance ratio: τ_nl/τ_A in inertial range (k ~ 5-10)
     # τ_nl = 1 / (k_perp * v_perp) - nonlinear time
@@ -802,10 +823,6 @@ def compute_turbulence_diagnostics(
     valid_cb = cb_ratio_inertial_values[jnp.isfinite(cb_ratio_inertial_values)]
     cb_ratio_median = jnp.median(valid_cb) if valid_cb.size > 0 else 0.0
 
-    # Normalize energy_total properly (match energy() function convention)
-    N_perp = Nx * Ny
-    energy_total_normalized = energy_total / N_perp
-
     return TurbulenceDiagnostics(
         time=float(state.time.item() if hasattr(state.time, 'item') else state.time),
         max_velocity=float(max_velocity.item()),
@@ -813,7 +830,7 @@ def compute_turbulence_diagnostics(
         max_nonlinear=float(max_nonlinear.item()),
         energy_highk=float(energy_highk_fraction.item()),
         critical_balance_ratio=float(cb_ratio_median.item() if hasattr(cb_ratio_median, 'item') else cb_ratio_median),
-        energy_total=float(energy_total_normalized.item()),
+        energy_total=float(energy_total_physical),  # Use physics.energy() for consistency
     )
 
 
