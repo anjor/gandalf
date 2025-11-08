@@ -768,10 +768,20 @@ def compute_turbulence_diagnostics(
     # τ_A = 1 / (k_parallel * v_A) - Alfvén time
     # Critical balance: τ_nl ~ τ_A
 
-    # Define inertial range: k_perp between 5 and 10 (in units of 2π/L)
-    k_inertial_min = 5.0 * (2 * jnp.pi / Lx)
-    k_inertial_max = 10.0 * (2 * jnp.pi / Lx)
-    inertial_mask = (k_perp >= k_inertial_min) & (k_perp <= k_inertial_max) & (k_perp > 0)
+    # Define inertial range: resolution-dependent (10-30% of k_nyquist)
+    # k_nyquist = π * Nx / Lx, k_max (dealiased) = (2/3) * k_nyquist
+    k_nyquist = jnp.pi * Nx / Lx
+    k_inertial_min = 0.1 * k_nyquist  # 10% of Nyquist
+    k_inertial_max = 0.3 * k_nyquist  # 30% of Nyquist
+
+    # Exclude nearly-2D modes (kz ≈ 0) which have infinite τ_A
+    k_parallel_min = 0.1 * k_inertial_min  # Minimum k_parallel for valid cascade
+    inertial_mask = (
+        (k_perp >= k_inertial_min) &
+        (k_perp <= k_inertial_max) &
+        (k_perp > 0) &
+        (jnp.abs(kz_3d) > k_parallel_min)  # Exclude kz ≈ 0
+    )
 
     # Velocity amplitude at each k: v_k ~ |z±_k|
     v_perp_k = jnp.sqrt(jnp.abs(state.z_plus)**2 + jnp.abs(state.z_minus)**2) / 2.0
@@ -786,9 +796,11 @@ def compute_turbulence_diagnostics(
     # Critical balance ratio
     cb_ratio = tau_nl / tau_A_k
 
-    # Average over inertial range
-    cb_ratio_inertial = jnp.where(inertial_mask, cb_ratio, 0.0)
-    cb_ratio_mean = jnp.sum(cb_ratio_inertial) / (jnp.sum(inertial_mask) + 1e-30)
+    # Median over inertial range (more robust to outliers than mean)
+    cb_ratio_inertial_values = jnp.where(inertial_mask, cb_ratio, jnp.nan)
+    # Use nanmedian equivalent: median of finite values
+    valid_cb = cb_ratio_inertial_values[jnp.isfinite(cb_ratio_inertial_values)]
+    cb_ratio_median = jnp.median(valid_cb) if valid_cb.size > 0 else 0.0
 
     # Normalize energy_total properly (match energy() function convention)
     N_perp = Nx * Ny
@@ -800,7 +812,7 @@ def compute_turbulence_diagnostics(
         cfl_number=float(cfl_number.item()),
         max_nonlinear=float(max_nonlinear.item()),
         energy_highk=float(energy_highk_fraction.item()),
-        critical_balance_ratio=float(cb_ratio_mean.item()),
+        critical_balance_ratio=float(cb_ratio_median.item() if hasattr(cb_ratio_median, 'item') else cb_ratio_median),
         energy_total=float(energy_total_normalized.item()),
     )
 
