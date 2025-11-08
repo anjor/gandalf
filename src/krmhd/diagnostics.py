@@ -589,6 +589,276 @@ def energy_spectrum_parallel(
 
 
 # =============================================================================
+# Turbulence Diagnostics for Instability Investigation (Issue #82)
+# =============================================================================
+
+
+@dataclass
+class TurbulenceDiagnostics:
+    """
+    Container for turbulence diagnostics at a single timestep.
+
+    Designed for Issue #82 investigation: tracks key metrics to identify
+    WHEN and WHERE numerical instabilities develop in forced turbulence.
+
+    Attributes:
+        time: Simulation time in Alfvén units (τ_A)
+        max_velocity: Maximum perpendicular velocity |v⊥| = |(z⁺ + z⁻)/2|
+        cfl_number: Courant-Friedrichs-Lewy number = max_vel × dt / dx
+        max_nonlinear: Maximum nonlinear term |{z∓, ∇²z±}|
+        energy_highk: Fraction of energy at high-k (k > k_threshold × k_max)
+        critical_balance_ratio: Mean τ_nl/τ_A in inertial range (k ~ 5-10)
+        energy_total: Total energy for normalization
+
+    Usage:
+        >>> diag = compute_turbulence_diagnostics(state, dt=0.005, v_A=1.0)
+        >>> print(f"CFL = {diag.cfl_number:.3f}, max_vel = {diag.max_velocity:.2f}")
+        >>> if diag.cfl_number > 1.0:
+        ...     print("WARNING: CFL condition violated!")
+    """
+    time: float
+    max_velocity: float
+    cfl_number: float
+    max_nonlinear: float
+    energy_highk: float
+    critical_balance_ratio: float
+    energy_total: float
+
+
+def compute_turbulence_diagnostics(
+    state: KRMHDState,
+    dt: float,
+    v_A: float = 1.0,
+    k_threshold: float = 0.9,  # Fraction of k_max for high-k energy
+) -> TurbulenceDiagnostics:
+    """
+    Compute comprehensive turbulence diagnostics for instability investigation.
+
+    Note: This function is NOT JIT-compiled because it returns a Python dataclass
+    with float fields, which requires converting JAX arrays to Python floats outside
+    of a tracing context.
+
+    Designed for Issue #82: identifies WHEN and WHERE numerical instabilities
+    develop in forced Alfvénic turbulence. Tracks key metrics:
+
+    1. **Max velocity**: Detects field amplitude blow-up
+    2. **CFL number**: Checks timestep stability constraint
+    3. **Max nonlinear term**: Identifies cascade rate extremes
+    4. **High-k energy fraction**: Fraction (0-1) of energy at high-k, detects
+       spectral pile-up near dealiasing boundary
+    5. **Critical balance**: Validates RMHD cascade assumptions τ_nl ~ τ_A
+
+    Args:
+        state: Current KRMHD state with Elsasser variables z±
+        dt: Timestep in Alfvén times
+        v_A: Alfvén velocity (default: 1.0)
+        k_threshold: Fraction of k_max for high-k energy (default: 0.9)
+
+    Returns:
+        TurbulenceDiagnostics: Container with all diagnostic metrics
+
+    Example:
+        >>> # Track diagnostics during evolution
+        >>> diagnostics_list = []
+        >>> for i in range(n_steps):
+        ...     diag = compute_turbulence_diagnostics(state, dt=0.005)
+        ...     diagnostics_list.append(diag)
+        ...     if diag.cfl_number > 1.0:
+        ...         print(f"WARNING: CFL violation at t={diag.time:.2f}")
+        ...     state = gandalf_step(state, dt=0.005, eta=1.0, v_A=1.0)
+
+    Physics:
+        - **CFL condition**: CFL = max(|v|) × dt / dx < 0.5 for stability
+        - **Critical balance**: τ_nl/τ_A ~ 1 in inertial range (Goldreich-Sridhar).
+          Returns 0.0 if ratio > 1e10 (indicates insufficient modes in inertial range
+          or near-zero k_parallel/velocity). Most reliable for fully developed turbulence.
+        - **High-k pile-up**: Energy accumulation at k ~ k_max indicates
+          insufficient dissipation or dealiasing failure
+        - **k_threshold**: Fraction of k_max (default 0.9 = 90%) for high-k definition,
+          detects pile-up before reaching dealiasing boundary at k_max ≈ (2/3)k_nyquist
+
+    References:
+        - Issue #82: 64³ resolution instability investigation
+        - PR #81: Parameter search history for 64³ forced turbulence
+        - Goldreich & Sridhar (1995): Critical balance in MHD turbulence
+    """
+    # Extract grid dimensions from state
+    Nz, Ny, Nx_h = state.z_plus.shape
+    Nx = 2 * (Nx_h - 1)  # Real space x-dimension for rfft
+
+    # Grid spacing from state.grid
+    Lx = state.grid.Lx
+    Ly = state.grid.Ly
+    Lz = state.grid.Lz
+    dx = Lx / Nx
+    dy = Ly / Ny
+    dz = Lz / Nz
+    min_dx = jnp.min(jnp.array([dx, dy, dz]))
+
+    # Get wavenumbers from state.grid
+    kx = state.grid.kx  # Shape: [Nx//2+1]
+    ky = state.grid.ky  # Shape: [Ny]
+    kz = state.grid.kz  # Shape: [Nz]
+
+    # 1. Max velocity: |v⊥| = |(z⁺ + z⁻)/2|
+    # Convert to real space and compute magnitude
+    velocity_fourier = (state.z_plus + state.z_minus) / 2.0
+    velocity_real = rfftn_inverse(velocity_fourier, Nz, Ny, Nx)
+    max_velocity = jnp.max(jnp.abs(velocity_real))
+
+    # 2. CFL number
+    cfl_number = max_velocity * dt / min_dx
+
+    # 3. Max nonlinear term: |{z∓, ∇²z±}|
+    # Import needed: we'll need poisson_bracket_3d and laplacian
+    # For now, compute Laplacian here inline
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # [1, 1, Nx//2+1]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # [1, Ny, 1]
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]  # [Nz, 1, 1]
+    k_perp_sq = kx_3d**2 + ky_3d**2
+
+    lap_z_plus = -(k_perp_sq + kz_3d**2) * state.z_plus
+    lap_z_minus = -(k_perp_sq + kz_3d**2) * state.z_minus
+
+    # Poisson bracket in real space: {f, g} = ∂ₓf ∂ᵧg - ∂ᵧf ∂ₓg
+    # We need {z⁻, ∇²z⁺} and {z⁺, ∇²z⁻}
+    # For simplicity, compute an approximation using field magnitudes
+    # Full implementation would use poisson_bracket_3d
+    z_plus_real = rfftn_inverse(state.z_plus, Nz, Ny, Nx)
+    z_minus_real = rfftn_inverse(state.z_minus, Nz, Ny, Nx)
+    lap_z_plus_real = rfftn_inverse(lap_z_plus, Nz, Ny, Nx)
+    lap_z_minus_real = rfftn_inverse(lap_z_minus, Nz, Ny, Nx)
+
+    # Compute derivatives for Poisson bracket
+    dz_plus_dx_real = rfftn_inverse(derivative_x(state.z_plus, kx), Nz, Ny, Nx)
+    dz_plus_dy_real = rfftn_inverse(derivative_y(state.z_plus, ky), Nz, Ny, Nx)
+    dz_minus_dx_real = rfftn_inverse(derivative_x(state.z_minus, kx), Nz, Ny, Nx)
+    dz_minus_dy_real = rfftn_inverse(derivative_y(state.z_minus, ky), Nz, Ny, Nx)
+
+    dlap_plus_dx_real = rfftn_inverse(derivative_x(lap_z_plus, kx), Nz, Ny, Nx)
+    dlap_plus_dy_real = rfftn_inverse(derivative_y(lap_z_plus, ky), Nz, Ny, Nx)
+    dlap_minus_dx_real = rfftn_inverse(derivative_x(lap_z_minus, kx), Nz, Ny, Nx)
+    dlap_minus_dy_real = rfftn_inverse(derivative_y(lap_z_minus, ky), Nz, Ny, Nx)
+
+    # Poisson brackets: {z⁻, ∇²z⁺} and {z⁺, ∇²z⁻}
+    pb1 = dz_minus_dx_real * dlap_plus_dy_real - dz_minus_dy_real * dlap_plus_dx_real
+    pb2 = dz_plus_dx_real * dlap_minus_dy_real - dz_plus_dy_real * dlap_minus_dx_real
+
+    max_nonlinear = jnp.max(jnp.abs(pb1) + jnp.abs(pb2))
+
+    # 4. High-k energy: E(k > k_threshold × k_max)
+    # Compute k_perp for each mode
+    k_perp = jnp.sqrt(k_perp_sq)
+
+    # k_max at 2/3 dealiasing boundary
+    idx_max_x = (Nx - 1) // 3
+    idx_max_y = (Ny - 1) // 3
+    k_max_x = (2 * jnp.pi / Lx) * idx_max_x
+    k_max_y = (2 * jnp.pi / Ly) * idx_max_y
+    k_max = jnp.sqrt(k_max_x**2 + k_max_y**2)
+
+    # 4. High-k energy fraction and total energy
+    # Use physics.energy() for consistent calculation with gradient energy |∇φ|² + |∇A∥|²
+    from krmhd.physics import energy as compute_energy_components
+
+    energy_dict = compute_energy_components(state)
+    energy_total_physical = energy_dict["total"]
+
+    # For high-k pile-up detection, compute energy density WITH gradient factor
+    # E ~ k_perp^2 * |z±|^2 (gradient energy)
+    kx_3d = state.grid.kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = state.grid.ky[jnp.newaxis, :, jnp.newaxis]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+
+    # Elsasser → φ, A∥ gradient energy
+    phi_3d = 0.5 * (state.z_plus + state.z_minus)
+    A_par_3d = 0.5 * (state.z_plus - state.z_minus)
+    energy_density = 0.5 * k_perp_squared * (jnp.abs(phi_3d)**2 + jnp.abs(A_par_3d)**2)
+
+    # rfft symmetry factors
+    kx_zero = (kx_3d == 0.0)
+    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_middle = ~(kx_zero | kx_nyquist)
+    rfft_factor = jnp.where(kx_middle, 2.0, 1.0)
+
+    # High-k mask
+    high_k_mask = k_perp > (k_threshold * k_max)
+
+    # Sum with rfft symmetry
+    # Normalize both energies consistently before taking fraction
+    energy_highk_normalized = jnp.sum(jnp.where(high_k_mask, rfft_factor * energy_density, 0.0)) / (Nx * Ny)
+    energy_total_from_gradient = jnp.sum(rfft_factor * energy_density) / (Nx * Ny)
+
+    # Fraction of energy at high-k (should be between 0 and 1)
+    energy_highk_fraction = energy_highk_normalized / (energy_total_from_gradient + 1e-30)
+
+    # 5. Critical balance ratio: τ_nl/τ_A in inertial range (k ~ 5-10)
+    # τ_nl = 1 / (k_perp * v_perp) - nonlinear time
+    # τ_A = 1 / (k_parallel * v_A) - Alfvén time
+    # Critical balance: τ_nl ~ τ_A
+
+    # Define inertial range: resolution-dependent (10-30% of k_nyquist)
+    # k_nyquist = π * Nx / Lx, k_max (dealiased) = (2/3) * k_nyquist
+    k_nyquist = jnp.pi * Nx / Lx
+    k_inertial_min = 0.1 * k_nyquist  # 10% of Nyquist (avoids large-scale forcing)
+    k_inertial_max = 0.3 * k_nyquist  # 30% of Nyquist (avoids dissipation range)
+
+    # Exclude nearly-2D modes (kz ≈ 0) which have infinite τ_A
+    # Strengthen threshold to avoid division by near-zero k_parallel
+    k_parallel_min = jnp.maximum(0.5 * k_inertial_min, 0.01 * k_nyquist)
+    inertial_mask = (
+        (k_perp >= k_inertial_min) &
+        (k_perp <= k_inertial_max) &
+        (k_perp > 0) &
+        (jnp.abs(kz_3d) > k_parallel_min)  # Exclude kz ≈ 0
+    )
+
+    # Velocity amplitude at each k: v_k ~ |z±_k|
+    v_perp_k = jnp.sqrt(jnp.abs(state.z_plus)**2 + jnp.abs(state.z_minus)**2) / 2.0
+
+    # Nonlinear time at each k
+    tau_nl = 1.0 / (k_perp * v_perp_k + 1e-30)
+
+    # Alfvén time at each k (using k_parallel = kz)
+    k_parallel = jnp.abs(kz_3d)
+    tau_A_k = 1.0 / (k_parallel * v_A + 1e-30)
+
+    # Critical balance ratio
+    cb_ratio = tau_nl / tau_A_k
+
+    # Median over inertial range (more robust to outliers than mean)
+    cb_ratio_inertial_values = jnp.where(inertial_mask, cb_ratio, jnp.nan)
+    # Use nanmedian equivalent: median of finite values
+    valid_cb = cb_ratio_inertial_values[jnp.isfinite(cb_ratio_inertial_values)]
+    cb_ratio_median = jnp.median(valid_cb) if valid_cb.size > 0 else 0.0
+
+    # Validate critical balance is physically reasonable
+    # Values > 1e10 indicate numerical issues (division by near-zero k_parallel or v_perp)
+    cb_ratio_value = float(cb_ratio_median.item() if hasattr(cb_ratio_median, 'item') else cb_ratio_median)
+    if cb_ratio_value > 1e10 or jnp.isnan(cb_ratio_value):
+        import warnings
+        warnings.warn(
+            f"Critical balance ratio unreliable ({cb_ratio_value:.2e}): "
+            f"likely too few modes in inertial range or near-zero k_parallel. "
+            f"Inertial range: k_perp ∈ [{k_inertial_min:.3f}, {k_inertial_max:.3f}], "
+            f"k_parallel min: {k_parallel_min:.3e}. Setting to 0.0.",
+            UserWarning,
+            stacklevel=2
+        )
+        cb_ratio_value = 0.0
+
+    return TurbulenceDiagnostics(
+        time=float(state.time.item() if hasattr(state.time, 'item') else state.time),
+        max_velocity=float(max_velocity.item()),
+        cfl_number=float(cfl_number.item()),
+        max_nonlinear=float(max_nonlinear.item()),
+        energy_highk=float(energy_highk_fraction.item()),
+        critical_balance_ratio=cb_ratio_value,  # Already converted to float and validated
+        energy_total=float(energy_total_physical),  # Use physics.energy() for consistency
+    )
+
+
+# =============================================================================
 # Field Line Following and Spectral Interpolation
 # =============================================================================
 

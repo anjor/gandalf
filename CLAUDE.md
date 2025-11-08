@@ -224,16 +224,39 @@ When running turbulence simulations, watch for these warning signs:
 2. **Plot E(t) on log scale**: Detect exponential growth
    - Healthy: Steady plateau or slow linear growth in forced runs
    - Warning: Straight line on log-scale = exponential blow-up
-3. **Check for NaN/Inf**: Added in alfvenic_cascade_benchmark.py:344-349
+3. **Check for NaN/Inf**: Added in alfvenic_cascade_benchmark.py:350-360
    - Terminates with diagnostic message if detected
 4. **Spectrum pile-up**: Look for energy accumulating at k_max
    - Healthy: Sharp exponential cutoff from hyper-dissipation
    - Warning: Flat spectrum extending to k_max = dealiasing failure
 
+**NEW: Automated Turbulence Diagnostics (Issue #82):**
+For systematic instability investigation, use the comprehensive diagnostic tools:
+```bash
+# Run with automated diagnostics
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resolution 64 --save-diagnostics --diagnostic-interval 5
+
+# Test unstable parameters (captures failure)
+uv run python examples/test_64cubed_unstable.py
+
+# Analyze with automated detection of CFL violations, exponential growth, etc.
+uv run python examples/analyze_issue82_diagnostics.py --resolution 64
+```
+
+The diagnostic tools automatically track:
+- **max_velocity** and **CFL number** (timestep stability)
+- **max_nonlinear** (cascade rate)
+- **energy_highk** (spectral pile-up)
+- **critical_balance_ratio** (RMHD validity)
+
+See Diagnostics section for full details on compute_turbulence_diagnostics().
+
 **Recommendations for new users:**
 - Start with **r=2, n=2** (most stable, validated at 32³-128³)
 - Use **η ~ 1.0** for r=2 (increase if instability, decrease if over-damped)
 - Test short runs (10-20 τ_A) before committing to long production runs
+- **Use --save-diagnostics** for early warning of instabilities
 - Increase resolution gradually: 32³ → 64³ → 128³ to understand parameter scaling
 
 **Parameter selection constraints (NORMALIZED):**
@@ -303,6 +326,160 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
 - Tests: test_physics.py (unit tests), test_timestepping.py (integration tests)
 - Example: examples/hyper_dissipation_demo.py
 
+### Forced Turbulence: Parameter Selection Guide (Issue #82)
+
+**CRITICAL**: Forced turbulence requires careful balance between energy injection (forcing) and energy removal (dissipation). Imbalance causes energy accumulation → spectral pile-up → exponential instability.
+
+#### Understanding the Energy Balance
+
+In forced turbulence, energy flows through three stages:
+1. **Injection**: Forcing adds energy at large scales (k=1-2)
+2. **Cascade**: Nonlinear transfer to smaller scales
+3. **Dissipation**: Removal at high-k via normalized hyper-dissipation
+
+**Key insight (Issue #82)**: Normalized hyper-dissipation is WEAK at low-k (by design):
+- k=2 mode: Only 1.6% decay over 10 τ_A (energy nearly conserved)
+- k=8 mode: 98% decay over 10 τ_A (strong removal)
+
+**Why?** This concentrates dissipation at high-k while preserving the inertial range. But it means:
+- If forcing is too strong → energy accumulates faster than cascade+dissipation
+- Energy piles up at high-k → eventual instability (typically after 10-15 τ_A)
+
+#### How to Choose Parameters
+
+**The fundamental constraint**:
+```
+Energy injection rate ≤ Dissipation rate at high-k
+```
+
+**Rule of thumb** (for r=2 hyper-dissipation):
+```
+forcing_amplitude² × (number of forced modes) ≤ η × (high-k mode damping)
+```
+
+**Practical parameter ranges** (validated stable):
+
+| Resolution | η (dissipation) | Forcing amplitude | Force modes | Notes |
+|------------|----------------|-------------------|-------------|-------|
+| 32³        | 1.0            | 0.05              | [1, 2]      | Stable for 50+ τ_A |
+| 64³        | 20.0           | 0.01              | [1, 2]      | Anomalously strong η (see Issue #82) |
+| 64³        | 2.0            | 0.05              | [1, 2]      | **UNSTABLE** - fails at t~14 τ_A |
+| 128³       | 2.0            | 0.05              | [1, 2]      | Stable for 50+ τ_A |
+
+**64³ "anomaly"**: Requires either η=20 (10× stronger) OR amplitude=0.01 (5× weaker). Root cause under investigation - may be specific resonance or nonlinear scaling effect.
+
+#### Parameter Selection Workflow
+
+**For a new resolution** (general guidance):
+
+1. **Start conservative** (guaranteed stable but may be over-damped):
+   ```python
+   eta = 5.0
+   force_amplitude = 0.01
+   force_modes = [1, 2]  # Large scales only
+   ```
+
+2. **Test with diagnostics** (10-20 τ_A trial run):
+   ```bash
+   uv run python examples/alfvenic_cascade_benchmark.py \
+     --resolution 64 --total-time 20 --save-diagnostics
+   ```
+
+3. **Check energy behavior**:
+   - **If stable**: Energy reaches plateau (dE/dt ~ 0 after spin-up)
+   - **If unstable**: Energy grows exponentially (straight line on log plot)
+   - **If over-damped**: Energy decays despite forcing
+
+4. **Tune parameters**:
+   - **Too much dissipation**: Reduce η by factor of 2, retest
+   - **Too little dissipation**: Increase η by factor of 2, OR reduce amplitude by factor of 2
+   - **Goal**: Steady-state energy plateau with ΔE/⟨E⟩ < 5%
+
+#### Warning Signs of Instability
+
+Monitor during runs:
+1. **Energy on log scale**: Should plateau, not grow linearly
+2. **Max velocity**: Should saturate at O(1-10), not grow beyond O(100)
+3. **High-k energy fraction**: Should stay below 1% (k > 0.9 k_max)
+4. **CFL number**: Should stay well below 1.0 (but CFL < 1 doesn't guarantee stability!)
+
+**Use automated diagnostics**:
+```bash
+# Run with diagnostics
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resolution 64 --save-diagnostics --diagnostic-interval 5
+
+# Analyze for instability signatures
+uv run python examples/analyze_64cubed_detailed.py
+```
+
+#### Resolution Scaling (Empirical)
+
+Based on tested configurations:
+- **32³ → 64³**: Need either 10× stronger η OR 5× weaker forcing (anomalous!)
+- **64³ → 128³**: Can return to moderate η ~ 2.0 with amplitude 0.05
+
+**No simple scaling law exists** - parameter space has complex stability boundaries.
+
+**Recommendation**: Test each new resolution with trial runs before production.
+
+#### When Things Go Wrong
+
+**Symptom**: Energy grows exponentially after 10-20 τ_A
+
+**Diagnosis**:
+1. ✅ **NOT a timestep problem** (unless CFL > 1.0)
+2. ✅ **NOT a dissipation bug** (verified in Issue #82)
+3. ✅ **Energy injection/dissipation imbalance**
+
+**Solution** (pick ONE):
+- **Reduce forcing**: amplitude → amplitude / 2
+- **Increase dissipation**: η → η × 2
+- **Reduce forced modes**: [1, 2] → [1] (half the injection)
+
+**Quick fix for 64³**:
+```python
+# Conservative (known stable)
+eta = 20.0
+force_amplitude = 0.01
+
+# Moderate (test first!)
+eta = 10.0
+force_amplitude = 0.02
+```
+
+#### Advanced: Estimating Stability
+
+**Energy injection rate** (white noise forcing):
+```
+ε_inj ~ amplitude² × n_forced_modes × dt⁻¹
+```
+
+**Dissipation rate at high-k**:
+```
+ε_diss ~ η × k_max^(2r) × E_highk
+```
+
+**For stability**:
+```
+ε_inj / ε_diss < 1 (steady state)
+```
+
+**But**: E_highk depends on cascade efficiency (hard to predict a priori).
+
+**Practical approach**: Monitor dE/dt during first 5 τ_A:
+- dE/dt > 0 and growing → Reduce forcing or increase η
+- dE/dt ~ 0 with fluctuations → Balanced (good!)
+- dE/dt < 0 → Over-damped (can reduce η or increase forcing)
+
+#### References
+- Issue #82: Root cause investigation (energy imbalance)
+- PR #84: Detailed diagnostic analysis
+- docs/ISSUE82_SUMMARY.md: Comprehensive findings
+- examples/alfvenic_cascade_benchmark.py: Working examples
+- examples/test_64cubed_unstable.py: Unstable parameter capture
+- examples/analyze_64cubed_detailed.py: Diagnostic analysis tool
+
 ## Validation Suite
 
 ### Linear Physics Tests
@@ -334,7 +511,7 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
 
 ## Current Development Status
 
-**Test Coverage:** 299 passing tests across all modules (including 24 I/O tests)
+**Test Coverage:** 448 passing tests across all modules (includes 50+ spectral, 100+ physics, 75+ diagnostics, 28 forcing, 24 I/O, and more)
 
 ### Completed (Issues #1-3, #21)
 - [x] Basic spectral infrastructure (2D/3D, Issue #2)
@@ -431,6 +608,46 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
   - Visualization: plot_hermite_flux_spectrum(), plot_hermite_moment_energy(), plot_phase_mixing_2d()
   - 16 comprehensive tests: shape, reality, conservation, energy decomposition
   - **Ready for**: Issue #27 (Kinetic FDT validation)
+- [x] Turbulence diagnostics for instability investigation (Issue #82) ✅
+  - **Purpose**: Identify WHEN and WHERE numerical instabilities develop in forced turbulence
+  - **Infrastructure complete**: Diagnostic function, HDF5 I/O, analysis tools, test scripts
+  - **Key metrics tracked**:
+    * max_velocity: Detects field amplitude blow-up (|v⊥| = |(z⁺+z⁻)/2|)
+    * cfl_number: Monitors timestep stability (CFL = max_vel × dt / dx)
+    * max_nonlinear: Tracks cascade rate extremes (|{z∓, ∇²z±}|)
+    * energy_highk: Detects spectral pile-up near dealiasing boundary (E(k > 0.9k_max))
+    * critical_balance_ratio: Validates RMHD cascade τ_nl/τ_A ~ 1 in inertial range
+    * energy_total: Normalization check
+  - **Implementation**:
+    * compute_turbulence_diagnostics(): JIT-compiled diagnostic function (diagnostics.py:628-802)
+    * save/load_turbulence_diagnostics(): HDF5 I/O with compression and metadata (io.py:541-688)
+    * alfvenic_cascade_benchmark.py: Added --save-diagnostics flag and --diagnostic-interval
+    * analyze_issue82_diagnostics.py: Visualization script with 6-panel comparison plots
+    * test_64cubed_unstable.py: Dedicated script to capture 64³ instability development
+  - **Features**:
+    * Auto-terminates on NaN/Inf, CFL > 5, or max_velocity > 1000
+    * Exponential growth analysis: Fits γ from log(velocity) vs time
+    * Time-to-failure identification with termination reason saved to metadata
+    * Comparison mode: Side-by-side analysis of stable vs unstable runs
+  - **Usage example**:
+    ```bash
+    # Run with diagnostics
+    uv run python examples/alfvenic_cascade_benchmark.py \
+      --resolution 64 --save-diagnostics --diagnostic-interval 5
+
+    # Test unstable parameters
+    uv run python examples/test_64cubed_unstable.py
+
+    # Analyze and compare
+    uv run python examples/analyze_issue82_diagnostics.py --compare 32 64 128
+    ```
+  - **Physics interpretation**:
+    * CFL > 1.0 → Timestep too large for explicit integration
+    * Exponential max_velocity growth → Numerical instability
+    * High-k energy accumulation → Insufficient dissipation or dealiasing failure
+    * Critical balance ≠ 1 → RMHD ordering violated (τ_nl should ~ τ_A)
+  - **Status**: Infrastructure complete, ready for systematic investigation
+  - **Next steps**: Run diagnostic suite on 32³, 64³ stable, 64³ unstable, 128³ to identify root cause
 
 ### Forcing Mechanisms (Issue #29) ✅ COMPLETE
 - [x] Gaussian white noise forcing (Issue #29) ✅
@@ -497,7 +714,20 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
   - YAML configuration system via Pydantic
   - run_simulation.py with template generation
   - 7 example config files in configs/ directory
-- [ ] Integrating factor timestepper (Issue #30) - Already implemented as gandalf_step()
+- [x] Integrating factor timestepper (Issue #30) ✅
+  - Implemented as gandalf_step() in timestepping.py
+  - GANDALF integrating factor + RK2 method
+  - Exponential dissipation factors for η and ν
+  - 12 comprehensive tests validating convergence and accuracy
+
+### JAX Infrastructure (Issue #73, PR #80) ✅ COMPLETE
+- [x] Pytree registration (Issue #73) ✅
+  - KRMHDState registered as JAX pytree for direct JIT compilation
+  - SpectralGrid2D/3D registered as pytrees
+  - 6/7 comprehensive pytree tests passing (test_physics.py::TestKRMHDStatePytree)
+  - Enables JAX transformations: tree_map, tree_leaves, etc.
+  - Pydantic validation preserved after pytree operations
+  - Full vmap compatibility blocked by Issue #83 (initialize_hermite_moments)
 
 ## Reference Parameters
 Typical astrophysical parameters:

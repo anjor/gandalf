@@ -534,3 +534,142 @@ def test_timeseries_version_warning(energy_history, tmpdir):
     # Loading should produce warning
     with pytest.warns(UserWarning, match="version"):
         load_timeseries(str(filename))
+
+
+# =============================================================================
+# Turbulence Diagnostics I/O Tests (Issue #82)
+# =============================================================================
+
+
+def test_turbulence_diagnostics_roundtrip(grid, tmpdir):
+    """Test save/load_turbulence_diagnostics preserves data correctly."""
+    from krmhd.io import save_turbulence_diagnostics, load_turbulence_diagnostics
+    from krmhd.diagnostics import compute_turbulence_diagnostics, TurbulenceDiagnostics
+    from krmhd.physics import initialize_random_spectrum
+
+    # Create a list of diagnostic samples
+    diagnostics_list = []
+    for i in range(10):
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=0.1, seed=i)
+        state = state.model_copy(update={"time": i * 0.5})  # Different times
+        diag = compute_turbulence_diagnostics(state, dt=0.01, v_A=1.0)
+        diagnostics_list.append(diag)
+
+    filename = tmpdir / "test_turbulence_diagnostics.h5"
+    metadata = {
+        "resolution": grid.Nx,
+        "eta": 1.0,
+        "nu": 1.0,
+        "hyper_r": 2,
+        "dt": 0.01,
+    }
+
+    # Save diagnostics
+    save_turbulence_diagnostics(diagnostics_list, str(filename), **metadata)
+
+    # Load diagnostics
+    loaded_list, loaded_metadata = load_turbulence_diagnostics(str(filename))
+
+    # Check length
+    assert len(loaded_list) == len(diagnostics_list), "Diagnostic list length mismatch"
+
+    # Check each diagnostic
+    for original, loaded in zip(diagnostics_list, loaded_list):
+        assert np.isclose(original.time, loaded.time, rtol=1e-6), "Time mismatch"
+        assert np.isclose(original.max_velocity, loaded.max_velocity, rtol=1e-6), "max_velocity mismatch"
+        assert np.isclose(original.cfl_number, loaded.cfl_number, rtol=1e-6), "cfl_number mismatch"
+        assert np.isclose(original.max_nonlinear, loaded.max_nonlinear, rtol=1e-6), "max_nonlinear mismatch"
+        assert np.isclose(original.energy_highk, loaded.energy_highk, rtol=1e-6), "energy_highk mismatch"
+        assert np.isclose(original.critical_balance_ratio, loaded.critical_balance_ratio, rtol=1e-6), "critical_balance_ratio mismatch"
+        assert np.isclose(original.energy_total, loaded.energy_total, rtol=1e-6), "energy_total mismatch"
+
+    # Check metadata
+    for key in metadata:
+        assert loaded_metadata[key] == metadata[key], f"Metadata {key} mismatch"
+
+
+def test_turbulence_diagnostics_metadata_preservation(grid, tmpdir):
+    """Test that metadata is correctly saved and loaded."""
+    from krmhd.io import save_turbulence_diagnostics, load_turbulence_diagnostics
+    from krmhd.diagnostics import TurbulenceDiagnostics
+
+    # Create minimal diagnostic list
+    diagnostics_list = [
+        TurbulenceDiagnostics(
+            time=0.0,
+            max_velocity=0.1,
+            cfl_number=0.01,
+            max_nonlinear=0.5,
+            energy_highk=0.001,
+            critical_balance_ratio=1.0,
+            energy_total=1.0,
+        )
+    ]
+
+    filename = tmpdir / "test_turbulence_metadata.h5"
+    metadata = {
+        "resolution": 64,
+        "eta": 2.0,
+        "nu": 1.0,
+        "hyper_r": 2,
+        "dt": 0.005,
+        "termination_reason": "completed",
+        "custom_field": "test_value",
+    }
+
+    save_turbulence_diagnostics(diagnostics_list, str(filename), **metadata)
+    _, loaded_metadata = load_turbulence_diagnostics(str(filename))
+
+    # All metadata should be preserved
+    for key, value in metadata.items():
+        assert key in loaded_metadata, f"Metadata key {key} missing"
+        assert loaded_metadata[key] == value, f"Metadata {key}: expected {value}, got {loaded_metadata[key]}"
+
+
+def test_turbulence_diagnostics_empty_list(tmpdir):
+    """Test handling of empty diagnostic list."""
+    from krmhd.io import save_turbulence_diagnostics, load_turbulence_diagnostics
+
+    filename = tmpdir / "test_turbulence_empty.h5"
+
+    # Save empty list
+    save_turbulence_diagnostics([], str(filename))
+
+    # Load should work and return empty list
+    loaded_list, _ = load_turbulence_diagnostics(str(filename))
+    assert len(loaded_list) == 0, "Empty list should stay empty"
+
+
+def test_turbulence_diagnostics_file_not_found():
+    """Test error handling for missing file."""
+    from krmhd.io import load_turbulence_diagnostics
+
+    with pytest.raises(FileNotFoundError):
+        load_turbulence_diagnostics("nonexistent_file.h5")
+
+
+def test_turbulence_diagnostics_compression(grid, tmpdir):
+    """Test that compression reduces file size."""
+    from krmhd.io import save_turbulence_diagnostics
+    from krmhd.diagnostics import compute_turbulence_diagnostics
+    from krmhd.physics import initialize_random_spectrum
+
+    # Create large diagnostic list (100 samples)
+    diagnostics_list = []
+    for i in range(100):
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=0.1, seed=i)
+        state = state.model_copy(update={"time": i * 0.1})
+        diag = compute_turbulence_diagnostics(state, dt=0.01, v_A=1.0)
+        diagnostics_list.append(diag)
+
+    filename = tmpdir / "test_turbulence_compressed.h5"
+    save_turbulence_diagnostics(diagnostics_list, str(filename))
+
+    # File should exist and be smaller than uncompressed data
+    # 7 fields × 100 samples × 8 bytes/float64 = 5600 bytes uncompressed
+    # With compression, should be significantly smaller
+    file_size = filename.stat().st_size
+    uncompressed_size = 7 * 100 * 8
+
+    # Compression should reduce size (conservative test: < 2x uncompressed)
+    assert file_size < 2 * uncompressed_size, f"File too large: {file_size} > {2 * uncompressed_size}"
