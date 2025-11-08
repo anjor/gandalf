@@ -46,6 +46,7 @@ from krmhd.validation import (
     plot_fdt_comparison,
     STEADY_STATE_FLUCTUATION_THRESHOLD,
     SPECTRUM_NORMALIZATION_THRESHOLD,
+    RELATIVE_ERROR_GUARD,
 )
 
 
@@ -76,6 +77,9 @@ class TestKineticFDT:
     is driven to steady state with stochastic forcing.
     """
 
+    @pytest.mark.fdt
+    @pytest.mark.kinetic
+    @pytest.mark.fast
     def test_single_mode_phase_mixing_regime(self):
         """
         Test FDT in phase mixing regime (large k∥).
@@ -150,11 +154,11 @@ class TestKineticFDT:
         # Focus on m=1 to m=10 where signal is strong (requires M >= 10 for full range)
         # For M < 10, tests all available moments
         m_test_range = slice(1, min(11, M+1))
-        # Use 1e-10 (not SPECTRUM_NORMALIZATION_THRESHOLD=1e-15) for relative error
+        # Use RELATIVE_ERROR_GUARD (not SPECTRUM_NORMALIZATION_THRESHOLD=1e-15) for relative error
         # calculation to avoid over-sensitivity to small analytical predictions
         relative_error = np.abs(
             spectrum_numerical_norm[m_test_range] - spectrum_analytical_norm[m_test_range]
-        ) / (spectrum_analytical_norm[m_test_range] + 1e-10)
+        ) / (spectrum_analytical_norm[m_test_range] + RELATIVE_ERROR_GUARD)
 
         # Check agreement within threshold
         # Note: This is a simplified test - production version should compare
@@ -192,6 +196,8 @@ class TestKineticFDT:
         assert spectrum_numerical[10] < spectrum_numerical[5], \
             "Spectrum decay should continue to higher m"
 
+    @pytest.mark.fdt
+    @pytest.mark.kinetic
     @pytest.mark.slow
     def test_parameter_dependence_collision_frequency(self):
         """
@@ -233,9 +239,9 @@ class TestKineticFDT:
         # High collision frequency should have more energy in low moments
         # (high moments are damped more strongly)
         # Compare energy at m=6: should be relatively higher for low-ν
-        # Use 1e-10 guard for division (more conservative than SPECTRUM_NORMALIZATION_THRESHOLD)
-        ratio_low = result_low['spectrum'][6] / (result_low['spectrum'][0] + 1e-10)
-        ratio_high = result_high['spectrum'][6] / (result_high['spectrum'][0] + 1e-10)
+        # Use RELATIVE_ERROR_GUARD for division (more conservative than SPECTRUM_NORMALIZATION_THRESHOLD)
+        ratio_low = result_low['spectrum'][6] / (result_low['spectrum'][0] + RELATIVE_ERROR_GUARD)
+        ratio_high = result_high['spectrum'][6] / (result_high['spectrum'][0] + RELATIVE_ERROR_GUARD)
 
         assert ratio_low > ratio_high, \
             f"Low-ν should have more energy at high m: ratio_low={ratio_low:.2e}, ratio_high={ratio_high:.2e}"
@@ -245,6 +251,9 @@ class TestKineticFDT:
         print(f"ν = {nu_high:.3f}: E_m=8/E_m=0 = {ratio_high:.3e}")
         print(f"Ratio (low/high): {ratio_low/ratio_high:.2f}")
 
+    @pytest.mark.fdt
+    @pytest.mark.kinetic
+    @pytest.mark.fast
     def test_steady_state_energy_balance(self):
         """
         Test that steady state achieves energy balance: ε_inj ≈ ε_diss.
