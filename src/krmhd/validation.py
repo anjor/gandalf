@@ -69,7 +69,8 @@ FORCING_BAND_UPPER_FACTOR = 1.1  # k_max = k_target * 1.1
 # Numerical thresholds
 K_PARALLEL_ZERO_THRESHOLD = 1e-6  # Consider k∥ ≈ 0 below this value
 COLLISION_FREQ_ZERO_THRESHOLD = 1e-6  # Consider ν ≈ 0 below this value (collisionless limit)
-SPECTRUM_NORMALIZATION_THRESHOLD = 1e-15  # Minimum |g_0|² for safe normalization
+SPECTRUM_NORMALIZATION_THRESHOLD = 1e-15  # Minimum |g_0|² for safe normalization (fail-fast checks)
+RELATIVE_ERROR_GUARD = 1e-10  # Denominator guard for relative error calculations (less strict than normalization threshold)
 STEADY_STATE_FLUCTUATION_THRESHOLD = 0.1  # 10% energy fluctuation criterion
 COLLISIONLESS_M_CRIT = 1000.0  # Effective m_crit for collisionless limit (ν → 0)
 

@@ -32,3 +32,13 @@ dev = [
     "pytest>=8.3.5",
     "ruff>=0.14.0",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "fast: marks tests as fast (select with '-m fast')",
+    "fdt: marks kinetic FDT validation tests",
+    "unit: marks unit tests",
+    "integration: marks integration tests",
+    "kinetic: marks tests requiring Hermite moment solver",
+]

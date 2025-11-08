@@ -574,7 +574,7 @@ class TestEnergyHistory:
         # Create and append multiple states with different times
         for i in range(5):
             state = initialize_alfven_wave(grid, M=10, amplitude=0.1)
-            state.time = float(i * 0.1)
+            state = state.model_copy(update={'time': float(i * 0.1)})
             history.append(state)
 
         assert len(history.times) == 5
@@ -609,7 +609,7 @@ class TestEnergyHistory:
         # Append multiple states
         for i in range(3):
             state = initialize_alfven_wave(grid, M=10, amplitude=0.1)
-            state.time = float(i * 0.1)
+            state = state.model_copy(update={'time': float(i * 0.1)})
             history.append(state)
 
         mag_frac = history.magnetic_fraction()
@@ -626,7 +626,7 @@ class TestEnergyHistory:
         # Append states with decreasing energy (simulating dissipation)
         for i in range(5):
             state = initialize_alfven_wave(grid, M=10, amplitude=0.1 * (0.9**i))
-            state.time = float(i * 0.1)
+            state = state.model_copy(update={'time': float(i * 0.1)})
             history.append(state)
 
         dE_dt = history.dissipation_rate()
@@ -666,7 +666,7 @@ class TestVisualizationFunctions:
         history = EnergyHistory()
         for i in range(5):
             state = initialize_alfven_wave(grid, M=10, amplitude=0.1)
-            state.time = float(i * 0.1)
+            state = state.model_copy(update={'time': float(i * 0.1)})
             history.append(state)
 
         # Should not raise any errors
@@ -681,7 +681,7 @@ class TestVisualizationFunctions:
         history = EnergyHistory()
         for i in range(3):
             state = initialize_alfven_wave(grid, M=10, amplitude=0.1)
-            state.time = float(i * 0.1)
+            state = state.model_copy(update={'time': float(i * 0.1)})
             history.append(state)
 
         filename = tmp_path / "test_energy.png"
