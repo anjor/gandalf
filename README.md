@@ -360,6 +360,105 @@ uv run mypy src/krmhd
 - Using Lx=2π would make k=1, reducing energy by factor (2π)² ≈ 39.5
 - See CLAUDE.md for detailed normalization discussion (Issue #78)
 
+## Forced Turbulence: Parameter Selection Guide
+
+**CRITICAL for forced turbulence simulations**: Energy injection (forcing) must balance energy removal (dissipation) to avoid instabilities.
+
+### Quick Start Parameters (Validated Stable)
+
+| Resolution | η (dissipation) | amplitude | Runtime | Notes |
+|------------|----------------|-----------|---------|-------|
+| 32³        | 1.0            | 0.05      | 50+ τ_A | Recommended starting point |
+| 64³        | 20.0           | 0.01      | 50+ τ_A | Requires strong η (anomaly) |
+| 128³       | 2.0            | 0.05      | 50+ τ_A | Moderate parameters work |
+
+**Force modes**: `[1, 2]` (large scales, k = 2π and 4π)
+**Hyper-dissipation**: `r=2, n=2` (recommended)
+
+### How to Choose Parameters for Your Simulation
+
+**The fundamental constraint**: Energy injection rate ≤ Dissipation rate
+
+**Starting recipe** (conservative, guaranteed stable):
+```python
+from krmhd import gandalf_step, force_alfven_modes
+
+# 1. Start with conservative parameters
+eta = 5.0
+force_amplitude = 0.01
+force_modes = [1, 2]  # Large scales
+
+# 2. Test run (20 τ_A with diagnostics)
+for step in range(n_steps):
+    state, key = force_alfven_modes(state, amplitude=force_amplitude,
+                                    k_min=1.0, k_max=3.0, dt=dt, key=key)
+    state = gandalf_step(state, dt=dt, eta=eta, nu=eta, v_A=1.0,
+                        hyper_r=2, hyper_n=2)
+
+    # Monitor energy: should plateau after spin-up
+    E = compute_energy(state)['total']
+```
+
+**With diagnostics**:
+```bash
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resolution 64 --total-time 20 --save-diagnostics
+```
+
+### Warning Signs of Instability
+
+Watch for these during your simulation:
+1. **Energy grows exponentially** (straight line on log plot) → Reduce forcing OR increase η
+2. **Max velocity > 100** → Energy pile-up, reduce forcing
+3. **CFL violations** (CFL > 1.0) → Reduce timestep (but CFL < 1 ≠ stability!)
+
+### Troubleshooting
+
+**Problem**: Energy grows exponentially after 10-20 τ_A
+
+**Not the issue**:
+- ✅ Timestep size (unless CFL > 1.0)
+- ✅ Dissipation implementation (verified Issue #82)
+
+**Root cause**: Energy injection/dissipation imbalance
+
+**Solutions** (pick ONE):
+- **Reduce forcing**: `amplitude → amplitude / 2`
+- **Increase dissipation**: `eta → eta × 2`
+- **Quick fix for 64³**: Use `eta=20.0, amplitude=0.01` (known stable)
+
+### Why Normalized Hyper-Dissipation Requires Careful Tuning
+
+Normalized hyper-dissipation (`r=2`) concentrates damping at high-k:
+- **Low-k modes (k=2)**: Only 1.6% energy decay over 10 τ_A
+- **High-k modes (k=8)**: 98% energy decay over 10 τ_A
+
+This is **by design** to preserve the inertial range. But it means:
+- Forcing at low-k adds energy where dissipation is weak
+- Energy must cascade to high-k before being removed
+- If cascade is too slow → energy accumulates → instability
+
+**For details**: See CLAUDE.md "Forced Turbulence: Parameter Selection Guide" section or `docs/ISSUE82_SUMMARY.md`
+
+### Automated Diagnostics
+
+Use built-in tools to detect instabilities early:
+```bash
+# Run with diagnostics
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resolution 64 --save-diagnostics --diagnostic-interval 5
+
+# Analyze results
+uv run python examples/analyze_64cubed_detailed.py
+```
+
+Tracks:
+- Max velocity evolution
+- CFL number
+- High-k energy pile-up
+- Critical balance ratio
+- Energy injection vs dissipation
+
 ## Typical Physical Parameters
 
 Reference values for astrophysical plasmas:
