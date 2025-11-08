@@ -326,6 +326,160 @@ See `examples/hyper_dissipation_demo.py` for side-by-side comparison of r=1 vs r
 - Tests: test_physics.py (unit tests), test_timestepping.py (integration tests)
 - Example: examples/hyper_dissipation_demo.py
 
+### Forced Turbulence: Parameter Selection Guide (Issue #82)
+
+**CRITICAL**: Forced turbulence requires careful balance between energy injection (forcing) and energy removal (dissipation). Imbalance causes energy accumulation → spectral pile-up → exponential instability.
+
+#### Understanding the Energy Balance
+
+In forced turbulence, energy flows through three stages:
+1. **Injection**: Forcing adds energy at large scales (k=1-2)
+2. **Cascade**: Nonlinear transfer to smaller scales
+3. **Dissipation**: Removal at high-k via normalized hyper-dissipation
+
+**Key insight (Issue #82)**: Normalized hyper-dissipation is WEAK at low-k (by design):
+- k=2 mode: Only 1.6% decay over 10 τ_A (energy nearly conserved)
+- k=8 mode: 98% decay over 10 τ_A (strong removal)
+
+**Why?** This concentrates dissipation at high-k while preserving the inertial range. But it means:
+- If forcing is too strong → energy accumulates faster than cascade+dissipation
+- Energy piles up at high-k → eventual instability (typically after 10-15 τ_A)
+
+#### How to Choose Parameters
+
+**The fundamental constraint**:
+```
+Energy injection rate ≤ Dissipation rate at high-k
+```
+
+**Rule of thumb** (for r=2 hyper-dissipation):
+```
+forcing_amplitude² × (number of forced modes) ≤ η × (high-k mode damping)
+```
+
+**Practical parameter ranges** (validated stable):
+
+| Resolution | η (dissipation) | Forcing amplitude | Force modes | Notes |
+|------------|----------------|-------------------|-------------|-------|
+| 32³        | 1.0            | 0.05              | [1, 2]      | Stable for 50+ τ_A |
+| 64³        | 20.0           | 0.01              | [1, 2]      | Anomalously strong η (see Issue #82) |
+| 64³        | 2.0            | 0.05              | [1, 2]      | **UNSTABLE** - fails at t~14 τ_A |
+| 128³       | 2.0            | 0.05              | [1, 2]      | Stable for 50+ τ_A |
+
+**64³ "anomaly"**: Requires either η=20 (10× stronger) OR amplitude=0.01 (5× weaker). Root cause under investigation - may be specific resonance or nonlinear scaling effect.
+
+#### Parameter Selection Workflow
+
+**For a new resolution** (general guidance):
+
+1. **Start conservative** (guaranteed stable but may be over-damped):
+   ```python
+   eta = 5.0
+   force_amplitude = 0.01
+   force_modes = [1, 2]  # Large scales only
+   ```
+
+2. **Test with diagnostics** (10-20 τ_A trial run):
+   ```bash
+   uv run python examples/alfvenic_cascade_benchmark.py \
+     --resolution 64 --total-time 20 --save-diagnostics
+   ```
+
+3. **Check energy behavior**:
+   - **If stable**: Energy reaches plateau (dE/dt ~ 0 after spin-up)
+   - **If unstable**: Energy grows exponentially (straight line on log plot)
+   - **If over-damped**: Energy decays despite forcing
+
+4. **Tune parameters**:
+   - **Too much dissipation**: Reduce η by factor of 2, retest
+   - **Too little dissipation**: Increase η by factor of 2, OR reduce amplitude by factor of 2
+   - **Goal**: Steady-state energy plateau with ΔE/⟨E⟩ < 5%
+
+#### Warning Signs of Instability
+
+Monitor during runs:
+1. **Energy on log scale**: Should plateau, not grow linearly
+2. **Max velocity**: Should saturate at O(1-10), not grow beyond O(100)
+3. **High-k energy fraction**: Should stay below 1% (k > 0.9 k_max)
+4. **CFL number**: Should stay well below 1.0 (but CFL < 1 doesn't guarantee stability!)
+
+**Use automated diagnostics**:
+```bash
+# Run with diagnostics
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resolution 64 --save-diagnostics --diagnostic-interval 5
+
+# Analyze for instability signatures
+uv run python examples/analyze_64cubed_detailed.py
+```
+
+#### Resolution Scaling (Empirical)
+
+Based on tested configurations:
+- **32³ → 64³**: Need either 10× stronger η OR 5× weaker forcing (anomalous!)
+- **64³ → 128³**: Can return to moderate η ~ 2.0 with amplitude 0.05
+
+**No simple scaling law exists** - parameter space has complex stability boundaries.
+
+**Recommendation**: Test each new resolution with trial runs before production.
+
+#### When Things Go Wrong
+
+**Symptom**: Energy grows exponentially after 10-20 τ_A
+
+**Diagnosis**:
+1. ✅ **NOT a timestep problem** (unless CFL > 1.0)
+2. ✅ **NOT a dissipation bug** (verified in Issue #82)
+3. ✅ **Energy injection/dissipation imbalance**
+
+**Solution** (pick ONE):
+- **Reduce forcing**: amplitude → amplitude / 2
+- **Increase dissipation**: η → η × 2
+- **Reduce forced modes**: [1, 2] → [1] (half the injection)
+
+**Quick fix for 64³**:
+```python
+# Conservative (known stable)
+eta = 20.0
+force_amplitude = 0.01
+
+# Moderate (test first!)
+eta = 10.0
+force_amplitude = 0.02
+```
+
+#### Advanced: Estimating Stability
+
+**Energy injection rate** (white noise forcing):
+```
+ε_inj ~ amplitude² × n_forced_modes × dt⁻¹
+```
+
+**Dissipation rate at high-k**:
+```
+ε_diss ~ η × k_max^(2r) × E_highk
+```
+
+**For stability**:
+```
+ε_inj / ε_diss < 1 (steady state)
+```
+
+**But**: E_highk depends on cascade efficiency (hard to predict a priori).
+
+**Practical approach**: Monitor dE/dt during first 5 τ_A:
+- dE/dt > 0 and growing → Reduce forcing or increase η
+- dE/dt ~ 0 with fluctuations → Balanced (good!)
+- dE/dt < 0 → Over-damped (can reduce η or increase forcing)
+
+#### References
+- Issue #82: Root cause investigation (energy imbalance)
+- PR #84: Detailed diagnostic analysis
+- docs/ISSUE82_SUMMARY.md: Comprehensive findings
+- examples/alfvenic_cascade_benchmark.py: Working examples
+- examples/test_64cubed_unstable.py: Unstable parameter capture
+- examples/analyze_64cubed_detailed.py: Diagnostic analysis tool
+
 ## Validation Suite
 
 ### Linear Physics Tests
