@@ -68,10 +68,10 @@ This means **changing Lz affects both spatial resolution in z AND the time norma
 
 **Common normalization conventions:**
 
-| Convention | Lx, Ly | Lz | k⊥ | τ_A | Use case |
-|------------|--------|----|----|-----|----------|
+| Convention | Lx, Ly | Lz | k⊥ | τ_A (v_A=1) | Use case |
+|------------|--------|----|----|-------------|----------|
 | **Unit box** (thesis) | 1.0 | 1.0 | 2πn | 1.0 | Match original GANDALF thesis |
-| **Integer k** (code default) | 2π | 2π | n | 2π/v_A | Clean wavenumber indexing |
+| **Integer k** (code default) | 2π | 2π | n | 2π | Clean wavenumber indexing |
 | **Mixed** | 2π | 1.0 | n | 1.0 | Turbulence studies (integer k⊥, unit time) |
 
 *(Assumes v_A = 1 for simplicity. For general v_A, multiply τ_A values by 1/v_A. For example, with v_A = 2, the "integer k" convention gives τ_A = π.)*
@@ -109,7 +109,7 @@ Same mode number, different physical k and time!
 
 **Best practice:** Choose normalization at the start and document it clearly. When in doubt, use the code default (Lx = Ly = Lz = 2π) for consistency.
 
-📖 **See [Running Simulations: Understanding the Code](running_simulations.md#understanding-the-code)** for practical examples using these normalization conventions.
+**See also:** [Running Simulations: Understanding the Code](running_simulations.md#understanding-the-code) for practical examples using these normalization conventions.
 
 **Grid structure:** For Nx × Ny × Nz real-space grid:
 - **Real space:** (Nz, Ny, Nx) array, real values
@@ -178,12 +178,13 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 
 **What "exact" means in practice:**
 
-1. **Alfvén wave dispersion relation:** ω = k∥v_A is satisfied **exactly per timestep**
-   - No numerical dispersion (phase speed errors) from spatial discretization
+1. **Alfvén wave dispersion relation:** ω = k∥v_A is satisfied by the physics model
+   - Linear propagation is integrated **analytically per timestep** (not numerically approximated)
    - Waves propagate at precisely the correct speed for all wavelengths
+   - No numerical dispersion (phase speed errors) from spatial discretization
    - No grid-scale artifacts (wave on diagonal = wave on axis)
-   - **Short-term (1 wave period):** <1% energy drift (validates linear wave propagation)
-   - **Long-term (100s of τ_A):** <0.01% drift (validates cumulative roundoff control)
+   - **Short-term (1 wave period):** <1% energy error (validates linear wave propagation)
+   - **Long-term (100s of τ_A):** <0.01% cumulative drift (validates roundoff control)
 
 2. **Landau damping rates:** Computed accurately with kinetic Hermite expansion
    - Kinetic effects (resonance, phase mixing) captured via moment hierarchy
@@ -207,8 +208,8 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 **Why this matters:**
 
 - **Validation tests** achieve high accuracy in energy conservation (not ~10⁻⁶ as with FD)
-  - Short-term: <1% over wave periods
-  - Long-term: <0.01% over 100s of τ_A (~10⁻¹⁰ relative error in energy balance)
+  - Short-term: <1% error over wave periods
+  - Long-term: <0.01% cumulative drift over 100s of τ_A (~10⁻¹⁰ relative error in energy balance)
 - **Phase error accumulation** is minimal (analytical integration per timestep)
 - **Benchmarking** can distinguish code bugs from numerical discretization errors
 
@@ -231,7 +232,7 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 - **Nonlinear terms:** Approximated with RK2 (2nd-order in Δt, not exact)
 - **Dealiasing truncation:** Modes beyond 2/3 k_Nyquist are removed (intentional)
 - **Floating-point roundoff:** Accumulates over many timesteps (~10⁻¹⁰ typical after full period)
-- **FFT precision:** Practical derivative accuracy ~10⁻⁵ after FFT roundtrip
+- **FFT precision:** Practical derivative accuracy ~10⁻¹⁰ (typical smooth fields) to 10⁻⁵ (worst-case, see `test_spectral.py:189`)
 - **Hermite truncation:** Finite M moments (kinetic closure approximation)
 
 **Validation consequence:** Linear wave tests should achieve <1% energy drift over full wave period. If you see >10% drift, there's likely a bug in the implementation.
@@ -421,9 +422,9 @@ def gandalf_step(state, dt, eta, nu, hyper_r=2, hyper_n=2, force_z_plus=None, fo
 This means Alfvén waves with any k∥ propagate with **zero phase speed error per timestep** (analytical integration of linear term). The only approximation is in the nonlinear bracket terms {z∓, ∇²z±}, which are O(Δt²) accurate with RK2.
 
 **Practical consequence:** In validation tests (linear Alfvén waves), expect:
-- **Short-term (1 wave period):** <1% energy drift
-- **Long-term (100s of τ_A):** <0.01% drift
-If you see >10% drift over one period, there's likely a bug, not discretization error accumulation.
+- **Short-term (1 wave period):** <1% energy error
+- **Long-term (100s of τ_A):** <0.01% cumulative drift
+If you see >10% error over one period, there's likely a bug, not discretization error accumulation.
 
 **Stability:** CFL condition based on nonlinear advection, NOT wave propagation.
 
@@ -860,22 +861,22 @@ uv run pytest tests/test_diagnostics.py   # Spectra, energy
 **Key validation tests:**
 
 1. **Derivative accuracy:** Compare spectral derivatives to analytical
-   - **Expected accuracy:** ~10⁻⁵ (FFT roundoff after real-space roundtrip)
+   - **Expected accuracy:** ~10⁻¹⁰ (typical smooth fields) to 10⁻⁵ (conservative test tolerance)
    - Validates that ∂/∂x ↔ i·kx works correctly
-   - See `test_spectral.py:189` for reference tolerance
+   - See `test_spectral.py:189` for reference: uses atol=1e-5 (conservative)
 
 2. **Dealiasing effectiveness:** Check energy conservation without/with dealiasing
    - **Without dealiasing:** Spurious energy growth (simulation blows up)
    - **With dealiasing:** Energy conserved to <0.01% (inviscid limit)
 
 3. **Alfvén wave dispersion:** ω = k∥v_A (linear physics)
-   - **Expected accuracy:** <1% energy drift over one wave period (short-term test)
+   - **Expected accuracy:** <1% energy error over one wave period (short-term test)
    - Tests validate spectral derivatives + integrating factor correctness
-   - **Drift >10% indicates a bug**, not normal accumulation
+   - **Error >10% indicates a bug**, not normal accumulation
    - See `test_timestepping.py:369` for reference: <1% over full period
 
 4. **Energy conservation:** Long-term inviscid evolution (η=0, ν=0)
-   - **Short-term (1 period):** <1% energy drift (see test #3 above)
+   - **Short-term (1 period):** <1% energy error (see test #3 above)
    - **Long-term (100s of τ_A):** <0.01% cumulative drift
    - Energy balance typically conserved to ~10⁻¹⁰ relative error
    - Validates analytical linear propagation and Poisson bracket implementation
