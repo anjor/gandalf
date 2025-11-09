@@ -45,6 +45,7 @@ Homepage = "https://github.com/anjor/gandalf"
 Repository = "https://github.com/anjor/gandalf"
 Issues = "https://github.com/anjor/gandalf/issues"
 Documentation = "https://github.com/anjor/gandalf#readme"
+Changelog = "https://github.com/anjor/gandalf/releases"
 
 [project.optional-dependencies]
 metal = [
@@ -54,6 +55,9 @@ metal = [
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+license-files = ["LICENSE"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

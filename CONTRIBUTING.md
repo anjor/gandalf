@@ -163,10 +163,54 @@ The workflow uses PyPI's trusted publishing (no API tokens needed). To set this 
    - Workflow name: `publish-pypi.yml`
    - Environment: `pypi`
 
-For first-time publishing, you may need to:
-1. Create project manually on PyPI or use `pypi-publish` token temporarily
-2. Configure trusted publishing after first release
-3. Future releases will use trusted publishing automatically
+**Note:** Trusted publishing requires the PyPI project to exist first. See "First-Time Release" below.
+
+#### First-Time Release (Manual)
+
+For the very first release (v0.1.0), PyPI requires manual upload since the project doesn't exist yet:
+
+1. **Build package locally**:
+   ```bash
+   uv build
+   # Creates dist/gandalf_krmhd-0.1.0.tar.gz and dist/gandalf_krmhd-0.1.0-py3-none-any.whl
+   ```
+
+2. **Create PyPI account** (if needed):
+   - Register at https://pypi.org/account/register/
+   - Verify your email address
+
+3. **Upload to PyPI**:
+   ```bash
+   uv publish
+   # You'll be prompted for PyPI username and password
+   # Or use: uv publish --token <your-api-token>
+   ```
+
+4. **Verify upload**:
+   ```bash
+   # Test in a fresh environment
+   python -m venv test_env
+   source test_env/bin/activate
+   pip install gandalf-krmhd
+   python -c "import krmhd; print('Success!')"
+   deactivate
+   rm -rf test_env
+   ```
+
+5. **Configure trusted publishing** (one-time setup):
+   - Go to https://pypi.org/manage/project/gandalf-krmhd/settings/publishing/
+   - Click "Add a new publisher"
+   - Fill in:
+     - **PyPI Project Name**: gandalf-krmhd
+     - **Owner**: anjor
+     - **Repository name**: gandalf
+     - **Workflow name**: publish-pypi.yml
+     - **Environment name**: pypi
+   - Save
+
+6. **Future releases** (v0.1.1+):
+   - Simply tag and push: `git tag v0.1.1 && git push origin v0.1.1`
+   - GitHub Actions automatically publishes to PyPI (no manual steps!)
 
 #### Manual Publishing (Emergency Only)
 
@@ -203,10 +247,9 @@ Before releasing:
 
 - [ ] All tests pass on main branch
 - [ ] Documentation is up to date
-- [ ] CHANGELOG.md updated (if exists)
+- [ ] Release notes prepared (via GitHub Releases)
 - [ ] Version number updated in `pyproject.toml`
 - [ ] Tag matches version number (e.g., `v0.2.0`)
-- [ ] Release notes prepared
 
 After releasing:
 

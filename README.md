@@ -29,9 +29,11 @@ Key physical processes include:
 ## Installation
 
 ### Prerequisites
-- Python 3.10 or higher
+- Python 3.10 or higher (Python 3.11 recommended for containers and CI)
 - [uv](https://github.com/astral-sh/uv) package manager (recommended)
 - **Optional**: GPU acceleration (Metal/CUDA) for better performance
+
+**Note on Python versions:** While the package supports Python 3.10-3.12, Docker containers and CI workflows use Python 3.11 as the tested baseline. Local installations can use any supported version.
 
 ### System Requirements
 

@@ -21,12 +21,13 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 COPY examples/ ./examples/
+COPY tests/ ./tests/
 
 # Install uv for fast package management
 RUN pip install --no-cache-dir uv
 
 # Install GANDALF and dependencies (CPU-only JAX)
-RUN uv pip install --system --no-cache -e .
+RUN uv pip install --system -e .
 
 # Verify installation
 RUN python -c 'import krmhd; print("KRMHD imported successfully")' && \

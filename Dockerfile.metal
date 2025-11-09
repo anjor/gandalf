@@ -21,12 +21,13 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 COPY examples/ ./examples/
+COPY tests/ ./tests/
 
 # Install uv for fast package management
 RUN pip install --no-cache-dir uv
 
 # Install GANDALF with Metal GPU support
-RUN uv pip install --system --no-cache -e ".[metal]"
+RUN uv pip install --system -e ".[metal]"
 
 # Verify installation
 RUN python -c 'import krmhd; print("KRMHD imported successfully")' && \
