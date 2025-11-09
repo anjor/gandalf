@@ -295,8 +295,20 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 configs = list(Path("configs/beta_scan").glob("*.yaml"))
 
-def run_simulation(config_path):
-    """Run a single simulation."""
+def run_simulation(config_path: Path) -> Path | None:
+    """
+    Run a single simulation.
+
+    Parameters
+    ----------
+    config_path : Path
+        Path to YAML configuration file
+
+    Returns
+    -------
+    Path | None
+        Config path if successful, None if failed
+    """
     print(f"Starting: {config_path.name}")
     result = subprocess.run(
         ["uv", "run", "python", "run_simulation.py", "--config", str(config_path)],
@@ -508,8 +520,29 @@ uv run python analyze_beta_scan.py
 ### Measuring Spectral Slopes
 
 ```python
-def fit_power_law(k, E, k_min=2, k_max=10):
-    """Fit E ~ k^α in specified range."""
+import numpy as np
+from typing import Union
+
+def fit_power_law(k: np.ndarray, E: np.ndarray, k_min: float = 2, k_max: float = 10) -> float:
+    """
+    Fit power law E ~ k^α in specified wavenumber range.
+
+    Parameters
+    ----------
+    k : np.ndarray
+        Wavenumber array
+    E : np.ndarray
+        Energy spectrum array
+    k_min : float, optional
+        Minimum wavenumber for fit (default: 2)
+    k_max : float, optional
+        Maximum wavenumber for fit (default: 10)
+
+    Returns
+    -------
+    float
+        Spectral slope α, or np.nan if insufficient points
+    """
     mask = (k >= k_min) & (k <= k_max)
     if mask.sum() < 2:
         return np.nan

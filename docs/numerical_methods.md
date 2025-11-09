@@ -261,9 +261,11 @@ z±(t+Δt) = exp(±i·kz·Δt) · [z±(t) + ∫₀^Δt N±(t') · exp(∓i·kz·
 
 For the nonlinear integral, use 2nd-order Runge-Kutta:
 
+**Note:** The code below is simplified pseudocode for illustration. The actual implementation in `timestepping.py` includes additional details (Hermite moments, collision operators, validation). See source code for complete implementation.
+
 ```python
 def gandalf_step(state, dt, eta, nu, hyper_r=2, hyper_n=2, force_z_plus=None, force_z_minus=None):
-    """Single timestep with GANDALF integrating factor + RK2."""
+    """Single timestep with GANDALF integrating factor + RK2 (simplified pseudocode)."""
 
     # 1. Compute RHS at t (stage 1)
     k1_plus = z_plus_rhs(state, grid) + forcing_plus

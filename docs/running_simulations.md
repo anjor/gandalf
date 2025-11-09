@@ -174,8 +174,10 @@ Produces `alfvenic_cascade_*_spectrum.png` with kinetic and magnetic spectra.
 | Resolution | η (dissipation) | Force amplitude | Forcing modes | Status |
 |------------|----------------|-----------------|---------------|---------|
 | 32³ | 1.0 | 0.05 | [1, 2] | ✅ Stable |
-| 64³ | 20.0 | 0.01 | [1, 2] | ✅ Stable (anomalous, under investigation) |
+| 64³ | 20.0 | 0.01 | [1, 2] | ✅ Stable (requires 10× stronger η, see Note below) |
 | 128³ | 2.0 | 0.05 | [1, 2] | ✅ Stable |
+
+**Note on 64³ parameters:** This resolution requires anomalously strong dissipation (η=20.0) or weak forcing (amplitude=0.01) compared to the smooth scaling seen at 32³ and 128³. The root cause is under investigation (Issue #82). For production work at 64³, use these validated parameters; do not extrapolate from 32³ or 128³.
 
 **Warning signs of instability:**
 - Energy grows exponentially (not reaching plateau)
