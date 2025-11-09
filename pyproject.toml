@@ -41,4 +41,5 @@ markers = [
     "unit: marks unit tests",
     "integration: marks integration tests",
     "kinetic: marks tests requiring Hermite moment solver",
+    "benchmark: marks performance benchmark tests",
 ]
