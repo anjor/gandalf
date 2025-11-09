@@ -1177,6 +1177,9 @@ def initialize_hermite_moments(
         For kinetic instability studies (e.g., Landau damping tests), use small
         non-zero perturbation_amplitude to seed higher moments.
         Seed parameter ensures reproducible perturbations for testing.
+
+        This function is vmap-compatible and can be batched over perturbation_amplitude
+        or seed parameters using jax.vmap. See Issue #83 for implementation details.
     """
     shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1)
 
@@ -1187,22 +1190,29 @@ def initialize_hermite_moments(
     # In practice, this would involve setting specific k modes
     # For now, return equilibrium (all zeros in Fourier space)
     # Real perturbations would be added based on physics (e.g., for Landau damping test)
-    if perturbation_amplitude > 0:
-        # Add small random perturbations to g_1 mode (velocity perturbation)
-        # Must satisfy reality condition: f(-k) = f*(k) for real fields
-        key = jax.random.PRNGKey(seed)
 
-        # Generate random real-space field, then FFT to ensure reality condition
-        key_real, key_imag = jax.random.split(key)
-        perturbation_real = perturbation_amplitude * jax.random.normal(
-            key_real, shape=(grid.Nz, grid.Ny, grid.Nx), dtype=jnp.float32
-        )
+    # Generate perturbations ALWAYS (for vmap compatibility - Issue #83)
+    # Add small random perturbations to g_1 mode (velocity perturbation)
+    # Must satisfy reality condition: f(-k) = f*(k) for real fields
+    key = jax.random.PRNGKey(seed)
 
-        # Transform to Fourier space - rfftn automatically enforces reality condition
-        perturbation_fourier = rfftn_forward(perturbation_real)
+    # Generate random real-space field, then FFT to ensure reality condition
+    perturbation_real = perturbation_amplitude * jax.random.normal(
+        key, shape=(grid.Nz, grid.Ny, grid.Nx), dtype=jnp.float32
+    )
 
-        # Apply perturbation to first moment (velocity perturbation)
-        g = g.at[:, :, :, 1].set(perturbation_fourier)
+    # Transform to Fourier space - rfftn automatically enforces reality condition
+    perturbation_fourier = rfftn_forward(perturbation_real)
+
+    # Use jnp.where instead of if statement for vmap compatibility (Issue #83)
+    # When perturbation_amplitude=0, this effectively sets g_1 to zero
+    # When perturbation_amplitude>0, this applies the perturbations
+    g_m1 = jnp.where(
+        perturbation_amplitude > 0,
+        perturbation_fourier,
+        jnp.zeros_like(perturbation_fourier)
+    )
+    g = g.at[:, :, :, 1].set(g_m1)
 
     return g
 

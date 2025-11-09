@@ -686,6 +686,42 @@ class TestKRMHDState:
         # First moment should be non-zero (velocity perturbation)
         assert jnp.any(g_pert[:, :, :, 1] != 0.0), "g_1 should have perturbation"
 
+    def test_initialize_hermite_moments_vmap(self):
+        """Test that initialize_hermite_moments works with jax.vmap (Issue #83)."""
+        from krmhd.physics import initialize_hermite_moments
+
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        M = 4
+
+        # Test batching over different perturbation amplitudes
+        amplitudes = jnp.array([0.0, 0.01, 0.05, 0.1])
+
+        def init_fn(amp):
+            return initialize_hermite_moments(
+                grid, M=M, perturbation_amplitude=amp, seed=42
+            )
+
+        # This should work without TracerBoolConversionError
+        results = jax.vmap(init_fn)(amplitudes)
+
+        # Check output shape: (batch, Nz, Ny, Nx//2+1, M+1)
+        expected_shape = (4, grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1)
+        assert results.shape == expected_shape, \
+            f"Expected shape {expected_shape}, got {results.shape}"
+
+        # Verify amplitude=0 produces zero perturbations in g_1
+        assert jnp.allclose(results[0, :, :, :, 1], 0.0), \
+            "Zero amplitude should produce zero g_1 perturbations"
+
+        # Verify non-zero amplitudes produce non-zero perturbations
+        for i in range(1, 4):
+            assert jnp.any(jnp.abs(results[i, :, :, :, 1]) > 0), \
+                f"Non-zero amplitude {amplitudes[i]} should produce non-zero g_1"
+
+        # Verify all g_0 moments are zero (no density perturbation)
+        assert jnp.allclose(results[:, :, :, :, 0], 0.0), \
+            "All g_0 moments should be zero"
+
     def test_initialize_alfven_wave(self):
         """Test Alfvén wave initialization."""
         from krmhd.physics import initialize_alfven_wave
@@ -2379,7 +2415,7 @@ class TestKRMHDStatePytree:
         result = compute_max_wavenumber(state)
         assert result > 0
 
-    @pytest.mark.skip(reason="Pre-existing vmap incompatibility in initialize_hermite_moments (Issue #83)")
+    @pytest.mark.skip(reason="SpectralGrid3D pytree unflatten fails with placeholder objects in nested vmap context")
     def test_krmhd_state_vmap(self):
         """Test that KRMHDState can be used with jax.vmap."""
         grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
