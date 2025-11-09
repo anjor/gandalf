@@ -1,0 +1,67 @@
+{% set name = "gandalf-krmhd" %}
+{% set version = "0.1.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  url: https://pypi.io/packages/source/{{ name[0] }}/{{ name }}/gandalf_krmhd-{{ version }}.tar.gz
+  sha256: # This will be automatically filled by conda-forge bot
+
+build:
+  noarch: python
+  script: {{ PYTHON }} -m pip install . -vv
+  number: 0
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+    - setuptools >=61.0
+  run:
+    - python >=3.10
+    - jax >=0.4.20
+    - numpy >=1.24.0
+    - matplotlib-base >=3.7.0
+    - h5py >=3.11.0
+    - pydantic >=2.0.0
+    - pyyaml >=6.0.0
+    - scipy >=1.10.0
+
+test:
+  imports:
+    - krmhd
+    - krmhd.spectral
+    - krmhd.physics
+    - krmhd.diagnostics
+  commands:
+    - python -c "import krmhd; print('KRMHD imported successfully')"
+    - python -c "import jax; print(f'JAX version: {jax.__version__}')"
+
+about:
+  home: https://github.com/anjor/gandalf
+  license: MIT
+  license_family: MIT
+  license_file: LICENSE
+  summary: 'Kinetic Reduced MHD (KRMHD) spectral solver for magnetized plasma turbulence'
+  description: |
+    GANDALF is a modern Python implementation of a Kinetic Reduced Magnetohydrodynamics
+    (KRMHD) solver using spectral methods for studying turbulent magnetized plasmas in
+    astrophysical environments. It leverages JAX for automatic differentiation and GPU
+    acceleration.
+
+    Key features:
+    - Spectral methods with FFT-based operations
+    - Kinetic effects (Landau damping, finite Larmor radius corrections)
+    - GPU acceleration via JAX (Metal for Apple Silicon, CUDA for NVIDIA)
+    - Hermite moment expansion for velocity space
+    - Forced and decaying turbulence simulations
+    - Comprehensive diagnostics and visualization
+
+  doc_url: https://github.com/anjor/gandalf#readme
+  dev_url: https://github.com/anjor/gandalf
+
+extra:
+  recipe-maintainers:
+    - anjor

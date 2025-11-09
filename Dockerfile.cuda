@@ -1,0 +1,92 @@
+# GANDALF KRMHD - CUDA Backend (NVIDIA GPUs)
+# Container for running KRMHD simulations on NVIDIA GPUs
+#
+# Requirements:
+#   - NVIDIA GPU with compute capability 5.0+ (Maxwell or newer)
+#   - NVIDIA driver 525.60.13+ (for CUDA 12.x support)
+#   - nvidia-container-toolkit installed on host
+#   - 8+ GB GPU memory recommended for 128³ simulations
+#
+# CUDA Version: 12.2.0 (compatible with drivers 525.60.13+)
+# Driver compatibility: https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/
+
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+
+LABEL org.opencontainers.image.source="https://github.com/anjor/gandalf"
+LABEL org.opencontainers.image.description="KRMHD spectral solver for magnetized plasma turbulence (CUDA backend for NVIDIA GPUs)"
+LABEL org.opencontainers.image.licenses="MIT"
+
+# Install Python and system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Set working directory
+WORKDIR /app
+
+# Copy project files
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+COPY examples/ ./examples/
+COPY tests/ ./tests/
+
+# Install uv for fast package management
+RUN pip install --no-cache-dir uv
+
+# Install GANDALF and dependencies (CPU-only first, then add CUDA)
+RUN uv pip install --system -e .
+
+# Install JAX with CUDA support
+RUN uv pip install --system --upgrade "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+# Verify installation
+RUN python -c 'import krmhd; print("KRMHD imported successfully")' && \
+    python -c 'import jax; print(f"JAX version: {jax.__version__}")'
+
+# Create output directory
+RUN mkdir -p /app/output
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
+
+# Default command: run minimal forcing example
+CMD ["python", "examples/forcing_minimal.py"]
+
+# Usage examples:
+#
+# Verify host driver compatibility:
+#   nvidia-smi  # Check driver version >= 525.60.13
+#
+# Build:
+#   docker build -t gandalf-krmhd:cuda -f Dockerfile.cuda .
+#
+# Run with GPU (requires nvidia-docker or --gpus flag):
+#   docker run --gpus all gandalf-krmhd:cuda
+#
+# Run custom script:
+#   docker run --gpus all gandalf-krmhd:cuda python examples/decaying_turbulence.py
+#
+# Interactive session:
+#   docker run --gpus all -it gandalf-krmhd:cuda bash
+#
+# Mount local directory for outputs:
+#   docker run --gpus all -v $(pwd)/output:/app/output gandalf-krmhd:cuda python examples/decaying_turbulence.py
+#
+# Verify CUDA GPU is detected:
+#   docker run --gpus all gandalf-krmhd:cuda python -c 'import jax; print(jax.devices())'
+#
+# For HPC clusters with Singularity:
+#   singularity pull docker://ghcr.io/anjor/gandalf:latest-cuda
+#   singularity exec --nv gandalf_latest-cuda.sif python examples/decaying_turbulence.py
+#
+# Note: Requires nvidia-container-toolkit:
+#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
