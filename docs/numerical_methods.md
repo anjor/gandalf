@@ -362,7 +362,7 @@ Normalized by M (maximum moment index).
 |-------|-------------|-----------|----------|
 | r=1 | Standard dissipation | ✅ Stable | Reference, linear tests |
 | r=2 | Moderate hyper | ✅ Stable (validated 32³-128³) | **Recommended** for production |
-| r=4 | Thesis value | ⚠️ Unstable at 64³ forced turbulence | Use with caution (Issue #82) |
+| r=4 | Thesis value | ⚠️ Unstable at 64³ forced turbulence | Use with caution ([Issue #82](running_simulations.md#important-parameter-selection)) |
 | r=8 | Maximum thesis | ❓ Stability TBD | Experimental |
 
 **Overflow constraint:**
@@ -608,8 +608,9 @@ For 256³: ~ 1.5 GB (still manageable on modern GPUs).
 3. **Use float32 instead of float64:**
    ```bash
    JAX_ENABLE_X64=0 uv run python examples/forcing_minimal.py
+   # Warning: May affect energy conservation accuracy (especially in inviscid runs)
    ```
-   Saves memory and ~2× faster, but less accurate.
+   Saves memory and ~2× faster, but less accurate. Not recommended for production runs where energy conservation is critical.
 
 4. **Profile to find bottlenecks:**
    ```python

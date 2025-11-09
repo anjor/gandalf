@@ -521,7 +521,6 @@ uv run python analyze_beta_scan.py
 
 ```python
 import numpy as np
-from typing import Union
 
 def fit_power_law(k: np.ndarray, E: np.ndarray, k_min: float = 2, k_max: float = 10) -> float:
     """
@@ -672,8 +671,11 @@ force_amplitude = 0.05  # Fixed
 for eta in eta_values:
     history = load_timeseries(f"output/eta_scan/eta{eta}/energy_history.h5")
 
-    # Check for steady state (last 10 τ_A)
-    E_late = history.total_energy[-200:]  # Last 10 τ_A at dt=0.005
+    # Check for steady state (last 10 τ_A) - adaptive to actual timestep
+    dt_actual = history.times[1] - history.times[0]  # Infer timestep from data
+    n_points_per_tau_A = int(1.0 / dt_actual)  # Points per Alfvén time
+    n_points_last_10_tau_A = 10 * n_points_per_tau_A
+    E_late = history.total_energy[-n_points_last_10_tau_A:]
     dE = np.std(E_late) / np.mean(E_late)
 
     if dE < 0.05:

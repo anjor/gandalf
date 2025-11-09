@@ -177,7 +177,7 @@ Produces `alfvenic_cascade_*_spectrum.png` with kinetic and magnetic spectra.
 | 64³ | 20.0 | 0.01 | [1, 2] | ✅ Stable (requires 10× stronger η, see Note below) |
 | 128³ | 2.0 | 0.05 | [1, 2] | ✅ Stable |
 
-**Note on 64³ parameters:** This resolution requires anomalously strong dissipation (η=20.0) or weak forcing (amplitude=0.01) compared to the smooth scaling seen at 32³ and 128³. The root cause is under investigation (Issue #82). For production work at 64³, use these validated parameters; do not extrapolate from 32³ or 128³.
+**Note on 64³ parameters:** This resolution requires anomalously strong dissipation (η=20.0) or weak forcing (amplitude=0.01) compared to the smooth scaling seen at 32³ and 128³. The root cause is under investigation (Issue #82). **This is an empirical finding specific to this resolution; no theoretical explanation is yet available.** For production work at 64³, use these validated parameters; do not extrapolate from 32³ or 128³.
 
 **Warning signs of instability:**
 - Energy grows exponentially (not reaching plateau)
@@ -436,7 +436,7 @@ for t in range(t_start, t_final, dt):
 
 | Cause | Solution |
 |-------|----------|
-| Timestep too large (CFL > 1) | Reduce `dt` or use `compute_cfl_timestep()` |
+| Timestep too large (CFL > 1) | Reduce `dt` or use `compute_cfl_timestep()`. **Note: CFL < 1 is necessary but not sufficient for stability in forced turbulence (see Issue #82).** |
 | Insufficient dissipation | Increase `eta` (e.g., 1.0 → 2.0) |
 | Forcing too strong | Reduce `force_amplitude` (0.05 → 0.01) |
 | Dealiasing failed | Check `grid.dealias()` is called after nonlinear terms |

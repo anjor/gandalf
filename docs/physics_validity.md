@@ -61,7 +61,8 @@ A_parallel_real = jnp.fft.irfftn(A_parallel)
 # δB⊥ comes from curl of A∥ẑ (so δB⊥ ~ |∇⊥A∥|)
 # For spectral methods, |∇⊥A∥| ~ k⊥|A∥|
 k_perp_typical = 2.0  # Typical energy-carrying scale
-epsilon = k_perp_typical * jnp.std(A_parallel_real) / (1/jnp.sqrt(4*jnp.pi))
+B0_normalized = 1.0 / jnp.sqrt(4 * jnp.pi)  # Mean field strength (v_A = 1 normalization)
+epsilon = k_perp_typical * jnp.std(A_parallel_real) / B0_normalized
 
 print(f"ε ~ {epsilon:.3f}")
 ```
@@ -306,7 +307,7 @@ For N=256: k_max ρᵢ ~ 0.8 (approaching breakdown, ion-scale effects)
 
 **Hyper-resistivity (η):**
 - **r=2:** Stable, validated at 32³-128³ with η ~ 0.5-2.0
-- **r=4:** Thesis value, narrower dissipation range but **unstable at 64³ in forced turbulence** (Issue #82)
+- **r=4:** Thesis value, narrower dissipation range but **unstable at 64³ in forced turbulence** (Issue #82). See [Running Simulations](running_simulations.md#important-parameter-selection) for details.
 - **Higher r:** Use with caution, overflow-safe but stability TBD
 
 **Hyper-collisions (ν):**
