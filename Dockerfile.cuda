@@ -1,6 +1,14 @@
 # GANDALF KRMHD - CUDA Backend (NVIDIA GPUs)
 # Container for running KRMHD simulations on NVIDIA GPUs
-# Requires: NVIDIA GPU with CUDA 12.x, nvidia-container-toolkit
+#
+# Requirements:
+#   - NVIDIA GPU with compute capability 5.0+ (Maxwell or newer)
+#   - NVIDIA driver 525.60.13+ (for CUDA 12.x support)
+#   - nvidia-container-toolkit installed on host
+#   - 8+ GB GPU memory recommended for 128³ simulations
+#
+# CUDA Version: 12.2.0 (compatible with drivers 525.60.13+)
+# Driver compatibility: https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/
 
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
@@ -53,6 +61,9 @@ ENV XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
 CMD ["python", "examples/forcing_minimal.py"]
 
 # Usage examples:
+#
+# Verify host driver compatibility:
+#   nvidia-smi  # Check driver version >= 525.60.13
 #
 # Build:
 #   docker build -t gandalf-krmhd:cuda -f Dockerfile.cuda .

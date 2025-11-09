@@ -33,6 +33,31 @@ Key physical processes include:
 - [uv](https://github.com/astral-sh/uv) package manager (recommended)
 - **Optional**: GPU acceleration (Metal/CUDA) for better performance
 
+### System Requirements
+
+**Minimum (CPU-only, 32³ resolution):**
+- RAM: 4 GB
+- Disk space: 1 GB (code + outputs)
+- CPU: Any modern multi-core processor
+
+**Recommended (GPU, 128³ resolution):**
+- RAM: 8-16 GB
+- Disk space: 5-10 GB (for output files)
+- GPU options:
+  - **Apple Silicon**: M1/M2/M3 with 8+ GB unified memory
+  - **NVIDIA**: GPU with 8+ GB VRAM (CUDA 11.8+ or 12.x)
+  - **Driver requirements** (NVIDIA): CUDA 12.x drivers (compatible with driver 525.60.13+)
+
+**Production (256³+ resolution):**
+- RAM: 32-64 GB
+- Disk space: 50-100 GB (for long simulations)
+- GPU: 16+ GB VRAM or HPC cluster resources
+
+**Notes:**
+- Memory scales as O(N³ × M) where N is grid size, M is number of Hermite moments
+- Typical field memory: ~270 MB per complex field at 256³ resolution
+- Output files can be large: ~500 MB per checkpoint for 128³ simulations
+
 ### Using uv (Recommended)
 
 ```bash
