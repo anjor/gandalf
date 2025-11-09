@@ -68,6 +68,12 @@ for step in range(n_steps):
     state = gandalf_step(state, dt=dt, eta=1.0, hyper_r=2, force_z_plus=force_z_plus)
 ```
 
+**Box size parameters (Lx, Ly, Lz):**
+- The default `Lx = Ly = Lz = 2π` gives integer wavenumbers (k⊥ = 1, 2, 3, ...)
+- **Important:** Lz sets both k∥ spacing AND Alfvén time τ_A = Lz/v_A (with Lz = 2π, v_A = 1 → τ_A ≈ 6.28)
+
+**See also:** [Numerical Methods: Box Size and Time Normalization](numerical_methods.md#box-size-and-time-normalization) for detailed explanation.
+
 **Key parameters:**
 - `Nx, Ny, Nz`: Grid resolution (32³ = 32,768 points)
 - `Lx, Ly, Lz`: Box size (2π gives wavenumbers k = 1, 2, 3, ...)
