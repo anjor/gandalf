@@ -183,7 +183,9 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
    - Waves propagate at precisely the correct speed for all wavelengths
    - No numerical dispersion (phase speed errors) from spatial discretization
    - No grid-scale artifacts (wave on diagonal = wave on axis)
-   - **Short-term (1 wave period):** <1% energy error (dominated by RK2 approximation of nonlinear terms)
+   - **Short-term (1 wave period):** <1% energy error
+     - For linear waves: Error from FFT roundtrip + Hermite truncation + roundoff accumulation
+     - For nonlinear turbulence: Dominated by RK2 approximation of {z∓, ∇²z±} bracket terms
    - **Long-term (100s of τ_A):** <0.01% cumulative drift (tests at 64³-128³ resolution)
 
 2. **Landau damping rates:** Computed accurately with kinetic Hermite expansion
@@ -208,10 +210,12 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 **Why this matters:**
 
 - **Validation tests** achieve high accuracy in energy conservation (not ~10⁻⁶ as with FD)
-  - Short-term: <1% error over wave periods (dominated by RK2 nonlinear approximation, not linear solver)
+  - Short-term: <1% error over wave periods
+    - Linear waves: FFT roundtrip + Hermite truncation + roundoff (~10⁻³ to 10⁻¹⁰ depending on amplitude/resolution)
+    - Nonlinear turbulence: RK2 bracket approximation (dominant ~10⁻² error)
   - Long-term: <0.01% cumulative drift over 100s of τ_A (~10⁻¹⁰ relative error in energy balance)
-  - Linear solver is machine-precision accurate; practical error from nonlinear terms, dealiasing, and Hermite truncation
-- **Phase error accumulation** is minimal (analytical integration per timestep)
+  - Linear solver is machine-precision accurate (~10⁻¹⁵); practical error from other sources
+- **Phase error accumulation** is minimal (analytical integration of linear term per timestep)
 - **Benchmarking** can distinguish code bugs from numerical discretization errors
 
 **Technical implementation:**
@@ -446,6 +450,8 @@ def apply_integrating_factor(field, grid, dt, v_A=1.0):
 ### Why "GANDALF"?
 
 This method was developed in the original Fortran+CUDA GANDALF code and is essential for efficient KRMHD simulations. Without it, timesteps would be 10-100× smaller.
+
+**Note on naming:** The `gandalf_step()` function uses **RK2 (midpoint method)** for nonlinear terms, not RK4. A backward-compatible alias `rk4_step = gandalf_step` exists in the code for legacy tests, but don't be misled by the name—it's GANDALF's integrating factor + RK2, not plain RK4. The integrating factor makes this MORE accurate than plain RK4 for linear waves (zero temporal error vs. O(Δt⁴)).
 
 ## Hyper-Dissipation
 
