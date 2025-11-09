@@ -69,11 +69,10 @@ for step in range(n_steps):
 ```
 
 **Box size parameters (Lx, Ly, Lz):**
-- The default `Lx = Ly = Lz = 2π` gives integer wavenumbers: k⊥ = 1, 2, 3, ...
-- **Important:** Lz sets both parallel wavenumber spacing AND Alfvén time: τ_A = Lz/v_A
-- With Lz = 2π and v_A = 1, one Alfvén time is ~6.28 simulation time units
+- The default `Lx = Ly = Lz = 2π` gives integer wavenumbers (k⊥ = 1, 2, 3, ...)
+- **Important:** Lz sets both k∥ spacing AND Alfvén time τ_A = Lz/v_A (with Lz = 2π, v_A = 1 → τ_A ≈ 6.28)
 
-📖 **See [Numerical Methods: Box Size and Time Normalization](numerical_methods.md#box-size-and-time-normalization)** for detailed explanation of how Lx, Ly, Lz affect wavenumbers and time normalization.
+**See also:** [Numerical Methods: Box Size and Time Normalization](numerical_methods.md#box-size-and-time-normalization) for detailed explanation.
 
 **Key parameters:**
 - `Nx, Ny, Nz`: Grid resolution (32³ = 32,768 points)

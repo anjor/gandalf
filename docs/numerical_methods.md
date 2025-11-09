@@ -74,7 +74,7 @@ This means **changing Lz affects both spatial resolution in z AND the time norma
 | **Integer k** (code default) | 2π | 2π | n | 2π | Clean wavenumber indexing |
 | **Mixed** | 2π | 1.0 | n | 1.0 | Turbulence studies (integer k⊥, unit time) |
 
-*(Assumes v_A = 1 for simplicity. For general v_A, divide τ_A values by v_A. For example, with v_A = 2, the "integer k" convention gives τ_A = π.)*
+*(Assumes v_A = 1 for simplicity. For general v_A, use τ_A = Lz/v_A. Example: Lz = 2π with v_A = 2 gives τ_A = 2π/2 = π.)*
 
 **Practical implications:**
 
@@ -174,7 +174,9 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 
 ### Exact Treatment of Linear Physics
 
-**A key advantage over finite-difference methods:** The combination of spectral derivatives and the integrating factor method means **linear physics is captured analytically**, not through numerical approximation.
+**A key advantage over finite-difference methods:** The combination of spectral derivatives and the integrating factor method means **linear physics is captured analytically**, not through numerical approximation.*
+
+*Technical note: "Analytically exact" refers to the mathematical algorithm treating the linear propagation term without discretization error. Practical accuracy is limited by FFT roundtrip precision (~10⁻¹⁰ to 10⁻⁵, see line 240), not the integration method itself which is machine-precision accurate (~10⁻¹⁵).
 
 **What "exact" means in practice:**
 
@@ -240,7 +242,7 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 - **FFT precision:** Practical derivative accuracy ~10⁻¹⁰ (typical smooth fields) to 10⁻⁵ (worst-case, see `test_spectral.py::test_derivative_sine_x`)
 - **Hermite truncation:** Finite M moments (kinetic closure approximation)
 
-**Validation consequence:** Linear wave tests should achieve <1% energy drift over full wave period. If you see >10% drift, there's likely a bug in the implementation.
+**Validation consequence:** Linear wave tests should achieve <1% energy error over one wave period (short-term). If you see >10% error, there's likely a bug in the implementation.
 
 ## Dealiasing (2/3 Rule)
 
@@ -883,11 +885,12 @@ uv run pytest tests/test_diagnostics.py   # Spectra, energy
    - See `test_timestepping.py::TestAlfvenWavePropagation::test_alfven_wave_frequency` for reference
 
 4. **Energy conservation:** Long-term inviscid evolution (η=0, ν=0)
-   - **Short-term (1 period):** <1% energy error (see test #3 above, tested at 32³)
+   - **Short-term (1 period):** <1% energy error (see test #3 above, validated at 32³)
    - **Long-term (100s of τ_A):** <0.01% cumulative drift (validated at 64³-128³ resolution)
+   - **Resolution note:** 32³ validation provides baseline; higher resolutions (64³, 128³) typically achieve similar or better accuracy due to better-resolved FFTs
    - Energy balance typically conserved to ~10⁻¹⁰ relative error
    - Validates analytical linear propagation and Poisson bracket implementation
-   - Resolution-dependent: Higher resolution (256³+) may accumulate more roundoff
+   - **Caveat:** Very high resolution (256³+) may accumulate more absolute roundoff due to more FFT operations
    - With dissipation: Exponential decay E(t) = E₀·exp(-2η⟨k⊥²⟩t)
 
 5. **Convergence order:** 2nd-order in time for RK2
