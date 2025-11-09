@@ -33,7 +33,7 @@ import time
 import pytest
 import jax
 import jax.numpy as jnp
-from typing import Tuple, Dict, Any
+from typing import Tuple
 
 from krmhd.spectral import SpectralGrid2D, SpectralGrid3D, rfft2_forward, rfftn_forward
 from krmhd.physics import poisson_bracket_2d, poisson_bracket_3d
@@ -178,7 +178,7 @@ class TestPoissonBracket2DPerformance:
         f_fourier = create_random_field_2d(grid, seed=42)
         g_fourier = create_random_field_2d(grid, seed=43)
 
-        # Memory estimate (two complex fields)
+        # Memory estimate: two input fields only (minimum, excludes intermediate arrays)
         memory_mb = 2 * f_fourier.nbytes / 1e6
 
         # Warmup: trigger JIT compilation
@@ -217,6 +217,7 @@ class TestPoissonBracket2DPerformance:
         print(results)
 
         # Basic sanity checks (not strict performance requirements)
+        # Thresholds are intentionally permissive (~100× baseline) for cross-platform compatibility
         assert t_compile < 30.0, f"Compilation took too long: {t_compile:.2f}s"
         assert time_per_call < 10.0, f"Runtime too slow: {time_per_call:.2f}s"
         assert throughput > 0.1, f"Throughput too low: {throughput:.2f} calls/sec"
@@ -255,7 +256,7 @@ class TestPoissonBracket3DPerformance:
         f_fourier = create_random_field_3d(grid, seed=42)
         g_fourier = create_random_field_3d(grid, seed=43)
 
-        # Memory estimate (two complex fields)
+        # Memory estimate: two input fields only (minimum, excludes intermediate arrays)
         memory_mb = 2 * f_fourier.nbytes / 1e6
 
         # Warmup: trigger JIT compilation
@@ -296,6 +297,8 @@ class TestPoissonBracket3DPerformance:
         print(results)
 
         # Basic sanity checks (not strict performance requirements)
+        # Thresholds are intentionally permissive (~1000× baseline) for cross-platform compatibility
+        # M1 Pro baseline: 32³ ~0.6ms, 64³ ~3.5ms, 128³ ~28ms, 256³ ~257ms
         assert t_compile < 60.0, f"Compilation took too long: {t_compile:.2f}s"
         assert time_per_call < 30.0, f"Runtime too slow: {time_per_call:.2f}s"
         assert throughput > 0.03, f"Throughput too low: {throughput:.2f} calls/sec"
@@ -371,9 +374,10 @@ class TestPoissonBracket3DPerformance:
         print(f"  Time for 100K steps: {time_per_step*100000/3600:8.1f} hours")
         print(f"{'='*70}\n")
 
-        # Sanity checks
-        assert time_per_call < 5.0, f"128³ runtime too slow: {time_per_call:.2f}s"
-        assert throughput > 0.2, f"128³ throughput too low: {throughput:.2f} calls/sec"
+        # Sanity checks (permissive for cross-platform compatibility)
+        # M1 Pro baseline: ~28ms/call, ~35 calls/sec
+        assert time_per_call < 5.0, f"128³ runtime too slow: {time_per_call:.2f}s (expected ~0.03s)"
+        assert throughput > 0.2, f"128³ throughput too low: {throughput:.2f} calls/sec (expected ~35)"
 
 
 # ============================================================================

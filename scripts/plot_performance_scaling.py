@@ -70,9 +70,8 @@ def plot_scaling_analysis(output_dir: Path = Path('docs/figures')):
 
     # Theoretical 3D scaling: O(N³ log N)
     scale_3d = time_3d[0] / (N_3d[0]**3 * np.log2(N_3d[0]))
-    theory_3d = scale_3d * N_fine**2 * np.log2(N_fine)  # N_fine² for visualization
-    theory_3d_actual = scale_3d * N_fine**3 * np.log2(N_fine)
-    ax1.loglog(N_fine, theory_3d_actual, '--', color='#ff7f0e', alpha=0.5,
+    theory_3d = scale_3d * N_fine**3 * np.log2(N_fine)
+    ax1.loglog(N_fine, theory_3d, '--', color='#ff7f0e', alpha=0.5,
                label='3D theory (N³ log N)')
 
     ax1.set_xlabel('Resolution N (per dimension)', fontsize=11)
@@ -82,11 +81,14 @@ def plot_scaling_analysis(output_dir: Path = Path('docs/figures')):
     ax1.grid(True, alpha=0.3, which='both')
 
     # Add annotation for 128³ (common resolution)
-    idx_128 = np.where(N_3d == 128)[0][0]
-    ax1.annotate(f'128³: {time_3d[idx_128]:.1f} ms',
-                xy=(128, time_3d[idx_128]), xytext=(128, time_3d[idx_128]*0.3),
-                arrowprops=dict(arrowstyle='->', color='red', lw=1.5),
-                fontsize=10, color='red', fontweight='bold')
+    try:
+        idx_128 = np.where(N_3d == 128)[0][0]
+        ax1.annotate(f'128³: {time_3d[idx_128]:.1f} ms',
+                    xy=(128, time_3d[idx_128]), xytext=(128, time_3d[idx_128]*0.3),
+                    arrowprops=dict(arrowstyle='->', color='red', lw=1.5),
+                    fontsize=10, color='red', fontweight='bold')
+    except IndexError:
+        pass  # Skip annotation if 128³ not in dataset
 
     # ========================================================================
     # Panel 2: Throughput vs Resolution (log-log)
