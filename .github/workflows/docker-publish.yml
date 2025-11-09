@@ -1,12 +1,11 @@
 name: Build and Publish Docker Images
 
-# Trigger on tags, main branch pushes, or manual workflow dispatch
+# Trigger only on version tags or manual workflow dispatch
+# Note: Not triggered on main branch pushes to conserve resources
 on:
   push:
     tags:
       - 'v*.*.*'
-    branches:
-      - main
   workflow_dispatch:
 
 env:
@@ -111,4 +110,4 @@ jobs:
         run: |
           docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-cuda
           docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-cuda python -c 'import krmhd; print("KRMHD imported successfully")'
-          echo "✅ CUDA image verified"
+          echo "✅ CUDA image verified (import-only, GPU functionality requires --gpus flag)"

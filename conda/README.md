@@ -170,6 +170,10 @@ git push origin update-v0.2.0
 
 **Solution**: Ensure package is published to PyPI first. Conda-forge pulls from PyPI.
 
+### Issue: "Build backend uv_build not supported"
+
+**Not an issue**: The conda recipe uses `pip install` which can install packages built with any PEP 517 backend (including uv_build). The PyPI package is built with uv_build, but conda-forge installs it via pip with setuptools as a build dependency.
+
 ### Issue: "SHA256 mismatch"
 
 **Solution**:
