@@ -74,7 +74,7 @@ This means **changing Lz affects both spatial resolution in z AND the time norma
 | **Integer k** (code default) | 2π | 2π | n | 2π | Clean wavenumber indexing |
 | **Mixed** | 2π | 1.0 | n | 1.0 | Turbulence studies (integer k⊥, unit time) |
 
-*(Assumes v_A = 1 for simplicity. For general v_A, multiply τ_A values by 1/v_A. For example, with v_A = 2, the "integer k" convention gives τ_A = π.)*
+*(Assumes v_A = 1 for simplicity. For general v_A, divide τ_A values by v_A. For example, with v_A = 2, the "integer k" convention gives τ_A = π.)*
 
 **Practical implications:**
 
@@ -179,12 +179,12 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 **What "exact" means in practice:**
 
 1. **Alfvén wave dispersion relation:** ω = k∥v_A is satisfied by the physics model
-   - Linear propagation is integrated **analytically per timestep** (not numerically approximated)
+   - Linear propagation is integrated **analytically per timestep** (only the linear term; nonlinear terms use RK2)
    - Waves propagate at precisely the correct speed for all wavelengths
    - No numerical dispersion (phase speed errors) from spatial discretization
    - No grid-scale artifacts (wave on diagonal = wave on axis)
-   - **Short-term (1 wave period):** <1% energy error (validates linear wave propagation)
-   - **Long-term (100s of τ_A):** <0.01% cumulative drift (validates roundoff control)
+   - **Short-term (1 wave period):** <1% energy error (dominated by RK2 approximation of nonlinear terms)
+   - **Long-term (100s of τ_A):** <0.01% cumulative drift (tests at 64³-128³ resolution)
 
 2. **Landau damping rates:** Computed accurately with kinetic Hermite expansion
    - Kinetic effects (resonance, phase mixing) captured via moment hierarchy
@@ -208,8 +208,9 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 **Why this matters:**
 
 - **Validation tests** achieve high accuracy in energy conservation (not ~10⁻⁶ as with FD)
-  - Short-term: <1% error over wave periods
+  - Short-term: <1% error over wave periods (dominated by RK2 nonlinear approximation, not linear solver)
   - Long-term: <0.01% cumulative drift over 100s of τ_A (~10⁻¹⁰ relative error in energy balance)
+  - Linear solver is machine-precision accurate; practical error from nonlinear terms, dealiasing, and Hermite truncation
 - **Phase error accumulation** is minimal (analytical integration per timestep)
 - **Benchmarking** can distinguish code bugs from numerical discretization errors
 
@@ -232,7 +233,7 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 - **Nonlinear terms:** Approximated with RK2 (2nd-order in Δt, not exact)
 - **Dealiasing truncation:** Modes beyond 2/3 k_Nyquist are removed (intentional)
 - **Floating-point roundoff:** Accumulates over many timesteps (~10⁻¹⁰ typical after full period)
-- **FFT precision:** Practical derivative accuracy ~10⁻¹⁰ (typical smooth fields) to 10⁻⁵ (worst-case, see `test_spectral.py:189`)
+- **FFT precision:** Practical derivative accuracy ~10⁻¹⁰ (typical smooth fields) to 10⁻⁵ (worst-case, see `test_spectral.py::test_derivative_sine_x`)
 - **Hermite truncation:** Finite M moments (kinetic closure approximation)
 
 **Validation consequence:** Linear wave tests should achieve <1% energy drift over full wave period. If you see >10% drift, there's likely a bug in the implementation.
@@ -863,7 +864,7 @@ uv run pytest tests/test_diagnostics.py   # Spectra, energy
 1. **Derivative accuracy:** Compare spectral derivatives to analytical
    - **Expected accuracy:** ~10⁻¹⁰ (typical smooth fields) to 10⁻⁵ (conservative test tolerance)
    - Validates that ∂/∂x ↔ i·kx works correctly
-   - See `test_spectral.py:189` for reference: uses atol=1e-5 (conservative)
+   - See `test_spectral.py::test_derivative_sine_x` for reference: uses atol=1e-5 (conservative)
 
 2. **Dealiasing effectiveness:** Check energy conservation without/with dealiasing
    - **Without dealiasing:** Spurious energy growth (simulation blows up)
@@ -873,13 +874,14 @@ uv run pytest tests/test_diagnostics.py   # Spectra, energy
    - **Expected accuracy:** <1% energy error over one wave period (short-term test)
    - Tests validate spectral derivatives + integrating factor correctness
    - **Error >10% indicates a bug**, not normal accumulation
-   - See `test_timestepping.py:369` for reference: <1% over full period
+   - See `test_timestepping.py::TestAlfvenWavePropagation::test_alfven_wave_frequency` for reference
 
 4. **Energy conservation:** Long-term inviscid evolution (η=0, ν=0)
-   - **Short-term (1 period):** <1% energy error (see test #3 above)
-   - **Long-term (100s of τ_A):** <0.01% cumulative drift
+   - **Short-term (1 period):** <1% energy error (see test #3 above, tested at 32³)
+   - **Long-term (100s of τ_A):** <0.01% cumulative drift (validated at 64³-128³ resolution)
    - Energy balance typically conserved to ~10⁻¹⁰ relative error
    - Validates analytical linear propagation and Poisson bracket implementation
+   - Resolution-dependent: Higher resolution (256³+) may accumulate more roundoff
    - With dissipation: Exponential decay E(t) = E₀·exp(-2η⟨k⊥²⟩t)
 
 5. **Convergence order:** 2nd-order in time for RK2
