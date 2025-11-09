@@ -74,6 +74,8 @@ This means **changing Lz affects both spatial resolution in z AND the time norma
 | **Integer k** (code default) | 2π | 2π | n | 2π/v_A | Clean wavenumber indexing |
 | **Mixed** | 2π | 1.0 | n | 1.0 | Turbulence studies (integer k⊥, unit time) |
 
+*(Assumes v_A = 1 for simplicity. For general v_A, multiply τ_A values by 1/v_A. For example, with v_A = 2, the "integer k" convention gives τ_A = π.)*
+
 **Practical implications:**
 
 1. **For turbulence studies:** Use Lx = Ly = 2π for integer perpendicular wavenumbers (k⊥ = 1, 2, 3, ...)
@@ -180,12 +182,13 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
    - No numerical dispersion (phase speed errors) from spatial discretization
    - Waves propagate at precisely the correct speed for all wavelengths
    - No grid-scale artifacts (wave on diagonal = wave on axis)
-   - Over many timesteps: Energy conserved to <1% over full wave period (roundoff accumulation)
+   - **Short-term (1 wave period):** <1% energy drift (validates linear wave propagation)
+   - **Long-term (100s of τ_A):** <0.01% drift (validates cumulative roundoff control)
 
 2. **Landau damping rates:** Computed accurately with kinetic Hermite expansion
    - Kinetic effects (resonance, phase mixing) captured via moment hierarchy
    - Critical for validation against analytical theory
-   - Practical accuracy: ~10⁻¹⁰ relative error in energy conservation
+   - Practical accuracy: ~10⁻¹⁰ relative error in kinetic energy balance
 
 3. **Wave polarization:** Preserved exactly
    - No spurious coupling between modes
@@ -203,9 +206,10 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 
 **Why this matters:**
 
-- **Validation tests** achieve ~10⁻¹⁰ relative error in energy conservation (not ~10⁻⁶ as with FD)
-- **Long-time evolution** has minimal phase error accumulation (<1% over wave periods)
-- **Energy conservation** in inviscid limit: <0.01% drift over 100s of τ_A
+- **Validation tests** achieve high accuracy in energy conservation (not ~10⁻⁶ as with FD)
+  - Short-term: <1% over wave periods
+  - Long-term: <0.01% over 100s of τ_A (~10⁻¹⁰ relative error in energy balance)
+- **Phase error accumulation** is minimal (analytical integration per timestep)
 - **Benchmarking** can distinguish code bugs from numerical discretization errors
 
 **Technical implementation:**
@@ -412,11 +416,14 @@ def gandalf_step(state, dt, eta, nu, hyper_r=2, hyper_n=2, force_z_plus=None, fo
     return KRMHDState(z_plus=z_plus_new, z_minus=z_minus_new, ...)
 ```
 
-**Accuracy:** 2nd-order in time for nonlinear terms, **exact per timestep for linear propagation**.
+**Accuracy:** 2nd-order in time for nonlinear terms, **exact per timestep for linear propagation** (roundoff accumulates over many steps).
 
 This means Alfvén waves with any k∥ propagate with **zero phase speed error per timestep** (analytical integration of linear term). The only approximation is in the nonlinear bracket terms {z∓, ∇²z±}, which are O(Δt²) accurate with RK2.
 
-**Practical consequence:** In validation tests (linear Alfvén waves), expect <1% energy drift over one full wave period. If you see >10% drift, there's likely a bug, not discretization error accumulation.
+**Practical consequence:** In validation tests (linear Alfvén waves), expect:
+- **Short-term (1 wave period):** <1% energy drift
+- **Long-term (100s of τ_A):** <0.01% drift
+If you see >10% drift over one period, there's likely a bug, not discretization error accumulation.
 
 **Stability:** CFL condition based on nonlinear advection, NOT wave propagation.
 
@@ -862,14 +869,16 @@ uv run pytest tests/test_diagnostics.py   # Spectra, energy
    - **With dealiasing:** Energy conserved to <0.01% (inviscid limit)
 
 3. **Alfvén wave dispersion:** ω = k∥v_A (linear physics)
-   - **Expected accuracy:** <1% energy drift over one wave period
+   - **Expected accuracy:** <1% energy drift over one wave period (short-term test)
    - Tests validate spectral derivatives + integrating factor correctness
    - **Drift >10% indicates a bug**, not normal accumulation
    - See `test_timestepping.py:369` for reference: <1% over full period
 
-4. **Energy conservation:** <0.01% error for inviscid runs (η=0, ν=0) over 100s of τ_A
-   - Validates analytical linear propagation and Poisson bracket implementation
+4. **Energy conservation:** Long-term inviscid evolution (η=0, ν=0)
+   - **Short-term (1 period):** <1% energy drift (see test #3 above)
+   - **Long-term (100s of τ_A):** <0.01% cumulative drift
    - Energy balance typically conserved to ~10⁻¹⁰ relative error
+   - Validates analytical linear propagation and Poisson bracket implementation
    - With dissipation: Exponential decay E(t) = E₀·exp(-2η⟨k⊥²⟩t)
 
 5. **Convergence order:** 2nd-order in time for RK2
