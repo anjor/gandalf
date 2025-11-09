@@ -116,6 +116,391 @@ pip install -e .
 pip install -e ".[metal]"
 ```
 
+### Using Docker Containers
+
+Docker containers provide a pre-configured environment with all dependencies installed. This is especially useful for:
+- **HPC clusters** requiring Singularity/Apptainer containers
+- **Reproducibility** across different systems
+- **Quick testing** without local installation
+- **Avoiding** JAX/GPU driver conflicts
+
+#### Quick Start with Docker
+
+```bash
+# Pull and run the latest CPU version
+docker run -it ghcr.io/anjor/gandalf:latest python examples/forcing_minimal.py
+
+# Or run interactively
+docker run -it ghcr.io/anjor/gandalf:latest bash
+```
+
+#### Available Images
+
+Pre-built images are automatically published to GitHub Container Registry:
+
+| Image | Description | Use Case |
+|-------|-------------|----------|
+| `ghcr.io/anjor/gandalf:latest` | CPU backend | Testing, HPC without GPU |
+| `ghcr.io/anjor/gandalf:v0.1.0` | Specific version (CPU) | Reproducibility |
+| `ghcr.io/anjor/gandalf:latest-cuda` | NVIDIA GPU (CUDA 12) | Production GPU runs |
+
+**Note**: Metal (Apple Silicon) images must be built locally - see below.
+
+#### Running with GPU Support
+
+**NVIDIA GPUs** (requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)):
+
+```bash
+# Run with GPU access
+docker run --gpus all ghcr.io/anjor/gandalf:latest-cuda python examples/decaying_turbulence.py
+
+# Verify GPU is detected
+docker run --gpus all ghcr.io/anjor/gandalf:latest-cuda python -c 'import jax; print(jax.devices())'
+```
+
+**Apple Silicon** (build locally):
+
+```bash
+# Clone repository first
+git clone https://github.com/anjor/gandalf.git
+cd gandalf
+
+# Build Metal-enabled image
+docker build -t gandalf-krmhd:metal -f Dockerfile.metal .
+
+# Run with Metal support
+docker run -it gandalf-krmhd:metal python examples/decaying_turbulence.py
+```
+
+#### Mounting Local Directories
+
+To save outputs to your local machine:
+
+```bash
+# Create output directory
+mkdir -p output
+
+# Run with volume mount
+docker run -v $(pwd)/output:/app/output ghcr.io/anjor/gandalf:latest \
+  python examples/decaying_turbulence.py
+
+# Outputs will appear in ./output/
+```
+
+#### Using on HPC Clusters (Singularity/Apptainer)
+
+Most HPC systems use Singularity (now Apptainer) instead of Docker:
+
+```bash
+# Convert Docker image to Singularity
+singularity pull gandalf_latest.sif docker://ghcr.io/anjor/gandalf:latest
+
+# Run simulation
+singularity exec gandalf_latest.sif python examples/decaying_turbulence.py
+
+# With GPU support (CUDA)
+singularity pull gandalf_cuda.sif docker://ghcr.io/anjor/gandalf:latest-cuda
+singularity exec --nv gandalf_cuda.sif python examples/decaying_turbulence.py
+```
+
+**HPC batch script example** (SLURM):
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=gandalf
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:1
+#SBATCH --time=04:00:00
+
+module load singularity
+
+# Run simulation
+singularity exec --nv gandalf_cuda.sif \
+  python /app/examples/alfvenic_cascade_benchmark.py --resolution 128
+```
+
+#### Building Custom Images
+
+For development or customization:
+
+```bash
+# Clone repository
+git clone https://github.com/anjor/gandalf.git
+cd gandalf
+
+# Build CPU version
+docker build -t gandalf-krmhd:dev .
+
+# Build CUDA version
+docker build -t gandalf-krmhd:dev-cuda -f Dockerfile.cuda .
+
+# Build Metal version (macOS only)
+docker build -t gandalf-krmhd:dev-metal -f Dockerfile.metal .
+
+# Run your custom build
+docker run -it gandalf-krmhd:dev bash
+```
+
+#### Container Best Practices
+
+**For reproducibility**:
+- Use specific version tags: `ghcr.io/anjor/gandalf:v0.1.0`
+- Include container version in paper methods section
+- Archive container with data: `docker save` or `singularity build --sandbox`
+
+**For performance**:
+- Use GPU images (`-cuda`) on GPU-enabled systems
+- Mount data directories as read-only where possible: `-v $(pwd)/data:/data:ro`
+- Use `/app/output` as working directory for temporary files
+
+**For debugging**:
+- Interactive shell: `docker run -it <image> bash`
+- Check JAX devices: `docker run <image> python -c 'import jax; print(jax.devices())'`
+- Inspect installed versions: `docker run <image> pip list`
+
+## Installation Troubleshooting
+
+### Verifying Your Installation
+
+After installation, always verify that JAX is correctly configured:
+
+```bash
+python -c 'import jax; print(f"JAX version: {jax.__version__}"); print(f"Devices: {jax.devices()}")'
+```
+
+**Expected output:**
+- **Metal (macOS)**: `[METAL(id=0)]`
+- **CUDA (Linux/GPU)**: `[cuda:0]` or `[gpu:0]`
+- **CPU (all platforms)**: `[CpuDevice(id=0)]`
+
+### Common Issues and Solutions
+
+#### Issue: "No module named 'jax'"
+
+**Cause**: JAX not installed or virtual environment not activated
+
+**Solution**:
+```bash
+# If using uv
+uv sync
+source .venv/bin/activate
+
+# If using pip
+pip install -e .
+```
+
+#### Issue: JAX Metal fails silently on macOS
+
+**Symptoms**: Installation succeeds but `jax.devices()` shows `[CpuDevice(id=0)]` instead of `[METAL(id=0)]`
+
+**Solution 1**: Enable PJRT compatibility
+```bash
+export ENABLE_PJRT_COMPATIBILITY=1
+python -c 'import jax; print(jax.devices())'
+```
+
+**Solution 2**: Reinstall jax-metal
+```bash
+uv pip uninstall jax-metal
+uv pip install --upgrade jax-metal
+```
+
+**Solution 3**: Check macOS version
+- Metal backend requires macOS 13.0+ (Ventura or later)
+- For older macOS versions, use CPU backend
+
+#### Issue: CUDA version mismatch
+
+**Symptoms**: `RuntimeError: CUDA version mismatch` or `CUDNN_STATUS_NOT_INITIALIZED`
+
+**Solution**: Match JAX CUDA version to your system CUDA:
+```bash
+# Check your CUDA version
+nvcc --version
+# or
+nvidia-smi
+
+# Install matching JAX version (e.g., for CUDA 12.x)
+uv pip install --upgrade "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+# For CUDA 11.8
+uv pip install --upgrade "jax[cuda11_cudnn86]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+```
+
+See [JAX GPU installation guide](https://jax.readthedocs.io/en/latest/installation.html#nvidia-gpu) for all CUDA versions.
+
+#### Issue: "RuntimeError: Unable to initialize backend 'cuda'"
+
+**Cause**: CUDA libraries not found or incompatible driver
+
+**Solution**:
+```bash
+# Check CUDA libraries are accessible
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+# Verify CUDA installation
+python -c 'import jaxlib; print(jaxlib.xla_extension_version)'
+
+# If still failing, try CPU-only mode
+python -c 'import jax; jax.config.update("jax_platform_name", "cpu"); print(jax.devices())'
+```
+
+#### Issue: HPC cluster module conflicts
+
+**Symptoms**: Import errors, version conflicts, or permission errors on HPC systems
+
+**Solution**: Use module system and local installation
+```bash
+# Load required modules (adjust for your cluster)
+module load python/3.10
+module load cuda/12.0  # if using GPU
+
+# Create local environment
+python -m venv ~/.venv/gandalf
+source ~/.venv/gandalf/bin/activate
+pip install -e /path/to/gandalf
+
+# For systems requiring Singularity/Apptainer
+# See Docker section for container usage
+```
+
+#### Issue: "ImportError: cannot import name 'sparse' from 'jax.experimental'"
+
+**Cause**: JAX version too old
+
+**Solution**:
+```bash
+uv pip install --upgrade "jax>=0.4.20"
+```
+
+#### Issue: Out of memory errors during simulation
+
+**Symptoms**: `RuntimeError: RESOURCE_EXHAUSTED: Out of memory`
+
+**Solutions**:
+1. **Reduce resolution**: Start with 32³ or 64³ before scaling to 128³+
+2. **Use CPU for memory-intensive runs**: `jax.config.update("jax_platform_name", "cpu")`
+3. **Monitor memory**:
+   ```python
+   from jax.lib import xla_bridge
+   print(f"Backend: {xla_bridge.get_backend().platform}")
+   ```
+4. **Clear JAX cache**: `rm -rf ~/.cache/jax_cache/`
+
+#### Issue: Slow performance even with GPU
+
+**Symptoms**: Simulation takes much longer than expected
+
+**Diagnostics**:
+```python
+import jax
+import time
+
+# Verify GPU is actually being used
+print(f"Devices: {jax.devices()}")
+
+# Test compilation overhead
+@jax.jit
+def test_fn(x):
+    return x @ x.T
+
+# First call includes compilation (slow)
+x = jax.numpy.ones((1000, 1000))
+start = time.time()
+_ = test_fn(x).block_until_ready()
+print(f"First call (with compilation): {time.time() - start:.3f}s")
+
+# Second call is fast
+start = time.time()
+_ = test_fn(x).block_until_ready()
+print(f"Second call (compiled): {time.time() - start:.3f}s")
+```
+
+**Solutions**:
+- First timestep is always slow (JIT compilation)
+- Use `.block_until_ready()` for accurate timing
+- Check Metal GPU is active: `System Settings > General > About > Graphics`
+
+#### Issue: "uv: command not found"
+
+**Cause**: `uv` not installed or not in PATH
+
+**Solution**:
+```bash
+# Install uv (recommended)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Or use pip/pipx
+pip install uv
+# or
+pipx install uv
+
+# Add to PATH (macOS/Linux)
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Or use pip directly (no uv needed)
+python -m venv venv
+source venv/bin/activate
+pip install -e .
+```
+
+### Platform-Specific Notes
+
+#### macOS (Apple Silicon)
+
+**Best practices:**
+- Use Metal backend for 2-5x speedup over CPU
+- Monitor Activity Monitor → GPU History during runs
+- For large simulations (256³+), consider cloud GPU or HPC cluster
+
+**Known limitations:**
+- Metal backend is experimental (may have edge case bugs)
+- Some operations fall back to CPU automatically
+- Memory limited by unified RAM (8-64 GB typical)
+
+#### Linux (NVIDIA GPU)
+
+**Best practices:**
+- Use `nvidia-smi` to monitor GPU usage during runs
+- For multi-GPU systems, specify device: `CUDA_VISIBLE_DEVICES=0 python script.py`
+- Load CUDA modules before Python: `module load cuda/12.0`
+
+**Known limitations:**
+- CUDA version must match JAX installation exactly
+- Older GPUs (compute capability < 5.0) may not be supported
+
+#### HPC Clusters
+
+**Best practices:**
+- Use container images (Docker/Singularity) for reproducibility
+- Request GPU resources in batch scripts: `#SBATCH --gres=gpu:1`
+- Install in user directory: `pip install --user -e .`
+- Use `module spider jax` to check available pre-installed versions
+
+**Common HPC commands:**
+```bash
+# Check available GPUs
+sinfo -o "%20N %10c %10m %25f %10G"
+
+# Interactive GPU session
+salloc --gres=gpu:1 --time=01:00:00
+
+# Load environment
+module load python/3.10 cuda/12.0
+source ~/.venv/gandalf/bin/activate
+```
+
+### Still Having Issues?
+
+1. **Check GitHub Issues**: https://github.com/anjor/gandalf/issues
+2. **JAX Installation Guide**: https://jax.readthedocs.io/en/latest/installation.html
+3. **File a bug report**: Include output of:
+   ```bash
+   python -c 'import jax; print(jax.__version__); print(jax.devices())'
+   uv --version  # or: pip --version
+   python --version
+   ```
+
 ## Project Structure
 
 ```
