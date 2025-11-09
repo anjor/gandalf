@@ -114,7 +114,7 @@ Valid for weak turbulence (δB⊥/B₀ << 1) at scales larger than the ion gyror
 - **Issues**: File bug reports or feature requests at [github.com/anjor/gandalf/issues](https://github.com/anjor/gandalf/issues)
 - **Examples not working?** Check [Running Simulations](running_simulations.md) troubleshooting section
 - **Physics questions?** See [Physics Validity Regimes](physics_validity.md)
-- **Performance issues?** See [Numerical Methods](numerical_methods.md) for resolution scaling
+- **Performance issues?** See [Numerical Methods](numerical_methods.md) for resolution scaling, or run `pytest tests/test_performance.py -v -s` to benchmark your system
 
 ## Contributing
 
