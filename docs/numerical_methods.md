@@ -668,13 +668,16 @@ These benchmarks are specific to M1 Pro with JAX-Metal. Performance will vary on
 - **CPU-only**: ~10-50× slower (not recommended for production)
 - **M1/M2 Max/Ultra**: Similar per-core, but can run multiple simulations in parallel
 
-#### Performance Regression Detection
+#### Catastrophic Failure Detection
 
-The benchmark suite includes sanity checks to catch performance regressions:
+The benchmark suite includes sanity checks to catch catastrophic failures:
 - Fails if 128³ takes > 30 seconds/call (1000× slower than expected)
 - Warns if compilation takes > 60 seconds
 
-For CI integration or custom thresholds, modify `test_performance.py`.
+**Note**: These thresholds detect major breakage, not typical performance regressions (2-5× slowdowns).
+For true regression detection, compare against baseline data or integrate with CI performance tracking.
+
+To customize thresholds or add stricter regression checks, modify `test_performance.py`.
 
 ### Optimization Tips
 

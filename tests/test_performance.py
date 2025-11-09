@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Performance benchmarks for KRMHD spectral operations.
 
@@ -353,7 +354,7 @@ class TestPoissonBracket3DPerformance:
         )
 
         # Calculate simulation estimates
-        # Typical simulation: ~6 bracket calls per timestep (RK4 with 2 Elsasser variables)
+        # Typical simulation: ~6 bracket calls per timestep (RK2 with 2 Elsasser variables + Hermite coupling)
         brackets_per_step = 6
         time_per_step = time_per_call * brackets_per_step
         steps_per_sec = 1.0 / time_per_step

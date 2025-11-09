@@ -354,6 +354,8 @@ python tests/test_performance.py
 
 Benchmarks test 2D (64²-512²) and 3D (32³-256³) resolutions, measuring compilation time, runtime, throughput, and scaling behavior. See `tests/test_performance.py` for detailed baseline data.
 
+**Note**: Benchmarks are currently excluded from CI (use `-m "not benchmark"` in regular test runs). CI integration for automated regression detection is planned as future work.
+
 ### Code Quality
 
 ```bash
@@ -555,7 +557,7 @@ The code includes validation against:
   - Minimal forcing: 50-line example showing basic forcing workflow
   - **Kinetic FDT validation**: Drive single k-modes, measure |gₘ|² spectrum, compare with theory (Issue #27)
   - All with comprehensive diagnostics and visualization
-- **Performance benchmarks** (Issue #35): Automated performance regression detection
+- **Performance benchmarks** (Issue #35): Comprehensive performance benchmarks with catastrophic failure detection
   - 2D Poisson bracket: 64² to 512² resolution scaling
   - 3D Poisson bracket: 32³ to 256³ resolution scaling (primary use case)
   - Realistic workload tests for 128³ turbulence simulations
