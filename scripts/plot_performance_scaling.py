@@ -14,8 +14,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-# Baseline performance data from M1 Pro (JAX 0.4.20 with Metal)
-# Run `pytest tests/test_performance.py -v -s` to regenerate
+# REFERENCE BASELINE (M1 Pro, macOS 13.5, JAX 0.4.20 with Metal)
+# DO NOT update unless establishing new baseline - run benchmarks manually
+# To generate new baseline: pytest tests/test_performance.py -v -s
+# These values are used for comparison and should only change deliberately
 
 BENCHMARK_DATA_2D = {
     'N': np.array([64, 128, 256, 512]),
