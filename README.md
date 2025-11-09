@@ -129,7 +129,7 @@ krmhd/
 │   ├── forcing.py      # ✅ Gaussian white noise forcing for driven turbulence
 │   ├── io.py          # HDF5 checkpointing (TODO)
 │   └── validation.py   # Linear physics tests (TODO)
-├── tests/             # Test suite (222 tests)
+├── tests/             # Test suite (285 tests including performance benchmarks)
 ├── examples/          # Example scripts and tutorials
 │   ├── decaying_turbulence.py   # ✅ Turbulent cascade with diagnostics
 │   ├── driven_turbulence.py     # ✅ Forced turbulence with steady-state balance
@@ -327,7 +327,32 @@ uv run pytest tests/test_diagnostics.py
 
 # Run with verbose output
 uv run pytest -xvs
+
+# Exclude slow tests (like benchmarks)
+uv run pytest -m "not slow and not benchmark"
 ```
+
+### Performance Benchmarks
+
+The code includes comprehensive performance benchmarks for the Poisson bracket operator (the computational bottleneck):
+
+```bash
+# Run all benchmarks with detailed timing output
+pytest tests/test_performance.py -v -s
+
+# Run only benchmark tests
+pytest -m benchmark -v -s
+
+# Run directly without pytest
+python tests/test_performance.py
+```
+
+**Baseline performance (M1 Pro, 128³ resolution):**
+- ~28 ms per Poisson bracket call
+- ~35 calls/second throughput
+- ~5.3 hours for 100K timesteps (typical long simulation)
+
+Benchmarks test 2D (64²-512²) and 3D (32³-256³) resolutions, measuring compilation time, runtime, throughput, and scaling behavior. See `tests/test_performance.py` for detailed baseline data.
 
 ### Code Quality
 
@@ -530,8 +555,15 @@ The code includes validation against:
   - Minimal forcing: 50-line example showing basic forcing workflow
   - **Kinetic FDT validation**: Drive single k-modes, measure |gₘ|² spectrum, compare with theory (Issue #27)
   - All with comprehensive diagnostics and visualization
+- **Performance benchmarks** (Issue #35): Automated performance regression detection
+  - 2D Poisson bracket: 64² to 512² resolution scaling
+  - 3D Poisson bracket: 32³ to 256³ resolution scaling (primary use case)
+  - Realistic workload tests for 128³ turbulence simulations
+  - Baseline performance data for M1 Pro (JAX with Metal)
+  - Throughput metrics, memory usage, and O(N³ log N) scaling analysis
+  - Can run via pytest or standalone: `python tests/test_performance.py`
 
-**Test Coverage:** 275 passing tests across all modules
+**Test Coverage:** 285 passing tests across all modules (includes 10 performance benchmarks)
 
 ### In Progress 🚧
 - **Extended validation** (Issue #10): Kinetic Alfven waves, Landau damping with exact dispersion
