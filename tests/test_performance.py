@@ -27,6 +27,13 @@ Realistic workload (128³, sustained throughput):
 - ~5.3 timesteps/second
 - ~5.3 hours for 100K timesteps
 
+Troubleshooting:
+- Slow first run: JIT compilation (50-450ms) is normal, subsequent calls are faster
+- Inconsistent timing: Ensure no background processes running (close browsers, etc.)
+- OOM at 256³: Reduce resolution or use system with more GPU memory (>8GB)
+- Tests fail on slow hardware: Sanity check thresholds are 100-1000× baseline,
+  designed to catch catastrophic failures rather than modest slowdowns
+
 Use -s flag to see detailed timing output during test runs.
 """
 
@@ -194,6 +201,13 @@ class TestPoissonBracket2DPerformance:
             grid.dealias_mask
         )
 
+        # Correctness validation: verify result is valid
+        result = poisson_bracket_2d(f_fourier, g_fourier, grid.kx, grid.ky,
+                                     grid.Ny, grid.Nx, grid.dealias_mask)
+        assert not jnp.any(jnp.isnan(result)), "Poisson bracket produced NaN"
+        assert not jnp.any(jnp.isinf(result)), "Poisson bracket produced Inf"
+        assert result.shape == f_fourier.shape, f"Shape mismatch: {result.shape} != {f_fourier.shape}"
+
         # Time compiled calls
         time_per_call, throughput = time_function(
             poisson_bracket_2d,
@@ -260,6 +274,10 @@ class TestPoissonBracket3DPerformance:
         # Memory estimate: two input fields only (minimum, excludes intermediate arrays)
         memory_mb = 2 * f_fourier.nbytes / 1e6
 
+        # Memory validation: prevent OOM on typical GPUs for large grids
+        if N == 256:
+            assert memory_mb < 300, f"256³ memory too high: {memory_mb:.1f}MB (typical GPU limit ~200MB/field)"
+
         # Warmup: trigger JIT compilation
         t_compile = warmup_jit(
             poisson_bracket_3d,
@@ -272,6 +290,13 @@ class TestPoissonBracket3DPerformance:
             grid.Nx,
             grid.dealias_mask
         )
+
+        # Correctness validation: verify result is valid
+        result = poisson_bracket_3d(f_fourier, g_fourier, grid.kx, grid.ky,
+                                     grid.Nz, grid.Ny, grid.Nx, grid.dealias_mask)
+        assert not jnp.any(jnp.isnan(result)), "Poisson bracket produced NaN"
+        assert not jnp.any(jnp.isinf(result)), "Poisson bracket produced Inf"
+        assert result.shape == f_fourier.shape, f"Shape mismatch: {result.shape} != {f_fourier.shape}"
 
         # Time compiled calls
         time_per_call, throughput = time_function(
@@ -339,7 +364,15 @@ class TestPoissonBracket3DPerformance:
             grid.dealias_mask
         )
 
+        # Correctness validation: verify result is valid
+        result = poisson_bracket_3d(f_fourier, g_fourier, grid.kx, grid.ky,
+                                     grid.Nz, grid.Ny, grid.Nx, grid.dealias_mask)
+        assert not jnp.any(jnp.isnan(result)), "Poisson bracket produced NaN"
+        assert not jnp.any(jnp.isinf(result)), "Poisson bracket produced Inf"
+        assert result.shape == f_fourier.shape, f"Shape mismatch: {result.shape} != {f_fourier.shape}"
+
         # Time 100 calls (realistic workload)
+        # Uses 10× more samples than scaling tests for stable sustained throughput measurement
         time_per_call, throughput = time_function(
             poisson_bracket_3d,
             f_fourier,
@@ -389,18 +422,20 @@ class TestPoissonBracket3DPerformance:
 class TestScalingAnalysis:
     """Analyze computational scaling with resolution."""
 
-    @pytest.mark.benchmark
-    @pytest.mark.slow
+    @pytest.mark.benchmark  # Performance measurement (exclude with -m "not benchmark")
+    @pytest.mark.slow       # Long runtime ~30s (exclude with -m "not slow")
     def test_3d_scaling_law(self):
         """
         Measure how 3D Poisson bracket runtime scales with resolution.
 
         Theory: FFT-based algorithm should scale as O(N³ log N)
 
-        Tests resolutions from 32³ to 256³ and fits scaling exponent.
-        This is marked as slow since it tests all resolutions.
+        Tests resolutions from 32³ to 128³ and computes scaling exponent.
+        Marked as slow since it tests multiple resolutions (~30 seconds total).
         """
-        resolutions = [32, 64, 128]  # 256 omitted for faster testing
+        # 256³ omitted for speed: adds ~4 minutes to test time
+        # To include 256³ for full validation, use: resolutions = [32, 64, 128, 256]
+        resolutions = [32, 64, 128]
         times = []
 
         print("\n" + "="*70)
