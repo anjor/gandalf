@@ -17,13 +17,17 @@ Expected Results:
 Runtime: ~2-5 minutes depending on resolution range
 """
 
+# Standard library
+from pathlib import Path
+from typing import Dict, List
+import time
+
+# Third-party
 import numpy as np
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-from pathlib import Path
-from typing import Tuple, Dict, List
-import time
 
+# Local
 from krmhd import (
     SpectralGrid3D,
     KRMHDState,
@@ -46,6 +50,7 @@ def analytical_alfven_solution(
     kz_mode: int,
     amplitude: float,
     v_A: float,
+    M: int = 2,
 ) -> KRMHDState:
     """
     Compute analytical Alfvén wave solution at time t.
@@ -56,8 +61,8 @@ def analytical_alfven_solution(
 
     The solution at time t is just the initial condition propagated.
     """
-    # Initialize at t=0 (use M=2 minimum for gandalf_step validation)
-    state0 = initialize_alfven_wave(grid, M=2, kz_mode=kz_mode, amplitude=amplitude)
+    # Initialize at t=0 (M >= 2 required for gandalf_step validation)
+    state0 = initialize_alfven_wave(grid, M=M, kz_mode=kz_mode, amplitude=amplitude)
 
     # Compute frequency: ω = kz·v_A
     kz = 2.0 * jnp.pi * kz_mode / grid.Lz
@@ -117,6 +122,7 @@ def test_alfven_wave_convergence(
     kz_mode: int = 1,
     amplitude: float = 0.1,
     v_A: float = 1.0,
+    M: int = 2,
 ) -> Dict[str, np.ndarray]:
     """
     Test grid convergence for Alfvén wave propagation.
@@ -130,6 +136,7 @@ def test_alfven_wave_convergence(
     kz_mode : Parallel mode number
     amplitude : Wave amplitude
     v_A : Alfvén velocity
+    M : Number of Hermite moments (minimum 2 for gandalf_step)
 
     Returns
     -------
@@ -157,11 +164,11 @@ def test_alfven_wave_convergence(
             Lx=2*np.pi, Ly=2*np.pi, Lz=2*np.pi
         )
 
-        # Initialize (use M=2 minimum for gandalf_step validation)
-        state = initialize_alfven_wave(grid, M=2, kz_mode=kz_mode, amplitude=amplitude)
+        # Initialize (M >= 2 required for gandalf_step validation)
+        state = initialize_alfven_wave(grid, M=M, kz_mode=kz_mode, amplitude=amplitude)
 
         # Compute analytical solution at t_final
-        state_exact = analytical_alfven_solution(grid, t_final, kz_mode, amplitude, v_A)
+        state_exact = analytical_alfven_solution(grid, t_final, kz_mode, amplitude, v_A, M=M)
         norm_exact = compute_l2_norm(state_exact)
 
         # Time-step to t_final
@@ -195,7 +202,7 @@ def test_alfven_wave_convergence(
 def test_orszag_tang_convergence(
     resolutions: List[int] = [16, 24, 32, 48, 64],
     reference_resolution: int = 128,
-    t_final: float = 0.5,
+    t_final: float = 0.05,
 ) -> Dict[str, np.ndarray]:
     """
     Test grid convergence for Orszag-Tang vortex.
@@ -206,7 +213,7 @@ def test_orszag_tang_convergence(
     ----------
     resolutions : List of grid sizes to test
     reference_resolution : High-resolution reference (treated as "exact")
-    t_final : Final time (should be short to stay smooth)
+    t_final : Final time (should be very short to maintain smoothness before gradient formation)
 
     Returns
     -------
@@ -408,7 +415,7 @@ def main():
     orszag_results = test_orszag_tang_convergence(
         resolutions=[16, 24, 32, 48, 64],
         reference_resolution=128,
-        t_final=0.5,  # Short time while solution is smooth
+        t_final=0.05,  # Very short time before gradient/shock formation
     )
 
     plot_convergence(
