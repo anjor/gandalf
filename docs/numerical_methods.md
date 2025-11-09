@@ -51,6 +51,62 @@ ky = (2π/Ly) × ny,  ny = -Ny/2, ..., Ny/2-1
 kz = (2π/Lz) × nz,  nz = -Nz/2, ..., Nz/2-1
 ```
 
+### Box Size and Time Normalization
+
+**A subtle but critical point:** The box sizes Lx, Ly, Lz can be set independently, providing separate control over spatial and temporal normalizations.
+
+**Perpendicular box sizes (Lx, Ly)** control perpendicular wavenumber spacing:
+```
+k⊥ = √(kx² + ky²) = (2π/L⊥) × √(nx² + ny²)
+```
+
+**Parallel box size (Lz)** controls BOTH:
+1. Parallel wavenumber spacing: kz = (2π/Lz) × nz
+2. Alfvén time normalization: **τ_A = Lz/v_A**
+
+This means **changing Lz affects both spatial resolution in z AND the time normalization** - a common source of confusion.
+
+**Common normalization conventions:**
+
+| Convention | Lx, Ly | Lz | k⊥ | τ_A | Use case |
+|------------|--------|----|----|-----|----------|
+| **Unit box** (thesis) | 1.0 | 1.0 | 2πn | 1.0 | Match original GANDALF thesis |
+| **Integer k** (code default) | 2π | 2π | n | 2π/v_A | Clean wavenumber indexing |
+| **Mixed** | 2π | 1.0 | n | 1.0 | Turbulence studies (integer k⊥, unit time) |
+
+**Practical implications:**
+
+1. **For turbulence studies:** Use Lx = Ly = 2π for integer perpendicular wavenumbers (k⊥ = 1, 2, 3, ...)
+   - Makes forcing at "k=2" intuitive (literally mode number 2)
+   - Inertial range k⊥ ∈ [1, 10] corresponds to mode numbers [1, 10]
+
+2. **For time normalization:** Set Lz based on desired τ_A (with v_A = 1):
+   - Lz = 1.0 → τ_A = 1.0 (one Alfvén time = 1.0 simulation time units)
+   - Lz = 2π → τ_A = 2π ≈ 6.28 (one Alfvén time = 2π simulation time units)
+
+3. **For benchmarks:** Match the reference convention exactly
+   - Orszag-Tang vortex: Lx = Ly = Lz = 1.0 (thesis convention)
+   - Energy oscillation period: ~2 τ_A = ~2.0 simulation time units
+
+**Common pitfall:**
+
+⚠️ **Doubling Lz has two effects:**
+- ✅ Halves k∥ resolution (modes become closer in k∥-space)
+- ⚠️ Doubles τ_A (time runs twice as slow in Alfvén units!)
+
+When comparing runs with different Lz, must account for both effects. A wave with kz = 2π/Lz will have the same physical wavelength, but different mode number nz and different propagation time.
+
+**Example:** Consider an Alfvén wave with kz = 1 (mode number nz = 1):
+
+| Lz | kz (mode 1) | Wavelength λz | Propagation time (1 λz) |
+|----|-------------|---------------|-------------------------|
+| 1.0 | 2π ≈ 6.28 | 1.0 | τ_A = 1.0 |
+| 2π | 1.0 | 2π ≈ 6.28 | τ_A = 2π ≈ 6.28 |
+
+Same mode number, different physical k and time!
+
+**Best practice:** Choose normalization at the start and document it clearly. When in doubt, use the code default (Lx = Ly = Lz = 2π) for consistency.
+
 **Grid structure:** For Nx × Ny × Nz real-space grid:
 - **Real space:** (Nz, Ny, Nx) array, real values
 - **Fourier space:** (Nz, Ny, Nx//2+1) array, complex values
@@ -111,6 +167,65 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 ```
 
 **No numerical diffusion:** Unlike finite differences, spectral derivatives have zero numerical viscosity.
+
+### Exact Treatment of Linear Physics
+
+**A key advantage of GANDALF's design:** The combination of spectral derivatives and the integrating factor method means **linear physics is captured exactly to machine precision** (~10⁻¹⁵ relative error).
+
+**What "exact" means in practice:**
+
+1. **Alfvén wave dispersion relation:** ω = k∥v_A is satisfied **exactly**
+   - No numerical dispersion (phase speed errors)
+   - Waves propagate at precisely the correct speed for all wavelengths
+   - No grid-scale artifacts (wave on diagonal = wave on axis)
+
+2. **Landau damping rates:** Computed to ~15 digits of precision
+   - Kinetic effects (resonance, phase mixing) captured accurately
+   - Critical for validation against analytical theory
+
+3. **Wave polarization:** Preserved exactly
+   - No spurious coupling between modes
+   - Slow modes remain passive (no artificial back-reaction)
+
+**Contrast with finite difference methods:**
+
+| Property | Finite Differences | Spectral + Integrating Factor |
+|----------|-------------------|-------------------------------|
+| **Phase speed error** | ~ (kΔx)² (2nd-order) | 0 (machine precision) |
+| **Numerical dispersion** | ω_numerical ≠ ω_exact | ω_numerical = ω_exact |
+| **Numerical diffusion** | Spurious damping | None (inviscid conserves energy) |
+| **Grid anisotropy** | Diagonal ≠ Axis | Isotropic (all directions equal) |
+| **Timestep for stability** | Δt < Δx/v_A (wave CFL) | Δt limited by nonlinear terms only |
+
+**Why this matters:**
+
+- **Validation tests** achieve ~10⁻¹⁵ relative error (not ~10⁻⁶ as with FD)
+- **Long-time evolution** has no accumulation of phase errors
+- **Energy conservation** in inviscid limit: <0.01% drift over 100s of τ_A
+- **Benchmarking** can distinguish code bugs from numerical discretization errors
+
+**Technical implementation:**
+
+1. **Spectral derivatives** (Fourier space multiplication):
+   ```
+   ∂f/∂x = i·kx·f̂  (exact, no truncation error)
+   ```
+
+2. **Integrating factor** (Fourier space phase shift):
+   ```
+   z±(t+Δt) = exp(±i·kz·v_A·Δt) · z±(t)  (analytically exact for linear term)
+   ```
+
+3. **Combined effect:** Linear propagation term is integrated analytically, not numerically approximated.
+
+**When exactness breaks down:**
+
+- **Nonlinear terms:** Approximated with RK2 (2nd-order in Δt, not exact)
+- **Dealiasing truncation:** Modes beyond 2/3 k_Nyquist are removed (intentional)
+- **Floating-point roundoff:** ~10⁻¹⁵ relative error (unavoidable with float64)
+- **Hermite truncation:** Finite M moments (kinetic closure approximation)
+
+**Validation consequence:** Linear wave tests should achieve errors ~10⁻¹⁵ (roundoff-limited). If you see errors >10⁻¹⁰, there's likely a bug in the implementation.
 
 ## Dealiasing (2/3 Rule)
 
@@ -292,7 +407,11 @@ def gandalf_step(state, dt, eta, nu, hyper_r=2, hyper_n=2, force_z_plus=None, fo
     return KRMHDState(z_plus=z_plus_new, z_minus=z_minus_new, ...)
 ```
 
-**Accuracy:** 2nd-order in time for nonlinear terms, exact for linear propagation.
+**Accuracy:** 2nd-order in time for nonlinear terms, **exact for linear propagation**.
+
+This means Alfvén waves with any k∥ propagate with **zero numerical error** in phase speed or amplitude (aside from roundoff ~10⁻¹⁵). The only approximation is in the nonlinear bracket terms {z∓, ∇²z±}, which are O(Δt²) accurate with RK2.
+
+**Practical consequence:** In validation tests (linear Alfvén waves), expect ω_numerical/ω_exact - 1 ~ 10⁻¹⁵. If you see errors >10⁻¹⁰, there's a bug, not a discretization error.
 
 **Stability:** CFL condition based on nonlinear advection, NOT wave propagation.
 
@@ -727,12 +846,32 @@ uv run pytest tests/test_diagnostics.py   # Spectra, energy
 ```
 
 **Key validation tests:**
+
 1. **Derivative accuracy:** Compare spectral derivatives to analytical
+   - **Expected accuracy:** ~10⁻¹⁵ (machine precision for float64)
+   - Validates that ∂/∂x ↔ i·kx works correctly
+
 2. **Dealiasing effectiveness:** Check energy conservation without/with dealiasing
+   - **Without dealiasing:** Spurious energy growth (simulation blows up)
+   - **With dealiasing:** Energy conserved to <0.01% (inviscid limit)
+
 3. **Alfvén wave dispersion:** ω = k∥v_A (linear physics)
-4. **Energy conservation:** <0.01% error for inviscid runs
+   - **Expected accuracy:** ~10⁻¹⁵ relative error (because method is exact!)
+   - Tests validate spectral derivatives + integrating factor correctness
+   - **Any deviation >10⁻¹⁰ indicates a bug**, not numerical approximation
+   - Example: If k∥ = 2π/Lz and v_A = 1, expect ω = 2π/Lz ± 10⁻¹⁴
+
+4. **Energy conservation:** <0.01% error for inviscid runs (η=0, ν=0)
+   - Validates exactness of linear propagation and Poisson bracket implementation
+   - With dissipation: Exponential decay E(t) = E₀·exp(-2η⟨k⊥²⟩t)
+
 5. **Convergence order:** 2nd-order in time for RK2
+   - Error ~ Δt² for nonlinear terms (doubling Δt → 4× error)
+   - Linear terms: Error ~ 10⁻¹⁵ independent of Δt (exact!)
+
 6. **Hermite orthogonality:** ∫ Hₘ Hₙ = δₘₙ
+   - **Expected accuracy:** ~10⁻¹⁴ (numerical quadrature + roundoff)
+   - Validates velocity-space basis implementation
 
 **Benchmark examples:**
 - `orszag_tang.py`: Nonlinear MHD benchmark

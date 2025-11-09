@@ -110,7 +110,7 @@ RMHD is an asymptotic expansion in the small parameter ε:
   - Parallel (z): 1D FFT for ∂/∂z operations and field line following
   - Grid structure: Nz × Ny × (Nx//2+1) in Fourier space (rfft in x)
 - **Parallel velocity**: Hermite polynomials (if fully kinetic) or fluid closure
-- **Time stepping**: RK4 or RK45 adaptive
+- **Time stepping**: GANDALF integrating factor + RK2 (exact linear propagation, 2nd-order nonlinear)
 - **Poisson solver**: k²φ = ∇²⊥A∥ in Fourier space
 - **Field line following**: Requires full 3D for interpolation across z-planes
 
