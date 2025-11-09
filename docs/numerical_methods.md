@@ -92,7 +92,7 @@ This means **changing Lz affects both spatial resolution in z AND the time norma
 
 ⚠️ **Doubling Lz has two effects:**
 - ✅ Halves k∥ resolution (modes become closer in k∥-space)
-- ⚠️ Doubles τ_A (time runs twice as slow in Alfvén units!)
+- ⚠️ Doubles Alfvén crossing time τ_A (time runs twice as slow in Alfvén units!)
 
 When comparing runs with different Lz, must account for both effects. A wave with kz = 2π/Lz will have the same physical wavelength, but different mode number nz and different propagation time.
 
@@ -106,6 +106,8 @@ When comparing runs with different Lz, must account for both effects. A wave wit
 Same mode number, different physical k and time!
 
 **Best practice:** Choose normalization at the start and document it clearly. When in doubt, use the code default (Lx = Ly = Lz = 2π) for consistency.
+
+📖 **See [Running Simulations: Understanding the Code](running_simulations.md#understanding-the-code)** for practical examples using these normalization conventions.
 
 **Grid structure:** For Nx × Ny × Nz real-space grid:
 - **Real space:** (Nz, Ny, Nx) array, real values
@@ -170,18 +172,20 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 
 ### Exact Treatment of Linear Physics
 
-**A key advantage of GANDALF's design:** The combination of spectral derivatives and the integrating factor method means **linear physics is captured exactly to machine precision** (~10⁻¹⁵ relative error).
+**A key advantage over finite-difference methods:** The combination of spectral derivatives and the integrating factor method means **linear physics is captured analytically**, not through numerical approximation.
 
 **What "exact" means in practice:**
 
-1. **Alfvén wave dispersion relation:** ω = k∥v_A is satisfied **exactly**
-   - No numerical dispersion (phase speed errors)
+1. **Alfvén wave dispersion relation:** ω = k∥v_A is satisfied **exactly per timestep**
+   - No numerical dispersion (phase speed errors) from spatial discretization
    - Waves propagate at precisely the correct speed for all wavelengths
    - No grid-scale artifacts (wave on diagonal = wave on axis)
+   - Over many timesteps: Energy conserved to <1% over full wave period (roundoff accumulation)
 
-2. **Landau damping rates:** Computed to ~15 digits of precision
-   - Kinetic effects (resonance, phase mixing) captured accurately
+2. **Landau damping rates:** Computed accurately with kinetic Hermite expansion
+   - Kinetic effects (resonance, phase mixing) captured via moment hierarchy
    - Critical for validation against analytical theory
+   - Practical accuracy: ~10⁻¹⁰ relative error in energy conservation
 
 3. **Wave polarization:** Preserved exactly
    - No spurious coupling between modes
@@ -191,16 +195,16 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 
 | Property | Finite Differences | Spectral + Integrating Factor |
 |----------|-------------------|-------------------------------|
-| **Phase speed error** | ~ (kΔx)² (2nd-order) | 0 (machine precision) |
-| **Numerical dispersion** | ω_numerical ≠ ω_exact | ω_numerical = ω_exact |
+| **Phase speed error** | ~ (kΔx)² (2nd-order) | 0 per timestep (analytical) |
+| **Numerical dispersion** | ω_numerical ≠ ω_exact | ω_numerical = ω_exact (per step) |
 | **Numerical diffusion** | Spurious damping | None (inviscid conserves energy) |
 | **Grid anisotropy** | Diagonal ≠ Axis | Isotropic (all directions equal) |
 | **Timestep for stability** | Δt < Δx/v_A (wave CFL) | Δt limited by nonlinear terms only |
 
 **Why this matters:**
 
-- **Validation tests** achieve ~10⁻¹⁵ relative error (not ~10⁻⁶ as with FD)
-- **Long-time evolution** has no accumulation of phase errors
+- **Validation tests** achieve ~10⁻¹⁰ relative error in energy conservation (not ~10⁻⁶ as with FD)
+- **Long-time evolution** has minimal phase error accumulation (<1% over wave periods)
 - **Energy conservation** in inviscid limit: <0.01% drift over 100s of τ_A
 - **Benchmarking** can distinguish code bugs from numerical discretization errors
 
@@ -208,7 +212,7 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 
 1. **Spectral derivatives** (Fourier space multiplication):
    ```
-   ∂f/∂x = i·kx·f̂  (exact, no truncation error)
+   ∂f/∂x = i·kx·f̂  (analytically exact, no truncation error)
    ```
 
 2. **Integrating factor** (Fourier space phase shift):
@@ -222,10 +226,11 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 
 - **Nonlinear terms:** Approximated with RK2 (2nd-order in Δt, not exact)
 - **Dealiasing truncation:** Modes beyond 2/3 k_Nyquist are removed (intentional)
-- **Floating-point roundoff:** ~10⁻¹⁵ relative error (unavoidable with float64)
+- **Floating-point roundoff:** Accumulates over many timesteps (~10⁻¹⁰ typical after full period)
+- **FFT precision:** Practical derivative accuracy ~10⁻⁵ after FFT roundtrip
 - **Hermite truncation:** Finite M moments (kinetic closure approximation)
 
-**Validation consequence:** Linear wave tests should achieve errors ~10⁻¹⁵ (roundoff-limited). If you see errors >10⁻¹⁰, there's likely a bug in the implementation.
+**Validation consequence:** Linear wave tests should achieve <1% energy drift over full wave period. If you see >10% drift, there's likely a bug in the implementation.
 
 ## Dealiasing (2/3 Rule)
 
@@ -407,11 +412,11 @@ def gandalf_step(state, dt, eta, nu, hyper_r=2, hyper_n=2, force_z_plus=None, fo
     return KRMHDState(z_plus=z_plus_new, z_minus=z_minus_new, ...)
 ```
 
-**Accuracy:** 2nd-order in time for nonlinear terms, **exact for linear propagation**.
+**Accuracy:** 2nd-order in time for nonlinear terms, **exact per timestep for linear propagation**.
 
-This means Alfvén waves with any k∥ propagate with **zero numerical error** in phase speed or amplitude (aside from roundoff ~10⁻¹⁵). The only approximation is in the nonlinear bracket terms {z∓, ∇²z±}, which are O(Δt²) accurate with RK2.
+This means Alfvén waves with any k∥ propagate with **zero phase speed error per timestep** (analytical integration of linear term). The only approximation is in the nonlinear bracket terms {z∓, ∇²z±}, which are O(Δt²) accurate with RK2.
 
-**Practical consequence:** In validation tests (linear Alfvén waves), expect ω_numerical/ω_exact - 1 ~ 10⁻¹⁵. If you see errors >10⁻¹⁰, there's a bug, not a discretization error.
+**Practical consequence:** In validation tests (linear Alfvén waves), expect <1% energy drift over one full wave period. If you see >10% drift, there's likely a bug, not discretization error accumulation.
 
 **Stability:** CFL condition based on nonlinear advection, NOT wave propagation.
 
@@ -848,26 +853,28 @@ uv run pytest tests/test_diagnostics.py   # Spectra, energy
 **Key validation tests:**
 
 1. **Derivative accuracy:** Compare spectral derivatives to analytical
-   - **Expected accuracy:** ~10⁻¹⁵ (machine precision for float64)
+   - **Expected accuracy:** ~10⁻⁵ (FFT roundoff after real-space roundtrip)
    - Validates that ∂/∂x ↔ i·kx works correctly
+   - See `test_spectral.py:189` for reference tolerance
 
 2. **Dealiasing effectiveness:** Check energy conservation without/with dealiasing
    - **Without dealiasing:** Spurious energy growth (simulation blows up)
    - **With dealiasing:** Energy conserved to <0.01% (inviscid limit)
 
 3. **Alfvén wave dispersion:** ω = k∥v_A (linear physics)
-   - **Expected accuracy:** ~10⁻¹⁵ relative error (because method is exact!)
+   - **Expected accuracy:** <1% energy drift over one wave period
    - Tests validate spectral derivatives + integrating factor correctness
-   - **Any deviation >10⁻¹⁰ indicates a bug**, not numerical approximation
-   - Example: If k∥ = 2π/Lz and v_A = 1, expect ω = 2π/Lz ± 10⁻¹⁴
+   - **Drift >10% indicates a bug**, not normal accumulation
+   - See `test_timestepping.py:369` for reference: <1% over full period
 
-4. **Energy conservation:** <0.01% error for inviscid runs (η=0, ν=0)
-   - Validates exactness of linear propagation and Poisson bracket implementation
+4. **Energy conservation:** <0.01% error for inviscid runs (η=0, ν=0) over 100s of τ_A
+   - Validates analytical linear propagation and Poisson bracket implementation
+   - Energy balance typically conserved to ~10⁻¹⁰ relative error
    - With dissipation: Exponential decay E(t) = E₀·exp(-2η⟨k⊥²⟩t)
 
 5. **Convergence order:** 2nd-order in time for RK2
    - Error ~ Δt² for nonlinear terms (doubling Δt → 4× error)
-   - Linear terms: Error ~ 10⁻¹⁵ independent of Δt (exact!)
+   - Linear terms: Minimal timestep-independent error (analytical integration!)
 
 6. **Hermite orthogonality:** ∫ Hₘ Hₙ = δₘₙ
    - **Expected accuracy:** ~10⁻¹⁴ (numerical quadrature + roundoff)
