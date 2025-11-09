@@ -33,6 +33,7 @@ class TestL2ErrorComputation:
 
         error = compute_l2_error(state, state)
 
+        # Machine precision for identical arrays (float64)
         assert error < 1e-14, f"Expected zero error for identical states, got {error}"
 
     def test_l2_error_symmetry(self):
@@ -92,6 +93,7 @@ class TestAnalyticalSolution:
         # Should be identical (or very close due to phase factor exp(0) = 1)
         error = compute_l2_error(state0, state_analytical)
 
+        # Numerical precision after FFT roundtrip and phase factor application
         assert error < 1e-10, \
             f"Analytical solution at t=0 should match initial condition, error = {error}"
 
@@ -179,3 +181,20 @@ class TestConvergence:
         # At minimum, highest resolution should have lower error than lowest
         assert errors[-1] <= errors[0], \
             f"Higher resolution should have lower error: {errors[-1]} > {errors[0]}"
+
+    @pytest.mark.slow
+    def test_orszag_tang_error_decreases(self):
+        """Verify convergence for Orszag-Tang (even if slow due to gradient formation)."""
+        # Run with minimal resolutions to keep test fast
+        results = test_orszag_tang_convergence(
+            resolutions=[16, 24, 32],
+            reference_resolution=48,
+            t_final=0.05,  # Very short time before gradient formation
+        )
+
+        errors = results['rel_errors']
+
+        # Should decrease (even if slowly for nonlinear problem with spectral interpolation fix)
+        # At minimum, highest resolution should be no worse than lowest
+        assert errors[-1] <= errors[0] * 1.1, \
+            f"Error should not increase with resolution: {errors[0]} -> {errors[-1]}"

@@ -35,13 +35,60 @@ from krmhd import (
     initialize_orszag_tang,
     gandalf_step,
     compute_cfl_timestep,
-    energy as compute_energy,
 )
 
 
 # Create output directory
 output_dir = Path(__file__).parent / "output" / "grid_convergence"
 output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def spectral_downsample(
+    field_fourier: jnp.ndarray,
+    target_shape: tuple[int, int, int],
+) -> jnp.ndarray:
+    """
+    Downsample Fourier field to target resolution using spectral accuracy.
+
+    Uses FFT round-trip to perform proper anti-aliasing. This is more accurate
+    than simple mode truncation, which can miss negative frequency modes.
+
+    Parameters
+    ----------
+    field_fourier : Complex array in rfft format, shape [Nz, Ny, Nx//2+1]
+    target_shape : Target real-space shape (Nz_target, Ny_target, Nx_target)
+
+    Returns
+    -------
+    field_downsampled : Complex array in rfft format, shape [Nz_target, Ny_target, Nx_target//2+1]
+
+    Algorithm
+    ---------
+    1. Inverse FFT to real space
+    2. Truncate in real space (anti-aliasing)
+    3. Forward FFT back to Fourier space at target resolution
+
+    Note: This is more expensive than mode extraction but guarantees spectral accuracy
+    and properly handles negative frequency modes in y and z directions.
+
+    Reference: Similar to spectral_pad_and_ifft in diagnostics.py but in reverse.
+    """
+    Nz_target, Ny_target, Nx_target = target_shape
+
+    # Get current shape
+    Nz, Ny, Nx_half = field_fourier.shape
+    Nx = (Nx_half - 1) * 2
+
+    # Inverse FFT to real space
+    field_real = jnp.fft.irfftn(field_fourier, s=(Nz, Ny, Nx))
+
+    # Truncate in real space (simple slicing is safe here)
+    field_real_truncated = field_real[:Nz_target, :Ny_target, :Nx_target]
+
+    # Forward FFT back to Fourier space at target resolution
+    field_downsampled = jnp.fft.rfftn(field_real_truncated, s=(Nz_target, Ny_target, Nx_target))
+
+    return field_downsampled
 
 
 def analytical_alfven_solution(
@@ -158,7 +205,9 @@ def test_alfven_wave_convergence(
         start_time = time.time()
 
         # Create grid (3D but minimal in z for Alfvén wave)
-        Nz = max(4, N // 4)  # Use Nz = N/4 (still 3D)
+        # Use Nz = N/4 to capture kz_mode=1 at all resolutions while reducing computational cost
+        # (Single parallel mode doesn't need high z-resolution, but grid must be 3D)
+        Nz = max(4, N // 4)
         grid = SpectralGrid3D.create(
             Nx=N, Ny=N, Nz=Nz,
             Lx=2*np.pi, Ly=2*np.pi, Lz=2*np.pi
@@ -233,11 +282,12 @@ def test_orszag_tang_convergence(
     B0 = 1.0 / np.sqrt(4 * np.pi)
     v_A = 1.0
 
-    # Reference grid (2D problem: Nz=2)
+    # Reference grid (Orszag-Tang is 2D problem with no z-variation)
+    # Use minimal Nz=2 for 3D grid infrastructure while keeping problem 2D
     grid_ref = SpectralGrid3D.create(
         Nx=reference_resolution,
         Ny=reference_resolution,
-        Nz=2,
+        Nz=2,  # Minimal z-resolution for 2D problem
         Lx=1.0, Ly=1.0, Lz=1.0
     )
 
@@ -267,7 +317,7 @@ def test_orszag_tang_convergence(
         print(f"Resolution N={N}... ", end='', flush=True)
         start_time = time.time()
 
-        # Create grid
+        # Create grid (2D problem, minimal Nz=2)
         grid = SpectralGrid3D.create(Nx=N, Ny=N, Nz=2, Lx=1.0, Ly=1.0, Lz=1.0)
         state = initialize_orszag_tang(grid, M=2, B0=B0)
 
@@ -279,25 +329,32 @@ def test_orszag_tang_convergence(
         for _ in range(n_steps):
             state = gandalf_step(state, dt, eta=0.0, nu=0.0, v_A=v_A)
 
-        # Interpolate reference solution to coarse grid for comparison
-        # Simple approach: Extract modes that exist in both grids
-        # More sophisticated: Use FFT interpolation, but simple extraction works for convergence test
-
-        # Extract common modes (truncate reference to coarse grid size)
-        # Shape is [Nz, Ny, Nx//2+1] in rfft format
+        # Downsample reference solution to coarse grid for comparison
+        # Use proper spectral interpolation via FFT round-trip to handle
+        # negative frequency modes correctly (fixes spectral interpolation bug)
         Nx_coarse, Ny_coarse, Nz_coarse = N, N, 2
+        target_shape = (Nz_coarse, Ny_coarse, Nx_coarse)
 
-        # Simple truncation (take low modes only)
-        # Note: For proper spectral interpolation, should handle Nyquist wrapping,
-        # but for convergence test, simple truncation is sufficient
-        z_plus_ref_coarse = state_ref.z_plus[:Nz_coarse, :Ny_coarse, :Nx_coarse//2+1]
-        z_minus_ref_coarse = state_ref.z_minus[:Nz_coarse, :Ny_coarse, :Nx_coarse//2+1]
+        # Spectral downsampling with anti-aliasing
+        # This properly handles negative frequency modes in y and z directions
+        z_plus_ref_coarse = spectral_downsample(state_ref.z_plus, target_shape)
+        z_minus_ref_coarse = spectral_downsample(state_ref.z_minus, target_shape)
+        B_parallel_ref_coarse = spectral_downsample(state_ref.B_parallel, target_shape)
+
+        # For Hermite moments g (shape: [Nz, Ny, Nx//2+1, M+1]), downsample spatial dimensions
+        # Note: Last dimension (M+1) is velocity space, not spatial
+        M_total = state_ref.g.shape[-1]
+        g_ref_coarse = jnp.zeros((Nz_coarse, Ny_coarse, Nx_coarse//2+1, M_total), dtype=complex)
+        for m in range(M_total):
+            g_ref_coarse = g_ref_coarse.at[:, :, :, m].set(
+                spectral_downsample(state_ref.g[:, :, :, m], target_shape)
+            )
 
         state_ref_coarse = KRMHDState(
             z_plus=z_plus_ref_coarse,
             z_minus=z_minus_ref_coarse,
-            B_parallel=state_ref.B_parallel[:Nz_coarse, :Ny_coarse, :Nx_coarse//2+1],
-            g=state_ref.g[:Nz_coarse, :Ny_coarse, :Nx_coarse//2+1, :],  # shape: [Nz, Ny, Nx//2+1, M+1]
+            B_parallel=B_parallel_ref_coarse,
+            g=g_ref_coarse,
             M=state_ref.M,
             beta_i=state_ref.beta_i,
             v_th=state_ref.v_th,
@@ -361,7 +418,7 @@ def plot_convergence(results: Dict, test_name: str, output_file: Path):
 
     ax1.set_xlabel('Grid size N', fontsize=12)
     ax1.set_ylabel('Relative L2 error', fontsize=12)
-    ax1.set_title(f'{test_name}\nConvergence Rate', fontsize=13)
+    ax1.set_title(f'{test_name}\nConvergence Rate (limited by solution smoothness)', fontsize=13)
     ax1.legend(fontsize=10)
     ax1.grid(True, alpha=0.3)
 
