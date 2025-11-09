@@ -176,12 +176,13 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 
 **A key advantage over finite-difference methods:** The combination of spectral derivatives and the integrating factor method means **linear physics is captured analytically, not through numerical approximation.***
 
-***Technical note:** "Analytically exact" refers to the mathematical algorithm treating the linear propagation term without discretization error. Practical accuracy is limited by FFT roundtrip precision (~10⁻¹⁰ to 10⁻⁵, see line 242), not the integration method itself which is machine-precision accurate (~10⁻¹⁵).
+***Technical note:** "Analytically exact" refers to the mathematical algorithm treating the linear propagation term without discretization error. Practical accuracy is limited by FFT roundtrip precision (~10⁻¹⁰ to 10⁻⁵, see line 249), not the integration method itself which is machine-precision accurate (~10⁻¹⁵).
 
 **What "exact" means in practice:**
 
 1. **Alfvén wave dispersion relation:** ω = k∥v_A is satisfied by the physics model
    - Linear propagation is integrated **analytically per timestep** (only the linear term; nonlinear terms use RK2)
+     - **Why timesteps are still needed:** Nonlinear coupling {z∓, ∇²z±} between different k-modes requires time evolution; only the linear propagation WITHIN each mode is analytical
    - Waves propagate at precisely the correct speed for all wavelengths
    - No numerical dispersion (phase speed errors) from spatial discretization
    - No grid-scale artifacts (wave on diagonal = wave on axis)
@@ -213,10 +214,16 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 
 - **Validation tests** achieve high accuracy in energy conservation (not ~10⁻⁶ as with FD)
   - Short-term: <1% error over wave periods
-    - Linear waves: FFT roundtrip + Hermite truncation + roundoff (~10⁻³ to 10⁻¹⁰ depending on amplitude/resolution)
+    - Linear waves: FFT roundtrip + Hermite truncation + roundoff
+      - Low amplitude (0.01): ~10⁻¹⁰ (roundoff-limited)
+      - Moderate amplitude (0.1): ~10⁻⁵ to 10⁻³ (FFT accumulation over 100 steps)
+      - High amplitude (1.0): ~10⁻³ to 10⁻² (FFT + nonlinear cross-terms)
     - Nonlinear turbulence: RK2 bracket approximation (dominant ~10⁻² error)
   - Long-term: <0.01% cumulative drift over 100s of τ_A (~10⁻¹⁰ relative error in energy balance)
-  - Linear solver is machine-precision accurate (~10⁻¹⁵); practical error from other sources
+  - **Precision hierarchy:**
+    - Integrating factor (exp phase shift): ~10⁻¹⁵ (machine precision)
+    - FFT roundtrip per step: ~10⁻¹⁰ to 10⁻⁵ (accumulates with # steps)
+    - Net practical accuracy: Limited by FFT, not integration algorithm
 - **Phase error accumulation** is minimal (analytical integration of linear term per timestep)
 - **Benchmarking** can distinguish code bugs from numerical discretization errors
 
