@@ -87,7 +87,7 @@ This means **changing Lz affects both spatial resolution in z AND the time norma
    - Lz = 2π → τ_A = 2π ≈ 6.28 (one Alfvén time = 2π simulation time units)
 
 3. **For benchmarks:** Match the reference convention exactly
-   - Orszag-Tang vortex: Lx = Ly = Lz = 1.0 (thesis convention)
+   - Orszag-Tang vortex: Lx = Ly = Lz = 1.0 (thesis convention, see `examples/orszag_tang.py`)
    - Energy oscillation period: ~2 τ_A = ~2.0 simulation time units
 
 **Common pitfall:**
@@ -98,9 +98,9 @@ This means **changing Lz affects both spatial resolution in z AND the time norma
 
 When comparing runs with different Lz, must account for both effects. A wave with kz = 2π/Lz will have the same physical wavelength, but different mode number nz and different propagation time.
 
-**Example:** Consider an Alfvén wave with kz = 1 (mode number nz = 1):
+**Example:** Consider an Alfvén wave with mode number nz = 1:
 
-| Lz | kz (mode 1) | Wavelength λz | Propagation time (1 λz) |
+| Lz | kz for nz=1 | Wavelength λz | Propagation time (1 λz) |
 |----|-------------|---------------|-------------------------|
 | 1.0 | 2π ≈ 6.28 | 1.0 | τ_A = 1.0 |
 | 2π | 1.0 | 2π ≈ 6.28 | τ_A = 2π ≈ 6.28 |
@@ -174,9 +174,9 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
 
 ### Exact Treatment of Linear Physics
 
-**A key advantage over finite-difference methods:** The combination of spectral derivatives and the integrating factor method means **linear physics is captured analytically**, not through numerical approximation.*
+**A key advantage over finite-difference methods:** The combination of spectral derivatives and the integrating factor method means **linear physics is captured analytically, not through numerical approximation.***
 
-*Technical note: "Analytically exact" refers to the mathematical algorithm treating the linear propagation term without discretization error. Practical accuracy is limited by FFT roundtrip precision (~10⁻¹⁰ to 10⁻⁵, see line 240), not the integration method itself which is machine-precision accurate (~10⁻¹⁵).
+***Technical note:** "Analytically exact" refers to the mathematical algorithm treating the linear propagation term without discretization error. Practical accuracy is limited by FFT roundtrip precision (~10⁻¹⁰ to 10⁻⁵, see line 242), not the integration method itself which is machine-precision accurate (~10⁻¹⁵).
 
 **What "exact" means in practice:**
 
@@ -185,9 +185,9 @@ laplacian_perp = grid.k_perp_squared * f_hat  # ∇⊥²f ↔ -(kx²+ky²)f̂
    - Waves propagate at precisely the correct speed for all wavelengths
    - No numerical dispersion (phase speed errors) from spatial discretization
    - No grid-scale artifacts (wave on diagonal = wave on axis)
-   - **Short-term (1 wave period):** <1% energy error
-     - For linear waves: Error from FFT roundtrip + Hermite truncation + roundoff accumulation
-     - For nonlinear turbulence: Dominated by RK2 approximation of {z∓, ∇²z±} bracket terms
+   - **Short-term (1 wave period):**
+     - Linear waves: <1% energy error (FFT roundtrip + Hermite truncation + roundoff accumulation)
+     - Nonlinear turbulence: 1-10% error typical (dominated by RK2 approximation of {z∓, ∇²z±} bracket terms, depends on amplitude and cascade strength)
    - **Long-term (100s of τ_A):** <0.01% cumulative drift (tests at 64³-128³ resolution)
 
 2. **Landau damping rates:** Computed accurately with kinetic Hermite expansion
@@ -887,7 +887,10 @@ uv run pytest tests/test_diagnostics.py   # Spectra, energy
 4. **Energy conservation:** Long-term inviscid evolution (η=0, ν=0)
    - **Short-term (1 period):** <1% energy error (see test #3 above, validated at 32³)
    - **Long-term (100s of τ_A):** <0.01% cumulative drift (validated at 64³-128³ resolution)
-   - **Resolution note:** 32³ validation provides baseline; higher resolutions (64³, 128³) typically achieve similar or better accuracy due to better-resolved FFTs
+   - **Why different resolutions?**
+     - Short-term test (32³): Fast validation of basic integration correctness
+     - Long-term test (64³-128³): More realistic for production turbulence runs, validates roundoff accumulation
+   - **Resolution scaling:** 32³ provides baseline; higher resolutions (64³, 128³) typically achieve similar or better accuracy due to better-resolved FFTs
    - Energy balance typically conserved to ~10⁻¹⁰ relative error
    - Validates analytical linear propagation and Poisson bracket implementation
    - **Caveat:** Very high resolution (256³+) may accumulate more absolute roundoff due to more FFT operations
