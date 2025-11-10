@@ -2,14 +2,14 @@
 Tests for time integration module.
 
 This test suite validates:
-- RK4 integrator correctness and convergence
+- GANDALF integrating factor + RK2 timestepper correctness and convergence
 - CFL condition calculator
 - KRMHD RHS function wrapper
 - Energy conservation during time evolution
 - Alfvén wave propagation
 
 Physics verification includes:
-- 4th order convergence rate for RK4
+- 2nd order convergence rate for RK2 (exact for linear waves via integrating factor)
 - Linear wave dispersion: ω = k∥v_A
 - Numerical stability under CFL condition
 """
@@ -26,7 +26,7 @@ from krmhd.physics import (
     initialize_hermite_moments,
     energy,
 )
-from krmhd.timestepping import krmhd_rhs, rk4_step, compute_cfl_timestep
+from krmhd.timestepping import krmhd_rhs, gandalf_step, compute_cfl_timestep
 
 
 class TestKRMHDRHS:
@@ -108,10 +108,10 @@ class TestKRMHDRHS:
         assert not jnp.allclose(rhs.z_minus, 0.0, atol=1e-10)
 
 
-class TestRK4Step:
-    """Test RK4 time integrator."""
+class TestGandalfStep:
+    """Test GANDALF integrating factor + RK2 time integrator."""
 
-    def test_rk4_zero_state(self):
+    def test_gandalf_zero_state(self):
         """Zero state should remain zero (only time advances)."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
 
@@ -131,7 +131,7 @@ class TestRK4Step:
 
         # Take timestep
         dt = 0.01
-        new_state = rk4_step(state, dt, eta=0.01, v_A=1.0)
+        new_state = gandalf_step(state, dt, eta=0.01, v_A=1.0)
 
         # Fields should remain zero
         assert jnp.allclose(new_state.z_plus, 0.0, atol=1e-10)
@@ -142,8 +142,8 @@ class TestRK4Step:
         # Time should advance
         assert jnp.isclose(new_state.time, dt)
 
-    def test_rk4_shape_preservation(self):
-        """RK4 should preserve field shapes."""
+    def test_gandalf_shape_preservation(self):
+        """GANDALF should preserve field shapes."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
 
         key = jax.random.PRNGKey(42)
@@ -166,7 +166,7 @@ class TestRK4Step:
         )
 
         # Take timestep
-        new_state = rk4_step(state, dt=0.01, eta=0.01, v_A=1.0)
+        new_state = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0)
 
         # Check shapes
         assert new_state.z_plus.shape == state.z_plus.shape
@@ -174,8 +174,8 @@ class TestRK4Step:
         assert new_state.B_parallel.shape == state.B_parallel.shape
         assert new_state.g.shape == state.g.shape
 
-    def test_rk4_time_increment(self):
-        """RK4 should correctly increment time."""
+    def test_gandalf_time_increment(self):
+        """GANDALF should correctly increment time."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
 
         state = initialize_alfven_wave(
@@ -188,35 +188,35 @@ class TestRK4Step:
         # Multiple timesteps
         dt = 0.01
         for i in range(10):
-            state = rk4_step(state, dt, eta=0.0, v_A=1.0)
+            state = gandalf_step(state, dt, eta=0.0, v_A=1.0)
 
         # Time should be 10*dt
         expected_time = 10 * dt
         assert jnp.isclose(state.time, expected_time, rtol=1e-6)
 
-    def test_rk4_deterministic(self):
-        """RK4 should produce deterministic results."""
+    def test_gandalf_deterministic(self):
+        """GANDALF should produce deterministic results."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
 
         state = initialize_alfven_wave(grid, M=20, kz_mode=1, amplitude=0.1)
 
         # Run twice with same inputs
-        new_state_1 = rk4_step(state, dt=0.01, eta=0.01, v_A=1.0)
-        new_state_2 = rk4_step(state, dt=0.01, eta=0.01, v_A=1.0)
+        new_state_1 = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0)
+        new_state_2 = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0)
 
         # Should produce identical results
         assert jnp.allclose(new_state_1.z_plus, new_state_2.z_plus)
         assert jnp.allclose(new_state_1.z_minus, new_state_2.z_minus)
         assert new_state_1.time == new_state_2.time
 
-    def test_rk4_reality_condition(self):
-        """RK4 should preserve reality condition f(-k) = f*(k)."""
+    def test_gandalf_reality_condition(self):
+        """GANDALF should preserve reality condition f(-k) = f*(k)."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
 
         state = initialize_alfven_wave(grid, M=20, kz_mode=1, amplitude=0.1)
 
         # Take a timestep
-        new_state = rk4_step(state, dt=0.01, eta=0.01, v_A=1.0)
+        new_state = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0)
 
         # Check reality condition for z_plus
         # For rfft: we only store positive kx frequencies
@@ -354,7 +354,7 @@ class TestAlfvenWavePropagation:
         dt = T_period / n_steps
 
         for _ in range(n_steps):
-            state = rk4_step(state, dt, eta=0.0, v_A=v_A)  # Inviscid
+            state = gandalf_step(state, dt, eta=0.0, v_A=v_A)  # Inviscid
 
         # After one period, energy should be conserved
         E_dict_1 = energy(state)
@@ -364,7 +364,7 @@ class TestAlfvenWavePropagation:
         assert jnp.isfinite(E_0), f"Initial energy is not finite: {E_0}"
         assert jnp.isfinite(E_1), f"Final energy is not finite: {E_1}"
 
-        # Energy conservation: with GANDALF formulation + RK4, expect < 1% error over one period
+        # Energy conservation: with GANDALF formulation + GANDALF, expect < 1% error over one period
         relative_energy_change = jnp.abs(E_1 - E_0) / E_0
         assert relative_energy_change < 0.01, \
             f"Energy not conserved: ΔE/E = {relative_energy_change:.2%}, expected < 1%"
@@ -385,7 +385,7 @@ class TestAlfvenWavePropagation:
             E_dict = energy(state)
             energies.append(float(E_dict['total']))
             times.append(float(state.time))
-            state = rk4_step(state, dt, eta=0.0, v_A=1.0)
+            state = gandalf_step(state, dt, eta=0.0, v_A=1.0)
 
         energies = jnp.array(energies)
 
@@ -438,7 +438,7 @@ class TestAlfvenWavePropagation:
         expected_decay_fraction = 1.0 - jnp.exp(-2.0 * eta * normalized_rate * total_time)
 
         for _ in range(n_steps):
-            state = rk4_step(state, dt, eta=eta, v_A=1.0)
+            state = gandalf_step(state, dt, eta=eta, v_A=1.0)
 
         E_dict_1 = energy(state)
         E_1 = E_dict_1['total']
@@ -488,7 +488,7 @@ class TestConvergence:
         n_steps_ref = int(t_final / dt_ref)
 
         for _ in range(n_steps_ref):
-            state_ref = rk4_step(state_ref, dt_ref, eta=eta, v_A=v_A)
+            state_ref = gandalf_step(state_ref, dt_ref, eta=eta, v_A=v_A)
 
         # Extract reference z_plus field
         z_plus_ref = state_ref.z_plus
@@ -502,7 +502,7 @@ class TestConvergence:
             n_steps = int(t_final / dt)
 
             for _ in range(n_steps):
-                state = rk4_step(state, dt, eta=eta, v_A=v_A)
+                state = gandalf_step(state, dt, eta=eta, v_A=v_A)
 
             # L2 error in z_plus
             error = jnp.sqrt(jnp.mean(jnp.abs(state.z_plus - z_plus_ref)**2))
@@ -556,7 +556,7 @@ class TestHermiteMomentIntegration:
         # Take several timesteps
         dt = 0.01
         for _ in range(10):
-            state = rk4_step(state, dt, eta=0.01, v_A=1.0)
+            state = gandalf_step(state, dt, eta=0.01, v_A=1.0)
 
         # Verify g evolved (changed from initial)
         final_g_norm = jnp.linalg.norm(state.g)
@@ -609,10 +609,10 @@ class TestHyperdissipation:
         v_A = 1.0
 
         # Evolve with defaults (hyper_r=1, hyper_n=1)
-        state_default = rk4_step(state, dt, eta=eta, v_A=v_A)
+        state_default = gandalf_step(state, dt, eta=eta, v_A=v_A)
 
         # Evolve with explicit hyper_r=1, hyper_n=1 (should be identical)
-        state_explicit = rk4_step(state, dt, eta=eta, v_A=v_A, hyper_r=1, hyper_n=1)
+        state_explicit = gandalf_step(state, dt, eta=eta, v_A=v_A, hyper_r=1, hyper_n=1)
 
         # Should be exactly the same
         assert jnp.allclose(state_default.z_plus, state_explicit.z_plus, atol=1e-10), \
@@ -641,17 +641,17 @@ class TestHyperdissipation:
         # Evolve with BOTH hyper-resistivity (r=2) and hyper-collisions (n=2)
         state_dual = state
         for _ in range(n_steps):
-            state_dual = rk4_step(state_dual, dt, eta=eta, v_A=v_A, hyper_r=2, hyper_n=2)
+            state_dual = gandalf_step(state_dual, dt, eta=eta, v_A=v_A, hyper_r=2, hyper_n=2)
 
         # Also evolve with ONLY resistivity (n=1) for comparison
         state_resist_only = state
         for _ in range(n_steps):
-            state_resist_only = rk4_step(state_resist_only, dt, eta=eta, v_A=v_A, hyper_r=2, hyper_n=1)
+            state_resist_only = gandalf_step(state_resist_only, dt, eta=eta, v_A=v_A, hyper_r=2, hyper_n=1)
 
         # Also evolve with ONLY collisions (r=1) for comparison
         state_collide_only = state
         for _ in range(n_steps):
-            state_collide_only = rk4_step(state_collide_only, dt, eta=eta, v_A=v_A, hyper_r=1, hyper_n=2)
+            state_collide_only = gandalf_step(state_collide_only, dt, eta=eta, v_A=v_A, hyper_r=1, hyper_n=2)
 
         # Compute Hermite moment energy (excluding m=0,1 which are conserved by collisions)
         # Sum over m >= 2 to see the effect of collision damping
@@ -688,7 +688,7 @@ class TestHyperdissipationValidation:
 
         for r in invalid_r_values:
             with pytest.raises(ValueError, match="hyper_r must be 1, 2, 4, or 8"):
-                rk4_step(state, dt=0.01, eta=0.01, v_A=1.0, hyper_r=r)
+                gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, hyper_r=r)
 
     def test_invalid_hyper_n(self):
         """Invalid hyper_n should raise ValueError."""
@@ -700,7 +700,7 @@ class TestHyperdissipationValidation:
 
         for n in invalid_n_values:
             with pytest.raises(ValueError, match="hyper_n must be 1, 2, or 4"):
-                rk4_step(state, dt=0.01, eta=0.01, v_A=1.0, hyper_n=n)
+                gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, hyper_n=n)
 
     def test_hypercollision_overflow_error(self):
         """Hyper-collision overflow risk should raise ValueError."""
@@ -714,7 +714,7 @@ class TestHyperdissipationValidation:
         state.nu = nu_overflow
 
         with pytest.raises(ValueError, match="Hyper-collision overflow risk detected"):
-            rk4_step(state, dt=dt, eta=0.01, v_A=1.0, hyper_n=4)
+            gandalf_step(state, dt=dt, eta=0.01, v_A=1.0, hyper_n=4)
 
     def test_hypercollision_overflow_warning(self):
         """Moderate hyper-collision rate should emit warning."""
@@ -730,7 +730,7 @@ class TestHyperdissipationValidation:
         import warnings
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            rk4_step(state, dt=dt, eta=0.01, v_A=1.0, hyper_n=4)
+            gandalf_step(state, dt=dt, eta=0.01, v_A=1.0, hyper_n=4)
 
             # Check that a warning was issued
             assert len(w) == 1
@@ -748,7 +748,7 @@ class TestHyperdissipationValidation:
         eta_overflow = 60.0 / dt  # eta·dt = 60 > 50, triggers overflow
 
         with pytest.raises(ValueError, match="Hyper-resistivity overflow risk detected"):
-            rk4_step(state, dt=dt, eta=eta_overflow, v_A=1.0, hyper_r=8)
+            gandalf_step(state, dt=dt, eta=eta_overflow, v_A=1.0, hyper_r=8)
 
     def test_hyperresistivity_overflow_warning(self):
         """Moderate hyper-resistivity rate should emit warning or succeed."""
@@ -763,7 +763,7 @@ class TestHyperdissipationValidation:
         import warnings
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            result = rk4_step(state, dt=dt, eta=eta_moderate, v_A=1.0, hyper_r=2)
+            result = gandalf_step(state, dt=dt, eta=eta_moderate, v_A=1.0, hyper_r=2)
 
             # Should complete successfully (may or may not warn depending on implementation)
             assert result.time > state.time
@@ -787,7 +787,7 @@ class TestHyperdissipationValidation:
             warnings.simplefilter("always")
 
             # Even with r=8 and n=4, normalized constraint allows reasonable eta/nu
-            result = rk4_step(state, dt=dt, eta=eta_safe, nu=nu_safe, v_A=1.0, hyper_r=8, hyper_n=4)
+            result = gandalf_step(state, dt=dt, eta=eta_safe, nu=nu_safe, v_A=1.0, hyper_r=8, hyper_n=4)
 
             # Verify no warnings were issued
             hyper_warnings = [warning for warning in w
@@ -816,7 +816,7 @@ class TestHyperdissipationEdgeCases:
         state.nu = 0.05
 
         # Should work without errors
-        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+        state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
 
         # Verify shapes are preserved
         assert state_new.z_plus.shape == (grid.Nz, grid.Ny, grid.Nx//2+1)
@@ -837,7 +837,7 @@ class TestHyperdissipationEdgeCases:
         state.nu = 0.05
 
         # Should work without errors
-        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+        state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
 
         # Verify physics is correct
         # k_max should be 2π/dx = 2π/(Lx/Nx) = 2πNx/Lx
@@ -863,7 +863,7 @@ class TestHyperdissipationEdgeCases:
 
         # Evolve with dual dissipation
         for _ in range(n_steps):
-            state = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=4)
+            state = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=4)
 
         # Verify state remains finite (no overflow with moderate parameters)
         assert jnp.isfinite(state.z_plus).all(), "z_plus should remain finite"
@@ -888,7 +888,7 @@ class TestHyperdissipationEdgeCases:
 
         # Evolve with dual dissipation
         for _ in range(n_steps):
-            state = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=4, hyper_n=2)
+            state = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=4, hyper_n=2)
 
         # Verify state remains finite (no overflow)
         assert jnp.isfinite(state.z_plus).all(), "z_plus should remain finite"
@@ -910,7 +910,7 @@ class TestHyperdissipationEdgeCases:
         state.nu = 0.05
 
         # Should work without errors
-        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+        state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
 
         # Verify wavenumber grids are correctly scaled
         # For Lx = 8π, kx grid should be denser (smaller dk)
@@ -949,7 +949,7 @@ class TestHyperdissipationDegenerateCases:
         # Apply hyper-dissipation
         dt = 0.01
         eta = 0.01
-        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+        state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
 
         # Should remain zero (dissipation of zero is zero)
         assert jnp.allclose(state_new.z_plus, 0.0, atol=1e-15)
@@ -983,7 +983,7 @@ class TestHyperdissipationDegenerateCases:
         # Test with standard dissipation (r=1, n=1)
         state_r1 = state
         for _ in range(n_steps):
-            state_r1 = rk4_step(state_r1, dt, eta=0.01, v_A=1.0, hyper_r=1, hyper_n=1)
+            state_r1 = gandalf_step(state_r1, dt, eta=0.01, v_A=1.0, hyper_r=1, hyper_n=1)
 
         # Verify no spurious modes generated
         assert jnp.allclose(state_r1.z_plus, 0.0, atol=1e-15), "Spurious modes in z_plus (r=1)"
@@ -993,7 +993,7 @@ class TestHyperdissipationDegenerateCases:
         # Test with hyper-dissipation (r=2, n=2)
         state_r2 = state
         for _ in range(n_steps):
-            state_r2 = rk4_step(state_r2, dt, eta=0.0001, v_A=1.0, hyper_r=2, hyper_n=2)
+            state_r2 = gandalf_step(state_r2, dt, eta=0.0001, v_A=1.0, hyper_r=2, hyper_n=2)
 
         # Verify no spurious modes generated
         assert jnp.allclose(state_r2.z_plus, 0.0, atol=1e-15), "Spurious modes in z_plus (r=2)"
@@ -1022,7 +1022,7 @@ class TestHyperdissipationDegenerateCases:
         import warnings
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+            state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
 
             # Should not crash and produce finite results
             assert jnp.isfinite(state_new.z_plus).all()
@@ -1068,7 +1068,7 @@ class TestHyperdissipationDegenerateCases:
         dt = 0.01
         eta = 0.01
         with pytest.raises(ValueError, match="M must be >= 2"):
-            rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=4)
+            gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=4)
 
     def test_warning_threshold_exact(self):
         """Verify warnings trigger at exactly the documented threshold (20.0)."""
@@ -1087,7 +1087,7 @@ class TestHyperdissipationDegenerateCases:
             warnings.simplefilter("always")
 
             # Should trigger warning (rate >= 20.0)
-            state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+            state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
 
             # Verify warning was triggered
             hyper_warnings = [warning for warning in w
@@ -1101,7 +1101,7 @@ class TestHyperdissipationDegenerateCases:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
 
-            state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+            state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
 
             # Verify no warning below threshold
             hyper_warnings = [warning for warning in w
@@ -1123,7 +1123,7 @@ class TestExtremeHyperDissipation:
         hyper_r = 8  # Maximum thesis value
 
         # Should not produce NaN or Inf, even at k = k_max
-        state_new = rk4_step(state, dt, eta=eta, v_A=1.0, hyper_r=hyper_r, hyper_n=2)
+        state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=hyper_r, hyper_n=2)
 
         # Check all fields are finite
         assert jnp.all(jnp.isfinite(state_new.z_plus)), "z_plus contains NaN/Inf with r=8"
@@ -1146,7 +1146,7 @@ class TestExtremeHyperDissipation:
         hyper_n = 4  # Maximum value
 
         # Should not produce NaN or Inf at highest moment m=M
-        state_new = rk4_step(state, dt, eta=0.01, nu=nu, v_A=1.0, hyper_r=2, hyper_n=hyper_n)
+        state_new = gandalf_step(state, dt, eta=0.01, nu=nu, v_A=1.0, hyper_r=2, hyper_n=hyper_n)
 
         # Check all moments are finite
         assert jnp.all(jnp.isfinite(state_new.g)), "g moments contain NaN/Inf with n=4"
@@ -1168,7 +1168,7 @@ class TestExtremeHyperDissipation:
         hyper_n = 4
 
         # Should handle both extreme dissipations without overflow
-        state_new = rk4_step(state, dt, eta=eta, nu=nu, v_A=1.0, hyper_r=hyper_r, hyper_n=hyper_n)
+        state_new = gandalf_step(state, dt, eta=eta, nu=nu, v_A=1.0, hyper_r=hyper_r, hyper_n=hyper_n)
 
         # All fields must remain finite
         assert jnp.all(jnp.isfinite(state_new.z_plus)), "z_plus overflow with r=8, n=4"
@@ -1190,7 +1190,7 @@ class TestExtremeHyperDissipation:
         # Run at 32³
         grid_32 = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         state_32 = initialize_alfven_wave(grid_32, M=10, kz_mode=1, amplitude=0.1)
-        state_32_new = rk4_step(state_32, dt, eta=eta, nu=0.0, v_A=1.0, hyper_r=hyper_r)
+        state_32_new = gandalf_step(state_32, dt, eta=eta, nu=0.0, v_A=1.0, hyper_r=hyper_r)
         E_32_initial = energy(state_32)['total']
         E_32_final = energy(state_32_new)['total']
         decay_32 = E_32_final / E_32_initial
@@ -1198,7 +1198,7 @@ class TestExtremeHyperDissipation:
         # Run at 64³ with SAME eta (this is the key test!)
         grid_64 = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
         state_64 = initialize_alfven_wave(grid_64, M=10, kz_mode=1, amplitude=0.1)
-        state_64_new = rk4_step(state_64, dt, eta=eta, nu=0.0, v_A=1.0, hyper_r=hyper_r)
+        state_64_new = gandalf_step(state_64, dt, eta=eta, nu=0.0, v_A=1.0, hyper_r=hyper_r)
         E_64_initial = energy(state_64)['total']
         E_64_final = energy(state_64_new)['total']
         decay_64 = E_64_final / E_64_initial

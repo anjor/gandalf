@@ -237,9 +237,6 @@ For systematic instability investigation, use the comprehensive diagnostic tools
 uv run python examples/alfvenic_cascade_benchmark.py \
   --resolution 64 --save-diagnostics --diagnostic-interval 5
 
-# Test unstable parameters (captures failure)
-uv run python examples/test_64cubed_unstable.py
-
 # Analyze with automated detection of CFL violations, exponential growth, etc.
 uv run python examples/analyze_issue82_diagnostics.py --resolution 64
 ```
@@ -477,8 +474,8 @@ force_amplitude = 0.02
 - PR #84: Detailed diagnostic analysis
 - docs/ISSUE82_SUMMARY.md: Comprehensive findings
 - examples/alfvenic_cascade_benchmark.py: Working examples
-- examples/test_64cubed_unstable.py: Unstable parameter capture
 - examples/analyze_64cubed_detailed.py: Diagnostic analysis tool
+- examples/analyze_issue82_diagnostics.py: General turbulence diagnostic visualization
 
 ## Validation Suite
 
@@ -623,7 +620,7 @@ force_amplitude = 0.02
     * save/load_turbulence_diagnostics(): HDF5 I/O with compression and metadata (io.py:541-688)
     * alfvenic_cascade_benchmark.py: Added --save-diagnostics flag and --diagnostic-interval
     * analyze_issue82_diagnostics.py: Visualization script with 6-panel comparison plots
-    * test_64cubed_unstable.py: Dedicated script to capture 64³ instability development
+    * analyze_64cubed_detailed.py: Detailed phase analysis tool for turbulence diagnostics
   - **Features**:
     * Auto-terminates on NaN/Inf, CFL > 5, or max_velocity > 1000
     * Exponential growth analysis: Fits γ from log(velocity) vs time
@@ -635,11 +632,11 @@ force_amplitude = 0.02
     uv run python examples/alfvenic_cascade_benchmark.py \
       --resolution 64 --save-diagnostics --diagnostic-interval 5
 
-    # Test unstable parameters
-    uv run python examples/test_64cubed_unstable.py
-
     # Analyze and compare
     uv run python examples/analyze_issue82_diagnostics.py --compare 32 64 128
+
+    # Detailed phase analysis
+    uv run python examples/analyze_64cubed_detailed.py
     ```
   - **Physics interpretation**:
     * CFL > 1.0 → Timestep too large for explicit integration

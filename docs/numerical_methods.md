@@ -460,7 +460,7 @@ def apply_integrating_factor(field, grid, dt, v_A=1.0):
 
 This method was developed in the original Fortran+CUDA GANDALF code and is essential for efficient KRMHD simulations. Without it, timesteps would be 10-100× smaller.
 
-**Note on naming:** The `gandalf_step()` function uses **RK2 (midpoint method)** for nonlinear terms, not RK4. A backward-compatible alias `rk4_step = gandalf_step` exists in the code for legacy tests, but don't be misled by the name—it's GANDALF's integrating factor + RK2, not plain RK4. The integrating factor makes this MORE accurate than plain RK4 for linear waves (zero temporal error vs. O(Δt⁴)).
+**Algorithm details:** The `gandalf_step()` function uses **RK2 (midpoint method)** for nonlinear terms combined with an integrating factor for linear propagation. This hybrid approach is more accurate than standard RK4 for wave-like problems: the integrating factor achieves zero temporal error for linear Alfvén waves, while RK2 provides 2nd-order accuracy for nonlinear interactions.
 
 ## Hyper-Dissipation
 
