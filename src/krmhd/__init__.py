@@ -67,7 +67,6 @@ from krmhd.physics import (
 
 from krmhd.timestepping import (
     krmhd_rhs,
-    rk4_step,
     gandalf_step,
     compute_cfl_timestep,
 )
@@ -145,7 +144,6 @@ __all__ = [
     "energy",
     # Time integration
     "krmhd_rhs",
-    "rk4_step",
     "gandalf_step",
     "compute_cfl_timestep",
     # Diagnostics

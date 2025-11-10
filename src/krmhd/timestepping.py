@@ -682,15 +682,6 @@ def gandalf_step(
     return _state_from_fields(new_fields, state)
 
 
-# Alias for backward compatibility with tests
-# NOTE: Despite the name, this is NOT plain RK4! It's GANDALF's integrating factor + RK2.
-# The name is kept for backward compatibility but the algorithm is:
-#   - Integrating factor: e^(±ikz·t) handles linear propagation exactly
-#   - RK2 (midpoint method): 2nd-order for nonlinear terms
-# This is MORE accurate than plain RK4 for linear waves (zero temporal error).
-rk4_step = gandalf_step
-
-
 def compute_cfl_timestep(
     state: KRMHDState,
     v_A: float,

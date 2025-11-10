@@ -65,10 +65,12 @@ outputs/
 results/
 figures/
 
-# But allow documentation figures
+# But allow documentation figures and references
 !docs/figures/
 !docs/figures/*.png
 !docs/figures/*.pdf
+!docs/references/
+!docs/references/*.pdf
 
 # Jupyter
 .ipynb_checkpoints/

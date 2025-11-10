@@ -245,13 +245,20 @@ python alfvenic_cascade_benchmark.py --resolution 64 \
 - Understand parameter space for future studies
 - No code changes needed - just parameter tuning!
 
-## Files Generated
+## Files Generated During Investigation
 
-1. `test_issue82_phase1_dissipation.py` - Verify dissipation works
-2. `analyze_64cubed_detailed.py` - Detailed diagnostic analysis
-3. `turbulence_diagnostics_64cubed_unstable.h5` - Captured instability data
-4. `issue82_64cubed_detailed_analysis.png` - 6-panel diagnostic plot
-5. `ISSUE82_SUMMARY.md` (this file) - Comprehensive findings
+Investigation scripts (now removed, issue resolved):
+1. ~~`test_issue82_phase1_dissipation.py`~~ - Verified dissipation works (removed)
+2. ~~`test_64cubed_unstable.py`~~ - Captured unstable parameters (removed)
+
+Analysis tools (kept for future turbulence studies):
+1. `analyze_64cubed_detailed.py` - Detailed diagnostic analysis
+2. `analyze_issue82_diagnostics.py` - General turbulence diagnostic visualization
+
+Data and documentation:
+1. `turbulence_diagnostics_64cubed_unstable.h5` - Captured instability data
+2. `issue82_64cubed_detailed_analysis.png` - 6-panel diagnostic plot
+3. `ISSUE82_SUMMARY.md` (this file) - Comprehensive findings
 
 ## References
 
