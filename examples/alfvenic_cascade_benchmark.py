@@ -126,6 +126,8 @@ def main():
                         help='Save detailed turbulence diagnostics for Issue #82 investigation')
     parser.add_argument('--diagnostic-interval', type=int, default=5,
                         help='Compute diagnostics every N steps (default: 5, lower = more frequent)')
+    parser.add_argument('--save-spectra', action='store_true',
+                        help='Save spectral data for detailed analysis and custom plotting')
     args = parser.parse_args()
 
     print("=" * 70)
@@ -686,6 +688,66 @@ def main():
             print(f"\n  ⚠️  WARNING: CFL number exceeded 1.0 (max={max(cfl_numbers):.3f})")
         if max(max_velocities) > 100.0:
             print(f"  ⚠️  WARNING: Very high velocities detected (max={max(max_velocities):.2e})")
+
+    # ==========================================================================
+    # Save Spectral Data (for detailed analysis)
+    # ==========================================================================
+
+    if args.save_spectra:
+        import h5py
+
+        print("\n" + "=" * 70)
+        print("Saving spectral data")
+        print("=" * 70)
+
+        spectra_filename = f"spectral_data_{args.resolution}cubed.h5"
+        spectra_filepath = output_dir / spectra_filename
+
+        # Convert lists to arrays for saving
+        spectrum_kinetic_array = np.array(spectrum_kinetic_list)
+        spectrum_magnetic_array = np.array(spectrum_magnetic_list)
+
+        with h5py.File(spectra_filepath, 'w') as f:
+            # Metadata
+            f.attrs['resolution'] = args.resolution
+            f.attrs['domain_size'] = (Lx, Ly, Lz)
+            f.attrs['v_A'] = float(v_A)
+            f.attrs['eta'] = float(eta)
+            f.attrs['nu'] = float(nu)
+            f.attrs['hyper_r'] = int(hyper_r)
+            f.attrs['hyper_n'] = int(hyper_n)
+            f.attrs['force_amplitude'] = float(force_amplitude)
+            f.attrs['force_k_min'] = int(k_force_min)
+            f.attrs['force_k_max'] = int(k_force_max)
+            f.attrs['dt'] = float(dt)
+            f.attrs['total_time'] = float(total_time)
+            f.attrs['averaging_start'] = float(averaging_start)
+            f.attrs['averaging_duration'] = float(total_time - averaging_start)
+            f.attrs['n_spectra'] = len(spectrum_kinetic_list)
+            f.attrs['description'] = f'Turbulent cascade spectral data N={args.resolution}³'
+
+            # Wavenumber grid
+            f.create_dataset('k_perp', data=k_perp)
+
+            # Time-averaged spectra
+            f.create_dataset('E_kinetic_avg', data=E_kin_avg)
+            f.create_dataset('E_magnetic_avg', data=E_mag_avg)
+            f.create_dataset('E_kinetic_std', data=E_kin_std)
+            f.create_dataset('E_magnetic_std', data=E_mag_std)
+
+            # Full time series of spectra (for evolution plots)
+            f.create_dataset('E_kinetic_all', data=spectrum_kinetic_array)
+            f.create_dataset('E_magnetic_all', data=spectrum_magnetic_array)
+
+            # Time series data
+            f.create_dataset('times', data=np.array(time_list))
+            f.create_dataset('energy_total', data=np.array(energy_history.history))
+            f.create_dataset('injection_rate', data=np.array(injection_rates))
+
+        print(f"✓ Saved spectral data to: {spectra_filepath}")
+        print(f"  - Time-averaged spectra: {len(k_perp)} k-bins")
+        print(f"  - Individual spectra: {spectrum_kinetic_array.shape}")
+        print(f"  - Time series: {len(time_list)} points")
 
     print("\n" + "=" * 70)
     print("Benchmark complete!")
