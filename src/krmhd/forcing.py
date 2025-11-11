@@ -6,7 +6,7 @@ The forcing is applied in Fourier space at specified wavenumber bands to inject
 energy at large scales while allowing inertial-range cascade to develop.
 
 Key features:
-- Band-limited forcing: inject energy only at k ∈ [k_min, k_max]
+- Band-limited forcing: inject energy only at modes n ∈ [n_min, n_max]
 - Alfvén sector forcing: drives perpendicular velocity u⊥ only, NOT δB⊥
 - Slow mode forcing: optional independent forcing for δB∥ and kinetic moments
 - Energy injection rate diagnostics for monitoring energy balance
@@ -18,10 +18,14 @@ Physics context:
     The forcing is white noise in time (uncorrelated between timesteps) and
     band-limited in k-space to concentrate energy injection at large scales.
 
+    Mode numbers n are integers (n=1,2,3,...) that correspond to physical wavenumbers
+    k = 2πn/L, where L is the domain size. This eliminates confusion about 2π factors.
+
 Example usage:
     >>> key = jax.random.PRNGKey(42)
+    >>> # Force modes n=1,2,3 (largest scales)
     >>> state_forced, key = force_alfven_modes(
-    ...     state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+    ...     state, amplitude=0.1, n_min=1, n_max=3, dt=0.01, key=key
     ... )
     >>> energy_rate = compute_energy_injection_rate(state, state_forced, dt=0.01)
 
@@ -38,6 +42,30 @@ from jax import Array
 
 from krmhd.physics import KRMHDState, energy
 from krmhd.spectral import SpectralGrid3D
+
+
+def _mode_to_wavenumber(n: int, L: float) -> float:
+    """
+    Convert mode number to physical wavenumber.
+
+    For a periodic domain of size L, the allowed Fourier modes are:
+    k = 2πn / L, where n = 1, 2, 3, ... are integer mode numbers.
+
+    Args:
+        n: Mode number (integer, must be >= 1)
+        L: Domain size in physical units
+
+    Returns:
+        Physical wavenumber k = 2πn/L
+
+    Example:
+        >>> # For unit domain (L=1.0)
+        >>> k1 = _mode_to_wavenumber(1, 1.0)  # k₁ = 2π ≈ 6.28
+        >>> k2 = _mode_to_wavenumber(2, 1.0)  # k₂ = 4π ≈ 12.57
+    """
+    if n <= 0:
+        raise ValueError(f"Mode number must be positive, got n={n}")
+    return 2.0 * jnp.pi * n / L
 
 
 @jax.jit
@@ -129,8 +157,8 @@ def _gaussian_white_noise_fourier_jit(
 def gaussian_white_noise_fourier(
     grid: SpectralGrid3D,
     amplitude: float,
-    k_min: float,
-    k_max: float,
+    n_min: int,
+    n_max: int,
     dt: float,
     key: Array,
 ) -> Tuple[Array, Array]:
@@ -138,9 +166,12 @@ def gaussian_white_noise_fourier(
     Generate band-limited Gaussian white noise in Fourier space.
 
     This function creates a random forcing field with Gaussian statistics,
-    localized to wavenumbers k ∈ [k_min, k_max]. The forcing is white noise
+    localized to mode numbers n ∈ [n_min, n_max]. The forcing is white noise
     in time (uncorrelated between calls) and satisfies the reality condition
     for inverse FFT.
+
+    Mode numbers are converted to physical wavenumbers via k = 2πn/L_min,
+    where L_min = min(Lx, Ly, Lz) ensures consistency in anisotropic domains.
 
     The noise amplitude is scaled by 1/√dt to ensure that the energy injection
     rate ε_inj = ⟨F·u⟩ is independent of timestep size.
@@ -148,8 +179,8 @@ def gaussian_white_noise_fourier(
     Args:
         grid: SpectralGrid3D defining wavenumber arrays and grid dimensions
         amplitude: Forcing amplitude (sets energy injection rate ~ amplitude²)
-        k_min: Minimum wavenumber for forcing band (typically ~ 2)
-        k_max: Maximum wavenumber for forcing band (typically ~ 5-10)
+        n_min: Minimum mode number for forcing band (typically n=1 or n=2)
+        n_max: Maximum mode number for forcing band (typically n=2 to n=5)
         dt: Timestep size (for proper white noise scaling)
         key: JAX random key for reproducible random number generation
 
@@ -160,28 +191,44 @@ def gaussian_white_noise_fourier(
     Example:
         >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
         >>> key = jax.random.PRNGKey(42)
+        >>> # Force modes n=1,2,3 (largest scales)
         >>> noise, key = gaussian_white_noise_fourier(
-        ...     grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+        ...     grid, amplitude=0.1, n_min=1, n_max=3, dt=0.01, key=key
         ... )
-        >>> # Apply to different timestep
+        >>> # Apply to different timestep with same forcing band
         >>> noise2, key = gaussian_white_noise_fourier(
-        ...     grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+        ...     grid, amplitude=0.1, n_min=1, n_max=3, dt=0.01, key=key
         ... )
 
     Physics:
         The forcing field F(k,t) has statistics:
         - ⟨F(k,t)⟩ = 0 (zero mean)
-        - ⟨F(k,t)F*(k',t')⟩ = amplitude² δ(t-t') δ(k-k') for k ∈ [k_min, k_max]
+        - ⟨F(k,t)F*(k',t')⟩ = amplitude² δ(t-t') δ(k-k') for modes n ∈ [n_min, n_max]
 
         Energy injection rate: ε_inj = amplitude² × N_modes (independent of dt)
+
+        Mode number convention:
+        - n=1: Fundamental mode (largest wavelength λ = L)
+        - n=2: Second harmonic (λ = L/2)
+        - n=3: Third harmonic (λ = L/3), etc.
     """
     # Input validation
-    if k_min >= k_max:
-        raise ValueError(f"k_min must be < k_max, got k_min={k_min}, k_max={k_max}")
+    if not isinstance(n_min, int) or not isinstance(n_max, int):
+        raise TypeError(f"Mode numbers must be integers, got n_min={type(n_min).__name__}, n_max={type(n_max).__name__}")
+    if n_min <= 0:
+        raise ValueError(f"n_min must be positive, got n_min={n_min}")
+    if n_min >= n_max:
+        raise ValueError(f"n_min must be < n_max, got n_min={n_min}, n_max={n_max}")
     if amplitude <= 0:
         raise ValueError(f"amplitude must be positive, got {amplitude}")
     if dt <= 0:
         raise ValueError(f"dt must be positive, got {dt}")
+
+    # Convert mode numbers to physical wavenumbers
+    # Use minimum domain size for consistency in anisotropic domains
+    L_min = min(grid.Lx, grid.Ly, grid.Lz)
+    k_min = _mode_to_wavenumber(n_min, L_min)
+    k_max = _mode_to_wavenumber(n_max, L_min)
 
     # Split key for real and imaginary parts
     key, subkey1, subkey2 = jax.random.split(key, 3)
@@ -217,8 +264,8 @@ def gaussian_white_noise_fourier(
 def force_alfven_modes(
     state: KRMHDState,
     amplitude: float,
-    k_min: float,
-    k_max: float,
+    n_min: int,
+    n_max: int,
     dt: float,
     key: Array,
 ) -> Tuple[KRMHDState, Array]:
@@ -237,8 +284,8 @@ def force_alfven_modes(
     Args:
         state: Current KRMHD state with Elsasser variables
         amplitude: Forcing amplitude (energy injection ~ amplitude²)
-        k_min: Minimum forcing wavenumber (typically ~ 2)
-        k_max: Maximum forcing wavenumber (typically ~ 5-10)
+        n_min: Minimum mode number for forcing band (typically n=1 or n=2)
+        n_max: Maximum mode number for forcing band (typically n=2 to n=5)
         dt: Timestep size (for white noise scaling)
         key: JAX random key
 
@@ -248,9 +295,9 @@ def force_alfven_modes(
 
     Example:
         >>> key = jax.random.PRNGKey(42)
-        >>> # Force at large scales (k ~ 2-5)
+        >>> # Force modes n=1,2,3 (largest scales)
         >>> state_forced, key = force_alfven_modes(
-        ...     state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+        ...     state, amplitude=0.1, n_min=1, n_max=3, dt=0.01, key=key
         ... )
         >>> # Verify φ changed but A∥ unchanged:
         >>> phi_old = (state.z_plus + state.z_minus) / 2
@@ -266,14 +313,17 @@ def force_alfven_modes(
 
         This is the standard method for driving MHD turbulence without
         artificial reconnection (Elenbaas+ 2008, Schekochihin+ 2009).
+
+        Mode number convention: n=1 is the fundamental mode (k=2π/L),
+        n=2 is the second harmonic (k=4π/L), etc.
     """
-    # Input validation (gaussian_white_noise_fourier validates k_min, k_max, dt)
+    # Input validation (gaussian_white_noise_fourier validates n_min, n_max, dt)
     if amplitude <= 0:
         raise ValueError(f"amplitude must be positive, got {amplitude}")
 
     # Generate single forcing field
     forcing, key = gaussian_white_noise_fourier(
-        state.grid, amplitude, k_min, k_max, dt, key
+        state.grid, amplitude, n_min, n_max, dt, key
     )
 
     # Apply IDENTICAL forcing to both Elsasser variables
@@ -302,8 +352,8 @@ def force_alfven_modes(
 def force_slow_modes(
     state: KRMHDState,
     amplitude: float,
-    k_min: float,
-    k_max: float,
+    n_min: int,
+    n_max: int,
     dt: float,
     key: Array,
 ) -> Tuple[KRMHDState, Array]:
@@ -317,8 +367,8 @@ def force_slow_modes(
     Args:
         state: Current KRMHD state
         amplitude: Forcing amplitude for slow modes
-        k_min: Minimum forcing wavenumber
-        k_max: Maximum forcing wavenumber
+        n_min: Minimum mode number for forcing band (typically n=1 or n=2)
+        n_max: Maximum mode number for forcing band (typically n=2 to n=5)
         dt: Timestep size
         key: JAX random key
 
@@ -328,9 +378,9 @@ def force_slow_modes(
 
     Example:
         >>> key = jax.random.PRNGKey(42)
-        >>> # Force slow modes independently
+        >>> # Force slow modes at large scales
         >>> state_forced, key = force_slow_modes(
-        ...     state, amplitude=0.05, k_min=2.0, k_max=5.0, dt=0.01, key=key
+        ...     state, amplitude=0.05, n_min=1, n_max=3, dt=0.01, key=key
         ... )
 
     Physics:
@@ -339,14 +389,17 @@ def force_slow_modes(
 
         The forcing F_slow is uncorrelated with Alfvén forcing and allows
         studying passive scalar advection, intermittency, and compressive effects.
+
+        Mode number convention: n=1 is the fundamental mode (k=2π/L),
+        n=2 is the second harmonic (k=4π/L), etc.
     """
-    # Input validation (gaussian_white_noise_fourier validates k_min, k_max, dt)
+    # Input validation (gaussian_white_noise_fourier validates n_min, n_max, dt)
     if amplitude <= 0:
         raise ValueError(f"amplitude must be positive, got {amplitude}")
 
     # Generate forcing field for B∥
     forcing, key = gaussian_white_noise_fourier(
-        state.grid, amplitude, k_min, k_max, dt, key
+        state.grid, amplitude, n_min, n_max, dt, key
     )
 
     # Apply forcing to parallel magnetic field
