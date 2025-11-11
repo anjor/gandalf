@@ -132,8 +132,6 @@ def main():
                         help='Save spectral data for detailed analysis and custom plotting')
     parser.add_argument('--eta', type=float, default=None,
                         help='Hyper-resistivity coefficient (overrides resolution default)')
-    parser.add_argument('--nu', type=float, default=None,
-                        help='Hyper-collision coefficient (overrides resolution default)')
     parser.add_argument('--force-amplitude', type=float, default=None,
                         help='Forcing amplitude (overrides resolution default)')
     parser.add_argument('--hyper-r', type=int, default=None, choices=[1, 2, 4, 8],
@@ -154,7 +152,7 @@ def main():
 
     # Resolution-dependent parameters
     Nx = Ny = args.resolution
-    Nz = args.resolution // 2  # Elongated box (standard RMHD)
+    Nz = args.resolution  # Cubic grid (matching original GANDALF)
 
     # With NORMALIZED hyper-dissipation (matching original GANDALF):
     # - Constraint is eta·dt < 50 (independent of resolution!)
@@ -162,7 +160,6 @@ def main():
     # - r=2 provides moderate dissipation range (broader than r=4, narrower than r=1)
     if args.resolution == 32:
         eta = 1.0         # Moderate dissipation for r=2
-        nu = 1.0          # Hyper-collision coefficient
         hyper_r = 2       # Practical choice: stable with clean inertial range
         hyper_n = 2
     elif args.resolution == 64:
@@ -170,14 +167,16 @@ def main():
         # After fixing Issue #97, we use weak forcing (0.005) with moderate dissipation
         # Alternative: eta=20.0 with amplitude=0.01 (documented in CLAUDE.md)
         eta = 2.0         # Moderate dissipation (2× stronger than 32³)
-        nu = 2.0          # Hyper-collision coefficient
         hyper_r = 2       # Stable and practical for turbulence studies
         hyper_n = 2       # Fourth-order dissipation: exp(-η(∇²)^2)
     else:  # 128³
         eta = 2.0         # Stronger for high resolution
-        nu = 2.0
         hyper_r = 2       # Maintains stability at high resolution
         hyper_n = 2
+
+    # Collision frequency: Set to 0 since Hermite moments (slow modes) are passive
+    # and don't affect Alfvén dynamics in the RMHD limit
+    nu = 0.0
 
     Lx = Ly = Lz = 1.0    # Unit box (thesis convention)
 
@@ -208,8 +207,6 @@ def main():
     # Override parameters with command-line arguments if provided
     if args.eta is not None:
         eta = args.eta
-    if args.nu is not None:
-        nu = args.nu
     if args.force_amplitude is not None:
         force_amplitude = args.force_amplitude
     if args.hyper_r is not None:
@@ -248,7 +245,7 @@ def main():
 
     print(f"\nGrid: {Nx} × {Ny} × {Nz}")
     print(f"Domain: [{Lx:.1f}, {Ly:.1f}, {Lz:.1f}]")
-    print(f"Physics: v_A={v_A}, η={eta:.1e}, ν={nu:.1e}")
+    print(f"Physics: v_A={v_A}, η={eta:.1e} (ν=0: collisionless)")
     print(f"Hyper-dissipation: r={hyper_r}, n={hyper_n}")
     forcing_mode = "GANDALF (1/k_perp + log-random)" if args.use_gandalf_forcing else "Gaussian white noise"
     print(f"Forcing: {forcing_mode}, amplitude={force_amplitude}, modes n ∈ [{n_force_min}, {n_force_max}]")
@@ -318,7 +315,6 @@ def main():
 
     # Print dt-dependent dissipation diagnostics (now that dt is computed)
     print(f"\n  Dissipation rate at k_max: η·dt = {eta * dt:.4f} (constraint: < 50)")
-    print(f"  Collision rate at M={M}: ν·dt = {nu * dt:.4f} (constraint: < 50)")
     print(f"  Normalized damping factor: exp(-η·1^{hyper_r}·dt) = {np.exp(-eta * dt):.6f} (at k_max)")
     print(f"  ------------------------------------------------")
 
