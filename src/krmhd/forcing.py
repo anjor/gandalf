@@ -566,6 +566,266 @@ def force_alfven_modes_gandalf(
     return new_state, key
 
 
+def _mode_triplet_to_indices(
+    nx: int, ny: int, nz: int,
+    Nx: int, Ny: int, Nz: int
+) -> Tuple[int, int, int]:
+    """
+    Convert mode number triplet (nx, ny, nz) to array indices for rfft format.
+
+    Mode numbers can be negative (e.g., -1, 0, 1), but array indices must be
+    non-negative. This function handles the periodic wraparound:
+    - Positive modes: nx → nx (for kx >= 0)
+    - Negative modes: ny = -1 → Ny-1, nz = -1 → Nz-1
+
+    Args:
+        nx, ny, nz: Mode numbers (can be negative)
+        Nx, Ny, Nz: Grid dimensions
+
+    Returns:
+        (ix, iy, iz): Array indices in [0, N-1]
+
+    Example:
+        >>> # Mode (-1, 0, 1) on 64³ grid
+        >>> ix, iy, iz = _mode_triplet_to_indices(-1, 0, 1, 64, 64, 64)
+        >>> # ix = -1 (signals need for Hermitian conjugate)
+        >>> # iy = 0, iz = 1
+    """
+    # For kx: keep as-is (can be negative, signals conjugate mode)
+    ix = nx
+
+    # For ky, kz: wrap negative indices
+    iy = ny % Ny
+    iz = nz % Nz
+
+    return ix, iy, iz
+
+
+def _get_rfft_compatible_modes(
+    mode_triplets: list
+) -> list:
+    """
+    Convert mode triplets to rfft-compatible format using Hermitian symmetry.
+
+    In rfft format, only kx >= 0 is stored. For modes with kx < 0, we use
+    the Hermitian symmetry f(-kx, -ky, -kz) = f*(kx, ky, kz) to find the
+    stored conjugate partner.
+
+    Args:
+        mode_triplets: List of (nx, ny, nz) integer mode number triplets
+
+    Returns:
+        List of (nx_stored, ny_stored, nz_stored, conjugate) tuples
+        where conjugate=True means to use complex conjugate
+
+    Example:
+        >>> # Original GANDALF modes
+        >>> modes = [(1, 0, 1), (0, 1, 1), (-1, 0, 1),
+        ...          (1, 1, -1), (0, 1, -1), (-1, 1, -1)]
+        >>> compatible = _get_rfft_compatible_modes(modes)
+        >>> # (-1, 0, 1) → stored as conj(1, 0, -1)
+        >>> # (-1, 1, -1) → stored as conj(1, -1, 1)
+    """
+    rfft_modes = []
+
+    for nx, ny, nz in mode_triplets:
+        if nx >= 0:
+            # kx >= 0: mode is directly stored
+            rfft_modes.append((nx, ny, nz, False))
+        else:
+            # kx < 0: use Hermitian symmetry f(-kx,-ky,-kz) = f*(kx,ky,kz)
+            # So mode (nx, ny, nz) with nx<0 is stored as conj(-nx, -ny, -nz)
+            rfft_modes.append((-nx, -ny, -nz, True))
+
+    return rfft_modes
+
+
+@partial(jax.jit, static_argnums=(0,))
+def _gandalf_forcing_specific_jit(
+    shape: Tuple[int, int, int],
+    mode_indices: Array,  # [N_modes, 3] array of (ix, iy, iz)
+    conjugate_flags: Array,  # [N_modes] boolean array
+    amplitudes: Array,  # [N_modes] complex amplitudes
+) -> Array:
+    """
+    JIT-compiled kernel for forcing specific mode triplets.
+
+    This creates a Fourier field with forcing applied only at the specified
+    mode triplets, preserving the original GANDALF approach of forcing exactly
+    6 specific (kx, ky, kz) modes with low k_z.
+
+    Args:
+        shape: Output array shape [Nz, Ny, Nx//2+1] (static argument)
+        mode_indices: Integer array [N_modes, 3] of (ix, iy, iz) indices
+        conjugate_flags: Boolean array [N_modes] indicating if conjugate needed
+        amplitudes: Complex array [N_modes] of forcing amplitudes
+
+    Returns:
+        Complex Fourier field [Nz, Ny, Nx//2+1] with forcing at specified modes
+    """
+    Nz, Ny, Nx_rfft = shape
+
+    # Initialize empty field
+    forced_field = jnp.zeros((Nz, Ny, Nx_rfft), dtype=jnp.complex64)
+
+    # Apply forcing to each mode
+    for i in range(mode_indices.shape[0]):
+        iz, iy, ix = mode_indices[i]  # Note: reversed order from storage
+        amplitude = amplitudes[i]
+        use_conjugate = conjugate_flags[i]
+
+        # Apply conjugate if needed (for negative kx modes)
+        # Use jnp.where for JAX compatibility (no Python control flow on tracers)
+        amplitude = jnp.where(use_conjugate, jnp.conj(amplitude), amplitude)
+
+        # Set the mode (JAX requires .at syntax for in-place updates)
+        forced_field = forced_field.at[iz, iy, ix].set(amplitude)
+
+    return forced_field
+
+
+def force_alfven_modes_specific(
+    state: KRMHDState,
+    mode_triplets: list,
+    fampl: float,
+    dt: float,
+    key: Array,
+) -> Tuple[KRMHDState, Array]:
+    """
+    Force specific (kx, ky, kz) mode triplets matching original GANDALF.
+
+    This implements the exact forcing scheme from the original GANDALF code,
+    which forces only 6 specific mode triplets with low k_z (±1):
+
+    Original GANDALF modes:
+        - (1, 0, 1), (0, 1, 1), (-1, 0, 1)   # k_z = +1
+        - (1, 1, -1), (0, 1, -1), (-1, 1, -1)  # k_z = -1
+
+    Key difference from band forcing:
+    - Band forcing: All ~50-100 modes with k_perp ∈ [n_min, n_max]
+    - Specific forcing: Only specified modes (typically 6)
+    - Result: 10-20× less energy injection, respects RMHD ordering k⊥ >> k∥
+
+    Each mode is forced with GANDALF amplitude formula:
+        amp = (1/|k_perp|) * sqrt((fampl/dt) * |log(random)|)
+
+    Args:
+        state: Current KRMHD state
+        mode_triplets: List of (nx, ny, nz) integer mode number triplets to force
+        fampl: GANDALF forcing amplitude parameter (thesis uses 1.0)
+        dt: Timestep
+        key: JAX random key
+
+    Returns:
+        new_state: State with forcing applied to z⁺ and z⁻
+        new_key: Updated random key
+
+    Example:
+        >>> # Original GANDALF configuration
+        >>> GANDALF_MODES = [
+        ...     (1, 0, 1), (0, 1, 1), (-1, 0, 1),
+        ...     (1, 1, -1), (0, 1, -1), (-1, 1, -1)
+        ... ]
+        >>> state, key = force_alfven_modes_specific(
+        ...     state, GANDALF_MODES, fampl=1.0, dt=0.005, key=key
+        ... )
+
+    Physics:
+        By forcing only low-k_z modes (|nz| = 1), we respect the RMHD ordering:
+        k_perp >> k_parallel
+
+        This prevents the exponential instability seen with band forcing, which
+        inadvertently forces high-k_z modes (up to k_z ~ 30 at 64³ resolution).
+
+    Reference:
+        - Original GANDALF Gandalf.in: nkstir=6 specific modes
+        - forcing.cu: Mode list hardcoded in stirring kernel
+    """
+    # Input validation
+    if fampl <= 0:
+        raise ValueError(f"fampl must be positive, got {fampl}")
+    if dt <= 0:
+        raise ValueError(f"dt must be positive, got {dt}")
+    if not mode_triplets:
+        raise ValueError("mode_triplets cannot be empty")
+
+    grid = state.grid
+    Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
+
+    # Convert mode triplets to rfft-compatible format
+    rfft_modes = _get_rfft_compatible_modes(mode_triplets)
+    n_modes = len(rfft_modes)
+
+    # Generate random numbers for each mode
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+
+    # Random amplitude in (0,1] for log factor
+    random_amp = jax.random.uniform(subkey1, shape=(n_modes,),
+                                    minval=1e-10, maxval=1.0)
+
+    # Random phase in [0, 2π]
+    random_phase = jax.random.uniform(subkey2, shape=(n_modes,),
+                                     minval=0.0, maxval=2.0*jnp.pi)
+
+    # Compute amplitude and phase for each mode
+    mode_indices = []
+    conjugate_flags = []
+    amplitudes = []
+
+    for i, (nx_stored, ny_stored, nz_stored, conjugate) in enumerate(rfft_modes):
+        # Convert to array indices
+        ix, iy, iz = _mode_triplet_to_indices(nx_stored, ny_stored, nz_stored,
+                                              Nx, Ny, Nz)
+
+        # Compute k_perp for this mode (using stored coordinates)
+        kx = grid.kx[ix] if ix < len(grid.kx) else 0.0
+        ky = grid.ky[iy] if iy < len(grid.ky) else 0.0
+        k_perp = jnp.sqrt(kx**2 + ky**2)
+        k_perp_safe = jnp.maximum(k_perp, 1e-10)
+
+        # GANDALF amplitude formula
+        log_factor = jnp.sqrt(jnp.abs((fampl / dt) * jnp.log(random_amp[i])))
+        amplitude_mag = (1.0 / k_perp_safe) * log_factor
+
+        # Complex amplitude with random phase
+        amplitude = amplitude_mag * jnp.exp(1j * random_phase[i])
+
+        mode_indices.append([iz, iy, ix])  # Note: [Nz, Ny, Nx] order
+        conjugate_flags.append(conjugate)
+        amplitudes.append(amplitude)
+
+    # Convert to JAX arrays
+    mode_indices = jnp.array(mode_indices, dtype=jnp.int32)
+    conjugate_flags = jnp.array(conjugate_flags, dtype=jnp.bool_)
+    amplitudes = jnp.array(amplitudes, dtype=jnp.complex64)
+
+    # Apply forcing via JIT kernel
+    shape = (Nz, Ny, Nx // 2 + 1)
+    forcing = _gandalf_forcing_specific_jit(shape, mode_indices,
+                                            conjugate_flags, amplitudes)
+
+    # Apply IDENTICAL forcing to both Elsasser variables (drives φ only)
+    z_plus_new = state.z_plus + forcing
+    z_minus_new = state.z_minus + forcing
+
+    # Create new state
+    new_state = KRMHDState(
+        z_plus=z_plus_new,
+        z_minus=z_minus_new,
+        B_parallel=state.B_parallel,
+        g=state.g,
+        M=state.M,
+        beta_i=state.beta_i,
+        v_th=state.v_th,
+        nu=state.nu,
+        Lambda=state.Lambda,
+        time=state.time,
+        grid=state.grid,
+    )
+
+    return new_state, key
+
+
 def force_slow_modes(
     state: KRMHDState,
     amplitude: float,

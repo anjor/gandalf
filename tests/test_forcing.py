@@ -14,11 +14,13 @@ from krmhd import (
     initialize_random_spectrum,
     gaussian_white_noise_fourier,
     force_alfven_modes,
+    force_alfven_modes_specific,
     force_slow_modes,
     compute_energy_injection_rate,
     gandalf_step,
     energy,
 )
+from krmhd.spectral import rfftn_inverse
 
 
 class TestGaussianWhiteNoise:
@@ -647,3 +649,172 @@ class TestIntegrationWithTimestepping:
         # Forced should have much higher energy
         assert E_forced > E_unforced
         assert E_forced > 2 * E_unforced  # At least 2x higher
+
+
+class TestSpecificModeForcing:
+    """Test specific mode forcing (original GANDALF approach)."""
+
+    def test_basic_functionality(self):
+        """Should force exactly the specified mode triplets."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        state = initialize_random_spectrum(
+            grid, M=10, alpha=5/3, amplitude=0.01, seed=42
+        )
+
+        # Original GANDALF modes
+        mode_triplets = [
+            (1, 0, 1), (0, 1, 1), (-1, 0, 1),
+            (1, 1, -1), (0, 1, -1), (-1, 1, -1)
+        ]
+
+        key = jax.random.PRNGKey(42)
+        fampl = 1.0
+        dt = 0.005
+
+        state_forced, key = force_alfven_modes_specific(
+            state, mode_triplets, fampl, dt, key
+        )
+
+        # Energy should increase
+        E_before = energy(state)["total"]
+        E_after = energy(state_forced)["total"]
+        assert E_after > E_before
+
+        # Fields should have changed
+        assert not jnp.allclose(state_forced.z_plus, state.z_plus)
+        assert not jnp.allclose(state_forced.z_minus, state.z_minus)
+
+    def test_reality_condition(self):
+        """Forced field should produce real-valued result in physical space."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        state = initialize_random_spectrum(
+            grid, M=10, alpha=5/3, amplitude=0.01, seed=42
+        )
+
+        mode_triplets = [(1, 0, 1), (0, 1, 1)]
+        key = jax.random.PRNGKey(42)
+
+        state_forced, key = force_alfven_modes_specific(
+            state, mode_triplets, fampl=1.0, dt=0.005, key=key
+        )
+
+        # Convert to physical space
+        z_plus_real = rfftn_inverse(
+            state_forced.z_plus, grid.Nz, grid.Ny, grid.Nx
+        )
+        z_minus_real = rfftn_inverse(
+            state_forced.z_minus, grid.Nz, grid.Ny, grid.Nx
+        )
+
+        # Should be real (imaginary part negligible)
+        assert jnp.max(jnp.abs(z_plus_real.imag)) < 1e-6
+        assert jnp.max(jnp.abs(z_minus_real.imag)) < 1e-6
+
+    def test_negative_kx_modes(self):
+        """Should correctly handle modes with negative kx via Hermitian symmetry."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        state = initialize_random_spectrum(
+            grid, M=10, alpha=5/3, amplitude=0.01, seed=42
+        )
+
+        # Force only modes with negative kx
+        mode_triplets = [(-1, 0, 1), (-1, 1, -1)]
+        key = jax.random.PRNGKey(42)
+
+        state_forced, key = force_alfven_modes_specific(
+            state, mode_triplets, fampl=1.0, dt=0.005, key=key
+        )
+
+        # Should work without errors
+        E_after = energy(state_forced)["total"]
+        assert E_after > 0
+        assert jnp.isfinite(E_after)
+
+        # Should produce real field
+        z_plus_real = rfftn_inverse(
+            state_forced.z_plus, grid.Nz, grid.Ny, grid.Nx
+        )
+        assert jnp.max(jnp.abs(z_plus_real.imag)) < 1e-6
+
+    def test_forces_phi_only(self):
+        """Should force φ (stream function) only, not A∥."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
+        state = initialize_random_spectrum(
+            grid, M=10, alpha=5/3, amplitude=0.01, seed=42
+        )
+
+        mode_triplets = [(1, 0, 1), (0, 1, 1)]
+        key = jax.random.PRNGKey(42)
+
+        # Compute φ and A∥ before forcing
+        phi_before = (state.z_plus + state.z_minus) / 2
+        A_before = (state.z_plus - state.z_minus) / 2
+
+        state_forced, key = force_alfven_modes_specific(
+            state, mode_triplets, fampl=1.0, dt=0.005, key=key
+        )
+
+        # Compute φ and A∥ after forcing
+        phi_after = (state_forced.z_plus + state_forced.z_minus) / 2
+        A_after = (state.z_plus - state.z_minus) / 2  # Recompute from original state
+
+        # φ should have changed (forced)
+        assert not jnp.allclose(phi_after, phi_before)
+
+        # A∥ should be unchanged (not forced)
+        # Check max absolute difference (avoids floating-point signed zero issues)
+        max_diff = jnp.max(jnp.abs(A_after - A_before))
+        assert max_diff < 1e-9  # Should be numerically zero
+
+    def test_input_validation_empty_modes(self):
+        """Should raise ValueError if mode_triplets is empty."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_random_spectrum(
+            grid, M=10, alpha=5/3, amplitude=0.01, seed=42
+        )
+        key = jax.random.PRNGKey(42)
+
+        with pytest.raises(ValueError, match="mode_triplets cannot be empty"):
+            force_alfven_modes_specific(
+                state, mode_triplets=[], fampl=1.0, dt=0.005, key=key
+            )
+
+    def test_input_validation_fampl(self):
+        """Should raise ValueError if fampl <= 0."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_random_spectrum(
+            grid, M=10, alpha=5/3, amplitude=0.01, seed=42
+        )
+        key = jax.random.PRNGKey(42)
+
+        mode_triplets = [(1, 0, 1)]
+
+        with pytest.raises(ValueError, match="fampl must be positive"):
+            force_alfven_modes_specific(
+                state, mode_triplets, fampl=0.0, dt=0.005, key=key
+            )
+
+        with pytest.raises(ValueError, match="fampl must be positive"):
+            force_alfven_modes_specific(
+                state, mode_triplets, fampl=-1.0, dt=0.005, key=key
+            )
+
+    def test_input_validation_dt(self):
+        """Should raise ValueError if dt <= 0."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_random_spectrum(
+            grid, M=10, alpha=5/3, amplitude=0.01, seed=42
+        )
+        key = jax.random.PRNGKey(42)
+
+        mode_triplets = [(1, 0, 1)]
+
+        with pytest.raises(ValueError, match="dt must be positive"):
+            force_alfven_modes_specific(
+                state, mode_triplets, fampl=1.0, dt=0.0, key=key
+            )
+
+        with pytest.raises(ValueError, match="dt must be positive"):
+            force_alfven_modes_specific(
+                state, mode_triplets, fampl=1.0, dt=-0.005, key=key
+            )

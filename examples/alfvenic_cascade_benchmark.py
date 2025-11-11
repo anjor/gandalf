@@ -52,6 +52,7 @@ from krmhd import (
     energy as compute_energy,
     force_alfven_modes,
     force_alfven_modes_gandalf,
+    force_alfven_modes_specific,
     compute_energy_injection_rate,
 )
 from krmhd.diagnostics import (
@@ -62,6 +63,18 @@ from krmhd.diagnostics import (
     compute_turbulence_diagnostics,
 )
 from krmhd.io import save_turbulence_diagnostics
+
+
+# Original GANDALF mode triplets (6 modes with low k_z = ±1)
+# From original GANDALF Gandalf.in and forcing.cu
+GANDALF_ORIGINAL_MODES = [
+    (1, 0, 1),   # k_perp = 1, k_z = +1
+    (0, 1, 1),   # k_perp = 1, k_z = +1
+    (-1, 0, 1),  # k_perp = 1, k_z = +1
+    (1, 1, -1),  # k_perp = sqrt(2), k_z = -1
+    (0, 1, -1),  # k_perp = 1, k_z = -1
+    (-1, 1, -1), # k_perp = sqrt(2), k_z = -1
+]
 
 
 def detect_steady_state(energy_history, window=100, threshold=0.02, n_smooth=None):
@@ -140,6 +153,8 @@ def main():
                         help='Hyper-collision order (overrides resolution default)')
     parser.add_argument('--use-gandalf-forcing', action='store_true',
                         help='Use original GANDALF forcing formula (1/k_perp weighting with log-random modulation)')
+    parser.add_argument('--use-specific-modes', action='store_true',
+                        help='Force only 6 specific mode triplets matching original GANDALF (respects RMHD ordering)')
     args = parser.parse_args()
 
     print("=" * 70)
@@ -247,8 +262,16 @@ def main():
     print(f"Domain: [{Lx:.1f}, {Ly:.1f}, {Lz:.1f}]")
     print(f"Physics: v_A={v_A}, η={eta:.1e} (ν=0: collisionless)")
     print(f"Hyper-dissipation: r={hyper_r}, n={hyper_n}")
-    forcing_mode = "GANDALF (1/k_perp + log-random)" if args.use_gandalf_forcing else "Gaussian white noise"
-    print(f"Forcing: {forcing_mode}, amplitude={force_amplitude}, modes n ∈ [{n_force_min}, {n_force_max}]")
+
+    if args.use_specific_modes:
+        forcing_mode = "Specific modes (original GANDALF)"
+        print(f"Forcing: {forcing_mode}, amplitude={force_amplitude}")
+        print(f"  Forced modes: {len(GANDALF_ORIGINAL_MODES)} triplets with |k_z|=1 (respects RMHD ordering)")
+        print(f"  {GANDALF_ORIGINAL_MODES}")
+    else:
+        forcing_mode = "GANDALF (1/k_perp + log-random)" if args.use_gandalf_forcing else "Gaussian white noise"
+        print(f"Forcing: {forcing_mode}, amplitude={force_amplitude}, modes n ∈ [{n_force_min}, {n_force_max}]")
+
     print(f"Evolution: Run for {args.total_time:.1f} τ_A total, average last {args.total_time - args.averaging_start:.1f} τ_A")
     print(f"CFL safety: {cfl_safety}")
 
@@ -429,8 +452,19 @@ def main():
         # Apply forcing
         state_before = state
         key, subkey = jax.random.split(key)
-        if args.use_gandalf_forcing:
+        if args.use_specific_modes:
+            # Force only 6 specific mode triplets (original GANDALF)
+            # This respects RMHD ordering k⊥ >> k∥ by forcing only low-k_z modes
+            state, key = force_alfven_modes_specific(
+                state,
+                mode_triplets=GANDALF_ORIGINAL_MODES,
+                fampl=force_amplitude,  # Interpreted as fampl for specific forcing
+                dt=dt,
+                key=subkey
+            )
+        elif args.use_gandalf_forcing:
             # Use original GANDALF forcing formula (1/k_perp weighting with log-random modulation)
+            # Forces all modes in band [n_min, n_max] - can include high k_z
             state, key = force_alfven_modes_gandalf(
                 state,
                 fampl=force_amplitude,  # Interpreted as fampl for GANDALF forcing

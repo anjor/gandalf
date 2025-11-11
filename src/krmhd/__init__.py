@@ -86,6 +86,7 @@ from krmhd.forcing import (
     gandalf_forcing_fourier,
     force_alfven_modes,
     force_alfven_modes_gandalf,
+    force_alfven_modes_specific,
     force_slow_modes,
     compute_energy_injection_rate,
 )
