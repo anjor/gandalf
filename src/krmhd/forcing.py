@@ -154,6 +154,152 @@ def _gaussian_white_noise_fourier_jit(
     return forced_field
 
 
+@jax.jit
+def _gandalf_forcing_fourier_jit(
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    fampl: float,
+    k_min: float,
+    k_max: float,
+    dt: float,
+    random_amplitude: Array,
+    random_phase: Array,
+) -> Array:
+    """
+    JIT-compiled core function for original GANDALF forcing (forcing.cu).
+
+    Original formula: amp = (1/|k_perp|) * sqrt((fampl/dt) * log(random))
+
+    Args:
+        kx, ky, kz: Wavenumber arrays (broadcast-compatible shapes)
+        fampl: GANDALF forcing amplitude parameter (thesis uses 1.0)
+        k_min: Minimum wavenumber for forcing band
+        k_max: Maximum wavenumber for forcing band
+        dt: Timestep
+        random_amplitude: Random uniform samples in (0,1] for amplitude [Nz, Ny, Nx//2+1]
+        random_phase: Random uniform samples in [0, 2π] for phase [Nz, Ny, Nx//2+1]
+
+    Returns:
+        Complex Fourier field with GANDALF forcing at k ∈ [k_min, k_max]
+    """
+    # Broadcast wavenumbers to 3D grids
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
+
+    # Compute perpendicular wavenumber magnitude
+    k_perp = jnp.sqrt(kx_3d**2 + ky_3d**2)
+
+    # Compute total wavenumber for mask
+    k_mag = jnp.sqrt(kx_3d**2 + ky_3d**2 + kz_3d**2)
+
+    # Create spectral mask: force only modes with k ∈ [k_min, k_max]
+    forcing_mask = (k_mag >= k_min) & (k_mag <= k_max)
+
+    # Original GANDALF amplitude formula:
+    # amp = (1/|k_perp|) * sqrt((fampl/dt) * |log(random)|)
+    # Note: abs(log(random)) ensures positive values since random ∈ (0,1]
+    # Clip k_perp to avoid division by zero (k_perp=0 modes get zero amplitude anyway)
+    k_perp_safe = jnp.maximum(k_perp, 1e-10)
+
+    # Scale factor from logarithmic random modulation
+    # Use abs(log) since log of uniform(0,1) gives negative values
+    log_factor = jnp.sqrt(jnp.abs((fampl / dt) * jnp.log(random_amplitude)))
+
+    # Combined amplitude: (1/k_perp) * sqrt((fampl/dt) * |log(random)|)
+    amplitude = (1.0 / k_perp_safe) * log_factor
+
+    # Create complex forcing with random phases
+    # Original GANDALF uses: phase = π * (2*random - 1) ∈ [-π, π]
+    forced_field = amplitude * jnp.exp(1j * random_phase)
+
+    # Apply spectral mask
+    forced_field = forced_field * forcing_mask.astype(forced_field.dtype)
+
+    # Zero out k=0 mode (no forcing of mean field)
+    forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
+
+    # Enforce Hermitian symmetry for rfft format
+    forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
+
+    Nx_rfft = forced_field.shape[2]
+    if Nx_rfft > 1:
+        nyquist_idx = Nx_rfft - 1
+        forced_field = forced_field.at[:, :, nyquist_idx].set(
+            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+        )
+
+    return forced_field
+
+
+def gandalf_forcing_fourier(
+    grid: SpectralGrid3D,
+    fampl: float,
+    n_min: int,
+    n_max: int,
+    dt: float,
+    key: Array,
+) -> Tuple[Array, Array]:
+    """
+    Generate forcing using original GANDALF formula (forcing.cu).
+
+    This implements the exact forcing scheme from the thesis/original GANDALF:
+        amp = (1/|k_perp|) * sqrt((fampl/dt) * |log(random)|)
+
+    Key differences from gaussian_white_noise_fourier:
+    - Amplitude scales as 1/k_perp (larger scales get more energy)
+    - Logarithmic random modulation instead of Gaussian
+    - Effective amplitude ~ sqrt(fampl/dt), much stronger than linear scaling
+
+    Args:
+        grid: SpectralGrid3D defining the computational domain
+        fampl: GANDALF forcing amplitude parameter (thesis uses 1.0 at 128³)
+        n_min: Minimum mode number to force (integer)
+        n_max: Maximum mode number to force (integer)
+        dt: Current timestep (affects amplitude scaling)
+        key: JAX random key for generating stochastic forcing
+
+    Returns:
+        (forced_field, new_key): Complex Fourier field and updated random key
+
+    Example:
+        >>> key = jax.random.PRNGKey(42)
+        >>> # Original GANDALF parameters
+        >>> forcing, key = gandalf_forcing_fourier(
+        ...     grid, fampl=1.0, n_min=1, n_max=2, dt=0.005, key=key
+        ... )
+
+    Reference:
+        - Original GANDALF forcing.cu
+        - Gandalf.in: fampl=1.0, nkstir=6, alpha_hyper=3, nu_hyper=1.0
+    """
+    # Convert mode numbers to wavenumbers
+    L_min = min(grid.Lx, grid.Ly, grid.Lz)
+    k_min = _mode_to_wavenumber(n_min, L_min)
+    k_max = _mode_to_wavenumber(n_max, L_min)
+
+    # Generate random numbers for amplitude (uniform in (0,1]) and phase
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+
+    # Random amplitude in (0,1] (avoid exact 0 for log)
+    random_amplitude = jax.random.uniform(subkey1, shape=(grid.Nz, grid.Ny, grid.Nx//2+1),
+                                         minval=1e-10, maxval=1.0)
+
+    # Random phase in [0, 2π]
+    random_phase = jax.random.uniform(subkey2, shape=(grid.Nz, grid.Ny, grid.Nx//2+1),
+                                     minval=0.0, maxval=2.0*jnp.pi)
+
+    # Apply GANDALF forcing formula
+    forced_field = _gandalf_forcing_fourier_jit(
+        grid.kx, grid.ky, grid.kz,
+        fampl, k_min, k_max, dt,
+        random_amplitude, random_phase
+    )
+
+    return forced_field, key
+
+
 def gaussian_white_noise_fourier(
     grid: SpectralGrid3D,
     amplitude: float,
@@ -343,6 +489,77 @@ def force_alfven_modes(
         nu=state.nu,
         Lambda=state.Lambda,
         time=state.time,  # Time unchanged (forcing is instantaneous)
+        grid=state.grid,
+    )
+
+    return new_state, key
+
+
+def force_alfven_modes_gandalf(
+    state: KRMHDState,
+    fampl: float,
+    n_min: int,
+    n_max: int,
+    dt: float,
+    key: Array,
+) -> Tuple[KRMHDState, Array]:
+    """
+    Apply original GANDALF forcing to Alfvén modes (Elsasser variables).
+
+    This uses the exact forcing formula from the thesis/original GANDALF code:
+        amp = (1/|k_perp|) * sqrt((fampl/dt) * |log(random)|)
+
+    Like force_alfven_modes(), this forces z⁺ and z⁻ IDENTICALLY to drive
+    velocity fluctuations only (φ forcing) without artificial magnetic reconnection.
+
+    Args:
+        state: Current KRMHD state with Elsasser variables
+        fampl: GANDALF forcing amplitude parameter (thesis uses 1.0 at 128³)
+        n_min: Minimum mode number for forcing band (original: 1)
+        n_max: Maximum mode number for forcing band (original: 2)
+        dt: Timestep size
+        key: JAX random key
+
+    Returns:
+        new_state: State with GANDALF forcing applied to z⁺ and z⁻
+        new_key: Updated random key
+
+    Example:
+        >>> key = jax.random.PRNGKey(42)
+        >>> # Original GANDALF thesis parameters
+        >>> state_forced, key = force_alfven_modes_gandalf(
+        ...     state, fampl=1.0, n_min=1, n_max=2, dt=0.005, key=key
+        ... )
+
+    Reference:
+        - Original GANDALF forcing.cu
+        - Gandalf.in: fampl=1.0, nkstir=6 modes
+    """
+    # Input validation
+    if fampl <= 0:
+        raise ValueError(f"fampl must be positive, got {fampl}")
+
+    # Generate forcing using GANDALF formula
+    forcing, key = gandalf_forcing_fourier(
+        state.grid, fampl, n_min, n_max, dt, key
+    )
+
+    # Apply IDENTICAL forcing to both Elsasser variables
+    z_plus_new = state.z_plus + forcing
+    z_minus_new = state.z_minus + forcing
+
+    # Create new state with forced Elsasser variables
+    new_state = KRMHDState(
+        z_plus=z_plus_new,
+        z_minus=z_minus_new,
+        B_parallel=state.B_parallel,
+        g=state.g,
+        M=state.M,
+        beta_i=state.beta_i,
+        v_th=state.v_th,
+        nu=state.nu,
+        Lambda=state.Lambda,
+        time=state.time,
         grid=state.grid,
     )
 

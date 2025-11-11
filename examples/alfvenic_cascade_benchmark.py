@@ -51,6 +51,7 @@ from krmhd import (
     compute_cfl_timestep,
     energy as compute_energy,
     force_alfven_modes,
+    force_alfven_modes_gandalf,
     compute_energy_injection_rate,
 )
 from krmhd.diagnostics import (
@@ -129,6 +130,18 @@ def main():
                         help='Compute diagnostics every N steps (default: 5, lower = more frequent)')
     parser.add_argument('--save-spectra', action='store_true',
                         help='Save spectral data for detailed analysis and custom plotting')
+    parser.add_argument('--eta', type=float, default=None,
+                        help='Hyper-resistivity coefficient (overrides resolution default)')
+    parser.add_argument('--nu', type=float, default=None,
+                        help='Hyper-collision coefficient (overrides resolution default)')
+    parser.add_argument('--force-amplitude', type=float, default=None,
+                        help='Forcing amplitude (overrides resolution default)')
+    parser.add_argument('--hyper-r', type=int, default=None, choices=[1, 2, 4, 8],
+                        help='Hyper-dissipation order (overrides resolution default)')
+    parser.add_argument('--hyper-n', type=int, default=None, choices=[1, 2, 4],
+                        help='Hyper-collision order (overrides resolution default)')
+    parser.add_argument('--use-gandalf-forcing', action='store_true',
+                        help='Use original GANDALF forcing formula (1/k_perp weighting with log-random modulation)')
     args = parser.parse_args()
 
     print("=" * 70)
@@ -192,6 +205,18 @@ def main():
     n_force_min = 1  # Largest scale (fundamental mode)
     n_force_max = 2  # Narrow injection range (was 3, reduced for stability)
 
+    # Override parameters with command-line arguments if provided
+    if args.eta is not None:
+        eta = args.eta
+    if args.nu is not None:
+        nu = args.nu
+    if args.force_amplitude is not None:
+        force_amplitude = args.force_amplitude
+    if args.hyper_r is not None:
+        hyper_r = args.hyper_r
+    if args.hyper_n is not None:
+        hyper_n = args.hyper_n
+
     # Initial condition (weak, let forcing drive the turbulence)
     alpha = 5.0 / 3.0     # k^(-5/3) initial spectrum
     amplitude = 0.05      # Weak initial amplitude
@@ -225,7 +250,8 @@ def main():
     print(f"Domain: [{Lx:.1f}, {Ly:.1f}, {Lz:.1f}]")
     print(f"Physics: v_A={v_A}, η={eta:.1e}, ν={nu:.1e}")
     print(f"Hyper-dissipation: r={hyper_r}, n={hyper_n}")
-    print(f"Forcing: amplitude={force_amplitude}, modes n ∈ [{n_force_min}, {n_force_max}]")
+    forcing_mode = "GANDALF (1/k_perp + log-random)" if args.use_gandalf_forcing else "Gaussian white noise"
+    print(f"Forcing: {forcing_mode}, amplitude={force_amplitude}, modes n ∈ [{n_force_min}, {n_force_max}]")
     print(f"Evolution: Run for {args.total_time:.1f} τ_A total, average last {args.total_time - args.averaging_start:.1f} τ_A")
     print(f"CFL safety: {cfl_safety}")
 
@@ -407,14 +433,26 @@ def main():
         # Apply forcing
         state_before = state
         key, subkey = jax.random.split(key)
-        state, key = force_alfven_modes(
-            state,
-            amplitude=force_amplitude,
-            n_min=n_force_min,
-            n_max=n_force_max,
-            dt=dt,
-            key=subkey
-        )
+        if args.use_gandalf_forcing:
+            # Use original GANDALF forcing formula (1/k_perp weighting with log-random modulation)
+            state, key = force_alfven_modes_gandalf(
+                state,
+                fampl=force_amplitude,  # Interpreted as fampl for GANDALF forcing
+                n_min=n_force_min,
+                n_max=n_force_max,
+                dt=dt,
+                key=subkey
+            )
+        else:
+            # Use Gaussian white noise forcing (default)
+            state, key = force_alfven_modes(
+                state,
+                amplitude=force_amplitude,
+                n_min=n_force_min,
+                n_max=n_force_max,
+                dt=dt,
+                key=subkey
+            )
 
         # Compute energy injection rate
         eps_inj = compute_energy_injection_rate(state_before, state, dt)
@@ -743,19 +781,19 @@ def main():
             f.create_dataset('E_magnetic_all', data=spectrum_magnetic_array)
 
             # Time series data for steady-state verification
-            f.create_dataset('times', data=np.array(time_list))
-            f.create_dataset('energy_total', data=np.array(energy_history.history))
+            f.create_dataset('times', data=np.array(history.times))
+            f.create_dataset('energy_total', data=np.array(history.E_total))
             f.create_dataset('injection_rate', data=np.array(injection_rates))
 
             # Save averaging window info for analysis
-            averaging_mask = np.array(time_list) >= averaging_start
-            f.create_dataset('averaging_times', data=np.array(time_list)[averaging_mask])
-            f.create_dataset('averaging_energies', data=np.array(energy_history.history)[averaging_mask])
+            averaging_mask = np.array(history.times) >= averaging_start
+            f.create_dataset('averaging_times', data=np.array(history.times)[averaging_mask])
+            f.create_dataset('averaging_energies', data=np.array(history.E_total)[averaging_mask])
 
         print(f"✓ Saved spectral data to: {spectra_filepath}")
         print(f"  - Time-averaged spectra: {len(k_perp)} k-bins")
         print(f"  - Individual spectra: {spectrum_kinetic_array.shape}")
-        print(f"  - Time series: {len(time_list)} points")
+        print(f"  - Time series: {len(history.times)} points")
 
     print("\n" + "=" * 70)
     print("Benchmark complete!")

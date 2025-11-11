@@ -83,7 +83,9 @@ from krmhd.diagnostics import (
 
 from krmhd.forcing import (
     gaussian_white_noise_fourier,
+    gandalf_forcing_fourier,
     force_alfven_modes,
+    force_alfven_modes_gandalf,
     force_slow_modes,
     compute_energy_injection_rate,
 )
