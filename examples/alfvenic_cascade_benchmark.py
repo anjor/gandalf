@@ -153,9 +153,11 @@ def main():
         hyper_r = 2       # Practical choice: stable with clean inertial range
         hyper_n = 2
     elif args.resolution == 64:
-        # Moderate parameters for clean turbulent cascade
-        eta = 1.0         # Moderate dissipation (same as N=32)
-        nu = 1.0          # Hyper-collision coefficient
+        # 64³ ANOMALY (Issue #82): Requires unusually strong dissipation OR very weak forcing
+        # After fixing Issue #97, we use weak forcing (0.005) with moderate dissipation
+        # Alternative: eta=20.0 with amplitude=0.01 (documented in CLAUDE.md)
+        eta = 2.0         # Moderate dissipation (2× stronger than 32³)
+        nu = 2.0          # Hyper-collision coefficient
         hyper_r = 2       # Stable and practical for turbulence studies
         hyper_n = 2       # Fourth-order dissipation: exp(-η(∇²)^2)
     else:  # 128³
@@ -173,18 +175,22 @@ def main():
     # Forcing parameters (inject energy at large scales)
     # Force narrow range at large scales for clean inertial range development
     # With r=2 hyper-dissipation, need gentle forcing to avoid numerical instability
+    # NOTE: After fixing Issue #97, forcing now works correctly! Old amplitudes were too strong
+    # because the forcing mask was empty (no modes satisfied k_min=2.0 for L=1.0 domain).
+    # Now that modes n=1-2 are actually forced, we need much weaker amplitudes.
     if args.resolution == 32:
-        force_amplitude = 0.05   # Gentle forcing for stability
+        force_amplitude = 0.01   # Weak forcing for stability (5× weaker than before Issue #97)
     elif args.resolution == 64:
-        force_amplitude = 0.1    # Moderate forcing for sustained turbulence
+        force_amplitude = 0.005  # Very weak for 64³ anomaly (Issue #82)
     else:  # 128³
-        force_amplitude = 0.05   # Conservative forcing for high resolution
+        force_amplitude = 0.01   # Weak forcing for high resolution
 
-    # NARROW FORCING RANGE: modes n ∈ [1, 3] for clean scale separation
+    # NARROW FORCING RANGE: modes n ∈ [1, 2] for clean scale separation
     # Mode numbers are integers (n=1 is fundamental, n=2 is second harmonic, etc.)
     # See https://github.com/anjor/gandalf/issues/97 (now resolved!)
+    # Narrowed from n=1-3 to n=1-2 for better stability
     n_force_min = 1  # Largest scale (fundamental mode)
-    n_force_max = 3  # Narrow injection range
+    n_force_max = 2  # Narrow injection range (was 3, reduced for stability)
 
     # Initial condition (weak, let forcing drive the turbulence)
     alpha = 5.0 / 3.0     # k^(-5/3) initial spectrum
