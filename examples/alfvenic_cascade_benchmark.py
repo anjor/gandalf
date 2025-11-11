@@ -602,6 +602,7 @@ def main():
     # Panel 1: Energy Evolution
     # -------------------------------------------------------------------------
     ax1 = plt.subplot(131)
+    ax1.set_yscale('log')  # Logarithmic y-axis to clearly show exponential vs linear growth
     times = np.array(history.times)
     energies = np.array(history.E_total)
     ax1.plot(times, energies, 'k-', linewidth=2)
