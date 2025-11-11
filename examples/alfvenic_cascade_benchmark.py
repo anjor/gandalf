@@ -36,6 +36,7 @@ Acceptable Energy Variation During Averaging:
 """
 
 import argparse
+import sys
 import time
 import numpy as np
 import jax
@@ -152,16 +153,13 @@ def main():
         hyper_r = 2       # Practical choice: stable with clean inertial range
         hyper_n = 2
     elif args.resolution == 64:
-        # ANOMALY: 64³ requires 10× stronger dissipation than expected
-        # Expected η ~ 1.5 (scaling from 32³), but needs η = 20.0 for stability
-        # Root cause unclear - may be specific wavenumber resonance or
-        # critical balance violation at this intermediate resolution.
-        # See PR #81 for full parameter search history (7 failed attempts).
-        # TODO: Investigate why 64³ is anomalously unstable
-        eta = 20.0        # Anomalously strong dissipation required for stability
-        nu = 1.0          # Doesn't matter (Hermite moments not evolved)
+        # 64³ ANOMALY (Issue #82): Requires unusually strong dissipation OR very weak forcing
+        # After fixing Issue #97, we use weak forcing (0.005) with moderate dissipation
+        # Alternative: eta=20.0 with amplitude=0.01 (documented in CLAUDE.md)
+        eta = 2.0         # Moderate dissipation (2× stronger than 32³)
+        nu = 2.0          # Hyper-collision coefficient
         hyper_r = 2       # Stable and practical for turbulence studies
-        hyper_n = 2
+        hyper_n = 2       # Fourth-order dissipation: exp(-η(∇²)^2)
     else:  # 128³
         eta = 2.0         # Stronger for high resolution
         nu = 2.0
@@ -175,18 +173,24 @@ def main():
     beta_i = 1.0          # Ion plasma beta
 
     # Forcing parameters (inject energy at large scales)
-    # Force modes 1 and 2 (largest scales, k = 2π/L for L=1)
+    # Force narrow range at large scales for clean inertial range development
     # With r=2 hyper-dissipation, need gentle forcing to avoid numerical instability
+    # NOTE: After fixing Issue #97, forcing now works correctly! Old amplitudes were too strong
+    # because the forcing mask was empty (no modes satisfied k_min=2.0 for L=1.0 domain).
+    # Now that modes n=1-2 are actually forced, we need much weaker amplitudes.
     if args.resolution == 32:
-        force_amplitude = 0.05   # Gentle forcing for stability
+        force_amplitude = 0.01   # Weak forcing for stability (5× weaker than before Issue #97)
     elif args.resolution == 64:
-        force_amplitude = 0.01   # Extremely gentle forcing to prevent NaN blowup
+        force_amplitude = 0.005  # Very weak for 64³ anomaly (Issue #82)
     else:  # 128³
-        force_amplitude = 0.05   # Conservative forcing for high resolution
+        force_amplitude = 0.01   # Weak forcing for high resolution
 
-    force_modes = [1, 2]    # Mode numbers to force
-    k_force_min = (1 - 0.5) * 2 * np.pi / Lx  # Lower bound for mode 1
-    k_force_max = (2 + 0.5) * 2 * np.pi / Lx  # Upper bound for mode 2
+    # NARROW FORCING RANGE: modes n ∈ [1, 2] for clean scale separation
+    # Mode numbers are integers (n=1 is fundamental, n=2 is second harmonic, etc.)
+    # See https://github.com/anjor/gandalf/issues/97 (now resolved!)
+    # Narrowed from n=1-3 to n=1-2 for better stability
+    n_force_min = 1  # Largest scale (fundamental mode)
+    n_force_max = 2  # Narrow injection range (was 3, reduced for stability)
 
     # Initial condition (weak, let forcing drive the turbulence)
     alpha = 5.0 / 3.0     # k^(-5/3) initial spectrum
@@ -221,7 +225,7 @@ def main():
     print(f"Domain: [{Lx:.1f}, {Ly:.1f}, {Lz:.1f}]")
     print(f"Physics: v_A={v_A}, η={eta:.1e}, ν={nu:.1e}")
     print(f"Hyper-dissipation: r={hyper_r}, n={hyper_n}")
-    print(f"Forcing: amplitude={force_amplitude}, modes {force_modes}")
+    print(f"Forcing: amplitude={force_amplitude}, modes n ∈ [{n_force_min}, {n_force_max}]")
     print(f"Evolution: Run for {args.total_time:.1f} τ_A total, average last {args.total_time - args.averaging_start:.1f} τ_A")
     print(f"CFL safety: {cfl_safety}")
 
@@ -387,8 +391,8 @@ def main():
                     E_mag = E_dict['magnetic']
                     print(f"\n  ERROR: NaN/Inf detected at step {step}, t={state.time:.2f} τ_A")
                     print(f"         E_total = {E_total}, E_kin = {E_kin}, E_mag = {E_mag}")
-                    print(f"         Terminating evolution early.")
-                    break
+                    print(f"         Terminating simulation immediately.")
+                    sys.exit(1)  # Exit immediately on NaN to prevent wasted computation
 
                 # Extract energy breakdown for progress display (only when printing)
                 E_mag = E_dict['magnetic']
@@ -406,8 +410,8 @@ def main():
         state, key = force_alfven_modes(
             state,
             amplitude=force_amplitude,
-            k_min=k_force_min,
-            k_max=k_force_max,
+            n_min=n_force_min,
+            n_max=n_force_max,
             dt=dt,
             key=subkey
         )
@@ -521,8 +525,7 @@ def main():
 
     # Convert k⊥ to mode numbers: n = k⊥ L / (2π)
     n_perp = k_perp * Lx / (2 * np.pi)
-    n_force_min = k_force_min * Lx / (2 * np.pi)
-    n_force_max = k_force_max * Lx / (2 * np.pi)
+    # n_force_min and n_force_max already defined as integers above
 
     # Create figure with three panels
     fig = plt.figure(figsize=(15, 5))
@@ -717,8 +720,8 @@ def main():
             f.attrs['hyper_r'] = int(hyper_r)
             f.attrs['hyper_n'] = int(hyper_n)
             f.attrs['force_amplitude'] = float(force_amplitude)
-            f.attrs['force_k_min'] = int(k_force_min)
-            f.attrs['force_k_max'] = int(k_force_max)
+            f.attrs['force_n_min'] = int(n_force_min)
+            f.attrs['force_n_max'] = int(n_force_max)
             f.attrs['dt'] = float(dt)
             f.attrs['total_time'] = float(total_time)
             f.attrs['averaging_start'] = float(averaging_start)
@@ -739,10 +742,15 @@ def main():
             f.create_dataset('E_kinetic_all', data=spectrum_kinetic_array)
             f.create_dataset('E_magnetic_all', data=spectrum_magnetic_array)
 
-            # Time series data
+            # Time series data for steady-state verification
             f.create_dataset('times', data=np.array(time_list))
             f.create_dataset('energy_total', data=np.array(energy_history.history))
             f.create_dataset('injection_rate', data=np.array(injection_rates))
+
+            # Save averaging window info for analysis
+            averaging_mask = np.array(time_list) >= averaging_start
+            f.create_dataset('averaging_times', data=np.array(time_list)[averaging_mask])
+            f.create_dataset('averaging_energies', data=np.array(energy_history.history)[averaging_mask])
 
         print(f"✓ Saved spectral data to: {spectra_filepath}")
         print(f"  - Time-averaged spectra: {len(k_perp)} k-bins")

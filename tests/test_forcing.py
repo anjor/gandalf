@@ -34,21 +34,21 @@ class TestGaussianWhiteNoise:
     - Production ensemble averaging demonstrated in driven_turbulence.py
     """
 
-    def test_input_validation_k_min_k_max(self):
-        """Should raise ValueError if k_min >= k_max."""
+    def test_input_validation_n_min_n_max(self):
+        """Should raise ValueError if n_min >= n_max."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         key = jax.random.PRNGKey(42)
 
-        # k_min > k_max should fail
-        with pytest.raises(ValueError, match="k_min must be < k_max"):
+        # n_min > n_max should fail
+        with pytest.raises(ValueError, match="n_min must be < n_max"):
             gaussian_white_noise_fourier(
-                grid, amplitude=0.1, k_min=5.0, k_max=2.0, dt=0.01, key=key
+                grid, amplitude=0.1, n_min=2, n_max=1, dt=0.01, key=key
             )
 
-        # k_min == k_max should fail
-        with pytest.raises(ValueError, match="k_min must be < k_max"):
+        # n_min == n_max should fail
+        with pytest.raises(ValueError, match="n_min must be < n_max"):
             gaussian_white_noise_fourier(
-                grid, amplitude=0.1, k_min=2.0, k_max=2.0, dt=0.01, key=key
+                grid, amplitude=0.1, n_min=2, n_max=2, dt=0.01, key=key
             )
 
     def test_input_validation_amplitude(self):
@@ -58,12 +58,12 @@ class TestGaussianWhiteNoise:
 
         with pytest.raises(ValueError, match="amplitude must be positive"):
             gaussian_white_noise_fourier(
-                grid, amplitude=0.0, k_min=2.0, k_max=5.0, dt=0.01, key=key
+                grid, amplitude=0.0, n_min=1, n_max=2, dt=0.01, key=key
             )
 
         with pytest.raises(ValueError, match="amplitude must be positive"):
             gaussian_white_noise_fourier(
-                grid, amplitude=-0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+                grid, amplitude=-0.1, n_min=1, n_max=2, dt=0.01, key=key
             )
 
     def test_input_validation_dt(self):
@@ -73,12 +73,12 @@ class TestGaussianWhiteNoise:
 
         with pytest.raises(ValueError, match="dt must be positive"):
             gaussian_white_noise_fourier(
-                grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.0, key=key
+                grid, amplitude=0.1, n_min=1, n_max=2, dt=0.0, key=key
             )
 
         with pytest.raises(ValueError, match="dt must be positive"):
             gaussian_white_noise_fourier(
-                grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=-0.01, key=key
+                grid, amplitude=0.1, n_min=1, n_max=2, dt=-0.01, key=key
             )
 
     def test_noise_shape(self):
@@ -87,7 +87,7 @@ class TestGaussianWhiteNoise:
         key = jax.random.PRNGKey(42)
 
         noise, key = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         expected_shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
@@ -95,14 +95,19 @@ class TestGaussianWhiteNoise:
         assert jnp.iscomplexobj(noise)
 
     def test_spectral_localization(self):
-        """Noise should be concentrated in [k_min, k_max] band."""
+        """Noise should be concentrated in [n_min, n_max] mode number band."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         key = jax.random.PRNGKey(42)
-        k_min, k_max = 2.0, 5.0
+        n_min, n_max = 1, 2
 
         noise, key = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=k_min, k_max=k_max, dt=0.01, key=key
+            grid, amplitude=0.1, n_min=n_min, n_max=n_max, dt=0.01, key=key
         )
+
+        # Convert mode numbers to physical wavenumbers for validation
+        L_min = min(grid.Lx, grid.Ly, grid.Lz)
+        k_min = n_min * 2 * jnp.pi / L_min
+        k_max = n_max * 2 * jnp.pi / L_min
 
         # Compute |k| for each mode with proper broadcasting
         kx_3d = grid.kx[jnp.newaxis, jnp.newaxis, :]
@@ -124,7 +129,7 @@ class TestGaussianWhiteNoise:
         key = jax.random.PRNGKey(42)
 
         noise, key = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         # k=0 mode should be exactly zero
@@ -141,7 +146,7 @@ class TestGaussianWhiteNoise:
         key = jax.random.PRNGKey(42)
 
         noise, key = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         # kx=0 plane (index 0 in rfft format) must have zero imaginary part
@@ -166,7 +171,7 @@ class TestGaussianWhiteNoise:
         key = jax.random.PRNGKey(42)
 
         noise, key = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         # Shape should be correct for rfft (Nx//2+1 in x-direction)
@@ -187,10 +192,10 @@ class TestGaussianWhiteNoise:
         key2 = jax.random.PRNGKey(43)
 
         noise1, _ = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key1
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key1
         )
         noise2, _ = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key2
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key2
         )
 
         # Different seeds → different noise
@@ -202,10 +207,10 @@ class TestGaussianWhiteNoise:
         key = jax.random.PRNGKey(42)
 
         noise1, _ = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
         noise2, _ = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         # Same seed → identical noise
@@ -222,12 +227,12 @@ class TestGaussianWhiteNoise:
         key = jax.random.PRNGKey(42)
 
         noise_weak, key = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         key = jax.random.PRNGKey(42)  # Reset for fair comparison
         noise_strong, key = gaussian_white_noise_fourier(
-            grid, amplitude=1.0, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            grid, amplitude=1.0, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         # Ratio of magnitudes should be ~10x (amplitude ratio)
@@ -246,12 +251,12 @@ class TestGaussianWhiteNoise:
         key = jax.random.PRNGKey(42)
 
         noise_small_dt, key = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.001, key=key
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.001, key=key
         )
 
         key = jax.random.PRNGKey(42)  # Reset
         noise_large_dt, key = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         # Ratio should be ~√10 ≈ 3.16 (√(dt_large/dt_small))
@@ -271,7 +276,7 @@ class TestAlfvenForcing:
         key = jax.random.PRNGKey(42)
 
         state_forced, key = force_alfven_modes(
-            state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         # Compute forcing applied: Δz = z_new - z_old
@@ -292,7 +297,7 @@ class TestAlfvenForcing:
         A_old = (state.z_plus - state.z_minus) / 2.0
 
         state_forced, key = force_alfven_modes(
-            state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         # Compute φ and A∥ after forcing
@@ -314,7 +319,7 @@ class TestAlfvenForcing:
         E_before = energy(state)["total"]
 
         state_forced, key = force_alfven_modes(
-            state, amplitude=0.5, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            state, amplitude=0.5, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         E_after = energy(state_forced)["total"]
@@ -323,15 +328,20 @@ class TestAlfvenForcing:
         assert E_after > E_before
 
     def test_forcing_concentrated_at_k_band(self):
-        """Forcing should be concentrated at specified k band."""
+        """Forcing should be concentrated at specified mode number band."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.0)  # Zero initial
         key = jax.random.PRNGKey(42)
-        k_min, k_max = 3.0, 6.0
+        n_min, n_max = 1, 2
 
         state_forced, key = force_alfven_modes(
-            state, amplitude=1.0, k_min=k_min, k_max=k_max, dt=0.01, key=key
+            state, amplitude=1.0, n_min=n_min, n_max=n_max, dt=0.01, key=key
         )
+
+        # Convert mode numbers to physical wavenumbers for validation
+        L_min = min(grid.Lx, grid.Ly, grid.Lz)
+        k_min = n_min * 2 * jnp.pi / L_min
+        k_max = n_max * 2 * jnp.pi / L_min
 
         # Compute |k| with proper broadcasting
         kx_3d = grid.kx[jnp.newaxis, jnp.newaxis, :]
@@ -359,12 +369,12 @@ class TestAlfvenForcing:
 
         key1 = jax.random.PRNGKey(42)
         state_forced1, _ = force_alfven_modes(
-            state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key1
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key1
         )
 
         key2 = jax.random.PRNGKey(42)  # Same seed
         state_forced2, _ = force_alfven_modes(
-            state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key2
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key2
         )
 
         # Should be identical
@@ -382,7 +392,7 @@ class TestAlfvenForcing:
         g_old = state.g.copy()
 
         state_forced, key = force_alfven_modes(
-            state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         # Hermite moments should be unchanged
@@ -401,7 +411,7 @@ class TestSlowModeForcing:
         B_parallel_magnitude_old = jnp.sum(jnp.abs(state.B_parallel)**2)
 
         state_forced, key = force_slow_modes(
-            state, amplitude=0.5, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            state, amplitude=0.5, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         B_parallel_magnitude_new = jnp.sum(jnp.abs(state_forced.B_parallel)**2)
@@ -419,7 +429,7 @@ class TestSlowModeForcing:
         z_minus_old = state.z_minus.copy()
 
         state_forced, key = force_slow_modes(
-            state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         # Elsasser variables should be unchanged
@@ -435,7 +445,7 @@ class TestSlowModeForcing:
         E_before = energy(state)["total"]
 
         state_forced, key = force_slow_modes(
-            state, amplitude=0.5, k_min=2.0, k_max=5.0, dt=0.01, key=key
+            state, amplitude=0.5, n_min=1, n_max=2, dt=0.01, key=key
         )
 
         E_after = energy(state_forced)["total"]
@@ -455,7 +465,7 @@ class TestEnergyInjection:
         dt = 0.01
 
         state_forced, key = force_alfven_modes(
-            state, amplitude=0.5, k_min=2.0, k_max=5.0, dt=dt, key=key
+            state, amplitude=0.5, n_min=1, n_max=2, dt=dt, key=key
         )
 
         eps_inj = compute_energy_injection_rate(state, state_forced, dt)
@@ -478,14 +488,14 @@ class TestEnergyInjection:
         # Weak forcing
         key1 = jax.random.PRNGKey(42)
         state_forced_weak, _ = force_alfven_modes(
-            state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=dt, key=key1
+            state, amplitude=0.1, n_min=1, n_max=2, dt=dt, key=key1
         )
         eps_weak = compute_energy_injection_rate(state, state_forced_weak, dt)
 
         # Strong forcing (10x amplitude)
         key2 = jax.random.PRNGKey(42)  # Same seed for fair comparison
         state_forced_strong, _ = force_alfven_modes(
-            state, amplitude=1.0, k_min=2.0, k_max=5.0, dt=dt, key=key2
+            state, amplitude=1.0, n_min=1, n_max=2, dt=dt, key=key2
         )
         eps_strong = compute_energy_injection_rate(state, state_forced_strong, dt)
 
@@ -509,7 +519,7 @@ class TestEnergyInjection:
         for _ in range(5):
             state_old = state
             state, key = force_alfven_modes(
-                state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=dt, key=key
+                state, amplitude=0.1, n_min=1, n_max=2, dt=dt, key=key
             )
             eps_inj = compute_energy_injection_rate(state_old, state, dt)
             total_injection += eps_inj * dt
@@ -533,7 +543,7 @@ class TestIntegrationWithTimestepping:
 
         # Apply forcing
         state_forced, key = force_alfven_modes(
-            state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=dt, key=key
+            state, amplitude=0.1, n_min=1, n_max=2, dt=dt, key=key
         )
 
         # Evolve with timestepper
@@ -554,7 +564,7 @@ class TestIntegrationWithTimestepping:
         for i in range(10):
             # Apply forcing
             state, key = force_alfven_modes(
-                state, amplitude=0.1, k_min=2.0, k_max=5.0, dt=dt, key=key
+                state, amplitude=0.1, n_min=1, n_max=2, dt=dt, key=key
             )
 
             # Evolve
@@ -587,7 +597,7 @@ class TestIntegrationWithTimestepping:
         for i in range(50):
             # Force
             state, key = force_alfven_modes(
-                state, amplitude=0.5, k_min=2.0, k_max=4.0, dt=dt, key=key
+                state, amplitude=0.5, n_min=1, n_max=2, dt=dt, key=key
             )
 
             # Evolve
@@ -624,7 +634,7 @@ class TestIntegrationWithTimestepping:
         for i in range(20):
             # Forced evolution
             state_forced, key = force_alfven_modes(
-                state_forced, amplitude=0.3, k_min=2.0, k_max=5.0, dt=dt, key=key
+                state_forced, amplitude=0.3, n_min=1, n_max=2, dt=dt, key=key
             )
             state_forced = gandalf_step(state_forced, dt=dt, eta=eta, v_A=1.0)
 

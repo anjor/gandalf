@@ -39,13 +39,13 @@ def main():
 
     # Run 10 steps with forcing
     for i in range(10):
-        # Apply forcing at large scales (k ~ 2-5)
+        # Apply forcing at large scales (modes n=1-2)
         state_before = state
         state, key = force_alfven_modes(
             state,
             amplitude=0.1,
-            k_min=2.0,
-            k_max=5.0,
+            n_min=1,
+            n_max=2,
             dt=dt,
             key=key
         )

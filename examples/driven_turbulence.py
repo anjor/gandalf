@@ -5,7 +5,7 @@ Driven Turbulence Simulation with Forcing
 **For a minimal forcing example (~50 lines, 2s runtime), see forcing_minimal.py**
 
 This comprehensive example demonstrates:
-1. Gaussian white noise forcing at large scales (k ~ 2-5)
+1. Gaussian white noise forcing at large scales (modes n=1-2)
 2. Energy injection and steady-state energy balance
 3. Perpendicular cascade transferring energy to small scales
 4. Energy spectra showing inertial range scaling
@@ -74,8 +74,8 @@ def main():
 
     # Forcing parameters
     force_amplitude = 0.3   # Forcing strength (ε_inj ~ amplitude²)
-    k_force_min = 2.0       # Minimum forcing wavenumber
-    k_force_max = 5.0       # Maximum forcing wavenumber
+    n_force_min = 1         # Minimum forcing mode number
+    n_force_max = 2         # Maximum forcing mode number
 
     # Initial turbulence (weak)
     alpha = 5.0 / 3.0       # Spectral index
@@ -91,7 +91,7 @@ def main():
     print(f"\nGrid: {Nx} × {Ny} × {Nz}")
     print(f"Domain: [{Lx:.1f}, {Ly:.1f}, {Lz:.1f}]")
     print(f"Physics: v_A={v_A}, η={eta}, β_i={beta_i}, ν={nu}")
-    print(f"Forcing: amplitude={force_amplitude}, k ∈ [{k_force_min}, {k_force_max}]")
+    print(f"Forcing: amplitude={force_amplitude}, modes n ∈ [{n_force_min}, {n_force_max}]")
     print(f"Evolution: {n_steps} steps with CFL={cfl_safety}")
 
     # ==========================================================================
@@ -153,8 +153,8 @@ def main():
         state, key = force_alfven_modes(
             state,
             amplitude=force_amplitude,
-            k_min=k_force_min,
-            k_max=k_force_max,
+            n_min=n_force_min,
+            n_max=n_force_max,
             dt=dt,
             key=key
         )

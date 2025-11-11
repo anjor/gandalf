@@ -646,12 +646,17 @@ force_amplitude = 0.02
   - **Status**: Infrastructure complete, ready for systematic investigation
   - **Next steps**: Run diagnostic suite on 32³, 64³ stable, 64³ unstable, 128³ to identify root cause
 
-### Forcing Mechanisms (Issue #29) ✅ COMPLETE
+### Forcing Mechanisms (Issue #29, #97) ✅ COMPLETE
 - [x] Gaussian white noise forcing (Issue #29) ✅
   - gaussian_white_noise_fourier(): Band-limited stochastic forcing with δ-correlated time statistics
   - force_alfven_modes(): Forces z⁺=z⁻ identically (drives u⊥ only, not B⊥)
   - force_slow_modes(): Independent forcing for δB∥
   - compute_energy_injection_rate(): Energy diagnostics for balance validation
+  - **Mode number API** (Issue #97): Functions accept integer mode numbers `n_min, n_max` instead of physical wavenumbers
+    - Mode numbers are integers (n=1 is fundamental, n=2 is second harmonic, etc.)
+    - Converted internally to k = 2πn/L_min for magnitude-based masking
+    - Eliminates confusion about 2π factors and resolution-independent
+    - Example: `force_alfven_modes(state, amplitude=0.1, n_min=1, n_max=3, dt, key)`
   - **Critical physics**: z⁺=z⁻ forcing drives φ (flow) only, prevents spurious magnetic reconnection
   - **Hermitian symmetry**: Explicit enforcement for rfft format (kx=0 and kx=Nyquist planes must be real)
   - **White noise scaling**: amplitude/√dt for time-independent energy injection
