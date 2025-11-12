@@ -43,6 +43,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from pathlib import Path
+from datetime import datetime
 
 from krmhd import (
     SpectralGrid3D,
@@ -75,6 +76,88 @@ GANDALF_ORIGINAL_MODES = [
     (0, 1, -1),  # k_perp = 1, k_z = -1
     (-1, 1, -1), # k_perp = sqrt(2), k_z = -1
 ]
+
+
+def save_snapshot(snapshot_dir, step, state, k_perp, E_kin_perp, E_mag_perp,
+                  energy_history, n_force_min, n_force_max, Lx):
+    """
+    Save intermediate spectrum snapshot (PNG + CSV).
+
+    Args:
+        snapshot_dir: Directory to save snapshots
+        step: Current step number
+        state: Current KRMHDState
+        k_perp: Perpendicular wavenumber bins
+        E_kin_perp: Kinetic energy spectrum
+        E_mag_perp: Magnetic energy spectrum
+        energy_history: EnergyHistory object with time series
+        n_force_min, n_force_max: Forcing mode range
+        Lx: Domain size (for mode number conversion)
+    """
+    # Convert k⊥ to mode numbers
+    n_perp = k_perp * Lx / (2 * np.pi)
+    time_tau_A = state.time
+
+    # Save CSV files
+    kinetic_csv = snapshot_dir / f"kinetic_t{time_tau_A:.1f}.csv"
+    magnetic_csv = snapshot_dir / f"magnetic_t{time_tau_A:.1f}.csv"
+
+    header = f"Alfvenic Cascade Snapshot - t={time_tau_A:.2f} tau_A, step={step}\nk_perp,E_spectrum,mode_number"
+
+    np.savetxt(kinetic_csv, np.column_stack([k_perp, E_kin_perp, n_perp]),
+               delimiter=',', header=header, comments='')
+    np.savetxt(magnetic_csv, np.column_stack([k_perp, E_mag_perp, n_perp]),
+               delimiter=',', header=header, comments='')
+
+    # Create 3-panel snapshot plot
+    fig = plt.figure(figsize=(15, 5))
+
+    # Panel 1: Energy Evolution (up to current time)
+    ax1 = plt.subplot(131)
+    ax1.set_yscale('log')
+    times = np.array(energy_history.times)
+    energies = np.array(energy_history.E_total)
+    ax1.plot(times, energies, 'k-', linewidth=2)
+    ax1.set_xlabel('Time [τ_A]', fontsize=12)
+    ax1.set_ylabel('Total Energy', fontsize=12)
+    ax1.set_title(f'Energy Evolution (t={time_tau_A:.1f} τ_A)', fontsize=13, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+
+    # Panel 2: Kinetic Spectrum
+    ax2 = plt.subplot(132)
+    ax2.loglog(n_perp, E_kin_perp, 'b-', linewidth=2, label=f't={time_tau_A:.1f} τ_A')
+    # Reference k⊥^(-5/3) line
+    k_ref = np.array([2.0, 10.0])
+    E_ref = k_ref**(-5/3) * E_kin_perp[1] / (n_perp[1]**(-5/3))
+    ax2.loglog(k_ref, E_ref, 'k--', linewidth=1.5, label='n^(-5/3)')
+    # Highlight forcing range
+    ax2.axvspan(n_force_min, n_force_max, alpha=0.2, color='green', label=f'Forcing modes {n_force_min}-{n_force_max}')
+    ax2.set_xlabel('Mode number n', fontsize=12)
+    ax2.set_ylabel('E_kin(n)', fontsize=12)
+    ax2.set_title('Kinetic Energy Spectrum', fontsize=13, fontweight='bold')
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3)
+
+    # Panel 3: Magnetic Spectrum
+    ax3 = plt.subplot(133)
+    ax3.loglog(n_perp, E_mag_perp, 'r-', linewidth=2, label=f't={time_tau_A:.1f} τ_A')
+    # Reference k⊥^(-5/3) line
+    E_ref_mag = k_ref**(-5/3) * E_mag_perp[1] / (n_perp[1]**(-5/3))
+    ax3.loglog(k_ref, E_ref_mag, 'k--', linewidth=1.5, label='n^(-5/3)')
+    # Highlight forcing range
+    ax3.axvspan(n_force_min, n_force_max, alpha=0.2, color='green', label=f'Forcing modes {n_force_min}-{n_force_max}')
+    ax3.set_xlabel('Mode number n', fontsize=12)
+    ax3.set_ylabel('E_mag(n)', fontsize=12)
+    ax3.set_title('Magnetic Energy Spectrum', fontsize=13, fontweight='bold')
+    ax3.legend(fontsize=10)
+    ax3.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    # Save figure
+    snapshot_png = snapshot_dir / f"spectrum_t{time_tau_A:.1f}.png"
+    plt.savefig(snapshot_png, dpi=100, bbox_inches='tight')
+    plt.close(fig)
 
 
 def detect_steady_state(energy_history, window=100, threshold=0.02, n_smooth=None):
@@ -143,11 +226,13 @@ def main():
                         help='Compute diagnostics every N steps (default: 5, lower = more frequent)')
     parser.add_argument('--save-spectra', action='store_true',
                         help='Save spectral data for detailed analysis and custom plotting')
+    parser.add_argument('--snapshot-interval', type=int, default=0,
+                        help='Save spectrum snapshots every N steps during averaging (0=disabled, default)')
     parser.add_argument('--eta', type=float, default=None,
                         help='Hyper-resistivity coefficient (overrides resolution default)')
     parser.add_argument('--force-amplitude', type=float, default=None,
                         help='Forcing amplitude (overrides resolution default)')
-    parser.add_argument('--hyper-r', type=int, default=None, choices=[1, 2, 4, 8],
+    parser.add_argument('--hyper-r', type=int, default=None,
                         help='Hyper-dissipation order (overrides resolution default)')
     parser.add_argument('--hyper-n', type=int, default=None, choices=[1, 2, 4],
                         help='Hyper-collision order (overrides resolution default)')
@@ -415,6 +500,12 @@ def main():
                 spectrum_kinetic_list.append(E_kin_perp)
                 spectrum_magnetic_list.append(E_mag_perp)
 
+                # Save snapshot if enabled and at snapshot interval
+                if snapshot_dir is not None and step % args.snapshot_interval == 0:
+                    save_snapshot(snapshot_dir, step, state, k_perp, E_kin_perp, E_mag_perp,
+                                  history, n_force_min, n_force_max, Lx)
+                    print(f"  📸 Snapshot saved: t={state.time:.1f} τ_A")
+
                 # Periodically check and log steady-state status
                 if step % steady_state_check_interval == 0 and len(energy_values) >= averaging_start_step + steady_state_window:
                     recent_energy = energy_values[averaging_start_step:]
@@ -590,6 +681,15 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
+
+    # Create timestamped snapshot subdirectory if snapshots are enabled
+    snapshot_dir = None
+    if args.snapshot_interval > 0:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        snapshot_dir = output_dir / f"snapshots_{args.resolution}cubed_{timestamp}"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Snapshot directory: {snapshot_dir}")
+        print(f"Snapshots will be saved every {args.snapshot_interval} steps during averaging")
 
     # Convert k⊥ to mode numbers: n = k⊥ L / (2π)
     n_perp = k_perp * Lx / (2 * np.pi)

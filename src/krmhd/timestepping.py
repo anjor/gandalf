@@ -587,10 +587,10 @@ def gandalf_step(
     nu_effective = nu if nu is not None else state.nu
 
     # Input validation for hyper parameters
-    if hyper_r not in [1, 2, 4, 8]:
+    if hyper_r < 1:
         raise ValueError(
-            f"hyper_r must be 1, 2, 4, or 8 (got {hyper_r}). "
-            "Use r=1 for standard dissipation, r=2 for typical turbulence studies."
+            f"hyper_r must be >= 1 (got {hyper_r}). "
+            "Use r=1 for standard dissipation, r>1 for hyper-dissipation."
         )
 
     if hyper_n not in [1, 2, 4]:
