@@ -726,6 +726,71 @@ ax.grid(True, alpha=0.3)
 plt.savefig('my_spectrum.png', dpi=150)
 ```
 
+## Running on Modal Cloud
+
+GANDALF supports running simulations on [Modal](https://modal.com), a serverless cloud platform that provides on-demand CPU and GPU resources. This is ideal for:
+
+- **High-resolution simulations** (256³, 512³+) beyond local hardware capabilities
+- **GPU acceleration** with NVIDIA T4, A10G, or A100 GPUs
+- **Parallel parameter sweeps** with automatic job distribution
+- **Cost-effective scaling** (pay only for compute time used)
+
+### Quick Start with Modal
+
+1. **Install Modal and authenticate:**
+   ```bash
+   pip install modal
+   modal token new
+   ```
+
+2. **Deploy the GANDALF app:**
+   ```bash
+   modal deploy modal_app.py
+   ```
+
+3. **Submit a simulation:**
+   ```bash
+   # CPU instance (64³ resolution, ~5 min, ~$0.10)
+   python scripts/modal_submit.py submit configs/driven_turbulence.yaml
+
+   # GPU instance (256³ resolution, ~30 min, ~$3)
+   python scripts/modal_submit.py submit configs/modal_high_res.yaml --gpu
+   ```
+
+4. **Download results:**
+   ```bash
+   # List available results
+   python scripts/modal_submit.py list
+
+   # Download specific run
+   python scripts/modal_submit.py download driven_turbulence_20240115_120000 ./results
+   ```
+
+### Parameter Sweeps
+
+Run multiple simulations in parallel:
+
+```bash
+# Sweep over resistivity and resolution
+python scripts/modal_submit.py sweep configs/driven_turbulence.yaml \
+    --param physics.eta 0.01 0.02 0.05 0.1 \
+    --param grid.Nx 64 128 \
+    --name eta_resolution_study
+```
+
+This launches 8 simulations in parallel (4 η values × 2 resolutions).
+
+### Cost Estimates
+
+| Resolution | GPU Type | Runtime | Estimated Cost |
+|------------|----------|---------|----------------|
+| 64³        | CPU      | ~5 min  | ~$0.10         |
+| 128³       | T4       | ~5 min  | ~$0.50         |
+| 256³       | T4       | ~30 min | ~$3.00         |
+| 512³       | A100     | ~4 hrs  | ~$40.00        |
+
+For detailed instructions, see [docs/MODAL_GUIDE.md](docs/MODAL_GUIDE.md).
+
 ## Development
 
 ### Running Tests

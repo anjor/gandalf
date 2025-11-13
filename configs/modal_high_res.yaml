@@ -1,0 +1,52 @@
+# KRMHD High-Resolution Configuration for Modal Cloud
+# Optimized for cloud compute with GPU acceleration
+# Expected runtime: ~30-60 min on Modal T4 GPU
+
+name: modal_high_res_turbulence
+description: High-resolution driven turbulence for Modal cloud execution (256^3 grid)
+
+grid:
+  Nx: 256
+  Ny: 256
+  Nz: 128
+  Lx: 6.283185307179586  # 2π
+  Ly: 6.283185307179586
+  Lz: 6.283185307179586
+
+physics:
+  v_A: 1.0
+  eta: 2.0              # Hyper-dissipation coefficient
+  nu: 2.0               # Collision frequency
+  beta_i: 1.0
+  Lambda: 1.0
+  hyper_r: 2            # Hyper-resistivity order (stable for high-res)
+  hyper_n: 2            # Hyper-collision order
+
+initial_condition:
+  type: random_spectrum
+  amplitude: 0.1
+  alpha: 1.667          # k^(-5/3) Kolmogorov spectrum
+  k_min: 1.0
+  k_max: 20.0
+  M: 20                 # Hermite moments
+
+forcing:
+  enabled: true
+  amplitude: 0.05       # Conservative forcing amplitude
+  k_min: 2.0           # Force at large scales
+  k_max: 5.0
+  seed: 42
+
+time_integration:
+  n_steps: 1000         # Longer evolution for high-res
+  cfl_safety: 0.3
+  save_interval: 20     # Save every 20 steps
+  checkpoint_interval: 100  # Checkpoint every 100 steps
+
+io:
+  output_dir: output/modal_high_res  # Will be overridden by Modal
+  save_spectra: true
+  save_energy_history: true
+  save_fields: false
+  save_final_state: true
+  overwrite: true
