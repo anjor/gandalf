@@ -301,6 +301,8 @@ modal volume delete gandalf-results
 
 ## Cost Estimation
 
+> **Pricing as of January 2025**. Costs may vary based on Modal's current pricing and regional availability. Always check [modal.com/pricing](https://modal.com/pricing) for up-to-date rates.
+
 ### CPU Instances (8 cores, 32 GB RAM)
 
 | Resolution | Steps | Runtime | Estimated Cost |
@@ -317,15 +319,82 @@ modal volume delete gandalf-results
 | 256³       | 1000  | ~30 min | ~$3.00         |
 | 512³       | 2000  | ~4 hrs  | ~$40.00        |
 
-*Costs are approximate and depend on Modal's current pricing. Check https://modal.com/pricing for details.*
+*Costs assume on-demand pricing. Modal also offers spot instances (up to 90% cheaper) but with potential interruptions.*
 
 ### Optimization Tips
 
 1. **Test locally first**: Debug with small configs before submitting to Modal
-2. **Use checkpoints**: Enable checkpointing for long runs (>1 hour) to resume if interrupted
+2. **Use checkpoints**: Enable checkpointing for long runs (>1 hour) to resume if interrupted (see Checkpointing section below)
 3. **Batch similar jobs**: Parameter sweeps share startup overhead
 4. **Monitor costs**: Use `modal app list` to track spending
-5. **Delete old results**: Modal charges for persistent storage
+5. **Delete old results**: Modal charges for persistent storage ($0.10/GB-month)
+6. **Consider spot instances**: For non-urgent jobs, spot pricing can reduce costs significantly
+
+## Checkpointing and Disaster Recovery
+
+For long-running simulations (>1 hour), checkpointing is essential to protect against:
+- Job timeouts (default: 4 hours)
+- Hardware failures or preemption
+- Network interruptions
+- Budget overruns requiring manual cancellation
+
+### Enabling Checkpoints
+
+Add to your YAML configuration:
+
+```yaml
+time_integration:
+  n_steps: 10000
+  checkpoint_interval: 500  # Save checkpoint every 500 steps
+  save_interval: 50          # Save diagnostics every 50 steps
+```
+
+This will create checkpoints at:
+- `/results/<output_dir>/checkpoint_step000500.h5`
+- `/results/<output_dir>/checkpoint_step001000.h5`
+- etc.
+
+### Resuming from Checkpoint
+
+If a simulation is interrupted:
+
+1. **Download the latest checkpoint**:
+   ```bash
+   # Find the latest checkpoint
+   modal volume ls gandalf-results/<your_run_dir>
+
+   # Download it
+   modal volume get gandalf-results/<your_run_dir>/checkpoint_step002000.h5 ./checkpoint.h5
+   ```
+
+2. **Create a resume configuration**:
+   ```yaml
+   # resume_config.yaml
+   name: resumed_simulation
+   initial_condition:
+     type: checkpoint  # Load from checkpoint instead of fresh initialization
+     checkpoint_path: ./checkpoint.h5
+
+   time_integration:
+     n_steps: 8000  # Continue for remaining 8000 steps (10000 - 2000)
+     # ... same parameters as original
+   ```
+
+3. **Submit resume job**:
+   ```bash
+   python scripts/modal_submit.py submit resume_config.yaml --gpu
+   ```
+
+### Best Practices
+
+- **Checkpoint frequency**: Balance between recovery time and I/O overhead
+  - High-resolution (256³+): Every 250-500 steps (~15-30 min of compute)
+  - Low-resolution (64³): Every 1000-2000 steps
+- **Monitor job progress**: Check logs periodically for long runs
+- **Set realistic timeouts**: Estimate 2× expected runtime as safety margin
+- **Test checkpoint/resume**: Verify it works on a short test run before multi-hour production runs
+
+**Note**: Checkpoint functionality requires GANDALF v0.3.0+ with `type: checkpoint` support (planned feature). Current version requires manual script modification to load checkpoints via `load_checkpoint()` from `krmhd.io`.
 
 ## Troubleshooting
 

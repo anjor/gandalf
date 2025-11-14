@@ -345,6 +345,9 @@ Examples:
   # Submit with GPU
   python scripts/modal_submit.py submit configs/driven_turbulence.yaml --gpu
 
+  # Use custom volume
+  python scripts/modal_submit.py submit configs/driven_turbulence.yaml --volume-name my-results
+
   # Run parameter sweep
   python scripts/modal_submit.py sweep configs/driven_turbulence.yaml \\
       --param physics.eta 0.01 0.02 0.05 \\
@@ -356,6 +359,13 @@ Examples:
   # Download results
   python scripts/modal_submit.py download driven_turbulence_20240115_120000 ./results
         """
+    )
+
+    # Global options
+    parser.add_argument(
+        '--volume-name',
+        help='Modal volume name for results (default: gandalf-results)',
+        default=None
     )
 
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
@@ -400,6 +410,12 @@ Examples:
     if not args.command:
         parser.print_help()
         sys.exit(0)
+
+    # Set volume name in environment if provided
+    if args.volume_name:
+        import os
+        os.environ['MODAL_VOLUME_NAME'] = args.volume_name
+        print(f"Using Modal volume: {args.volume_name}")
 
     # Check Modal installation
     check_modal_installed()
