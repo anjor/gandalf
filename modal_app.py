@@ -9,7 +9,7 @@ GANDALF simulations. It supports:
 - Configurable compute resources (CPU, GPU, memory)
 - YAML configuration upload
 - Automatic result download to Modal volumes
-- Parallel parameter sweeps
+- Parallel parameter sweeps with fault tolerance
 
 Usage:
     # Deploy the app
@@ -34,12 +34,30 @@ Setup:
     4. Deploy: modal deploy modal_app.py
 """
 
-import io
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
 
 import modal
+
+# =============================================================================
+# Configuration Constants
+# =============================================================================
+
+# Timeout values in seconds
+TIMEOUT_SINGLE_SIMULATION = int(os.environ.get("MODAL_TIMEOUT_SINGLE", 3600 * 4))  # 4 hours
+TIMEOUT_PARAMETER_SWEEP = int(os.environ.get("MODAL_TIMEOUT_SWEEP", 3600 * 8))  # 8 hours
+
+# Resource defaults
+DEFAULT_CPU_CORES = 8.0
+DEFAULT_CPU_MEMORY_MB = 32768  # 32 GB
+DEFAULT_GPU_CORES = 4.0
+DEFAULT_GPU_MEMORY_MB = 16384  # 16 GB
+DEFAULT_GPU_TYPE = "T4"
+
+# Volume name (can be overridden via environment variable)
+VOLUME_NAME = os.environ.get("MODAL_VOLUME_NAME", "gandalf-results")
 
 # =============================================================================
 # Modal Configuration
@@ -50,7 +68,7 @@ app = modal.App("gandalf-krmhd")
 
 # Create a persistent volume for storing results
 volume = modal.Volume.from_name(
-    "gandalf-results",
+    VOLUME_NAME,
     create_if_missing=True
 )
 
@@ -68,6 +86,7 @@ image = (
     )
     # Copy the GANDALF source code into the image
     .copy_local_dir("src", "/root/gandalf/src")
+    .copy_local_dir("scripts", "/root/gandalf/scripts")  # Copy scripts directory
     .copy_local_file("pyproject.toml", "/root/gandalf/pyproject.toml")
     .workdir("/root/gandalf")
     .pip_install("-e .")  # Install GANDALF in editable mode
@@ -86,10 +105,289 @@ gpu_image = (
         "scipy>=1.10.0",
     )
     .copy_local_dir("src", "/root/gandalf/src")
+    .copy_local_dir("scripts", "/root/gandalf/scripts")
     .copy_local_file("pyproject.toml", "/root/gandalf/pyproject.toml")
     .workdir("/root/gandalf")
     .pip_install("-e .")
 )
+
+
+# =============================================================================
+# Simulation Runner (extracted from scripts/run_simulation.py)
+# =============================================================================
+
+def _run_gandalf_simulation(config, verbose: bool = True):
+    """
+    Internal function to run GANDALF simulation (Modal-compatible).
+
+    This is a simplified version of scripts/run_simulation.py that avoids
+    import path hacks and works within Modal's containerized environment.
+
+    Args:
+        config: SimulationConfig instance
+        verbose: Print progress information
+
+    Returns:
+        tuple: (final_state, energy_history, grid)
+
+    Raises:
+        Exception: If simulation fails
+    """
+    import jax.random as jr
+    import numpy as np
+    from krmhd.config import SimulationConfig
+    from krmhd import (
+        gandalf_step,
+        compute_cfl_timestep,
+        energy as compute_energy,
+        force_alfven_modes,
+        KRMHDState,
+        SpectralGrid3D,
+    )
+    from krmhd.diagnostics import (
+        EnergyHistory,
+        energy_spectrum_1d,
+        energy_spectrum_perpendicular,
+        energy_spectrum_parallel,
+        plot_energy_history,
+        plot_energy_spectrum,
+    )
+    from krmhd.io import save_checkpoint, save_timeseries
+
+    if verbose:
+        print(config.summary())
+
+    # Initialize
+    if verbose:
+        print("\nInitializing...")
+
+    grid = config.create_grid()
+    state = config.create_initial_state(grid)
+
+    if verbose:
+        print(f"✓ Created {config.grid.Nx}×{config.grid.Ny}×{config.grid.Nz} grid")
+        print(f"✓ Initialized {config.initial_condition.type} state")
+
+    # Initialize forcing if enabled
+    if config.forcing.enabled:
+        key = jr.PRNGKey(config.forcing.seed or 42)
+        if verbose:
+            print(f"✓ Forcing enabled: k ∈ [{config.forcing.k_min}, {config.forcing.k_max}]")
+    else:
+        key = None
+
+    # Initialize diagnostics
+    energy_history = EnergyHistory()
+    energy_history.append(state)
+    E_init = compute_energy(state)
+
+    if verbose:
+        print(f"✓ Initial energy: {E_init['total']:.6e}")
+
+    # Prepare output directory
+    output_dir = config.get_output_dir()
+    if verbose:
+        print(f"✓ Output directory: {output_dir}")
+
+    # Save initial configuration
+    config.to_yaml(output_dir / "config.yaml")
+
+    # Time Evolution
+    if verbose:
+        print("\n" + "-" * 70)
+        print("Time evolution:")
+        print("-" * 70)
+
+    # Determine timestep
+    if config.time_integration.dt_fixed is not None:
+        dt = config.time_integration.dt_fixed
+        if verbose:
+            print(f"Using fixed timestep: dt = {dt:.6e}")
+    else:
+        dt = compute_cfl_timestep(
+            state,
+            v_A=config.physics.v_A,
+            cfl_safety=config.time_integration.cfl_safety
+        )
+        if verbose:
+            print(f"CFL timestep: dt = {dt:.6e}")
+
+    # Main loop
+    t = 0.0
+    start_time = time.time()
+
+    for step in range(config.time_integration.n_steps):
+        # Apply forcing if enabled
+        if config.forcing.enabled:
+            state, key = force_alfven_modes(
+                state,
+                amplitude=config.forcing.amplitude,
+                k_min=config.forcing.k_min,
+                k_max=config.forcing.k_max,
+                dt=dt,
+                key=key
+            )
+
+        # Time step
+        state = gandalf_step(
+            state,
+            dt=dt,
+            eta=config.physics.eta,
+            v_A=config.physics.v_A,
+            nu=config.physics.nu,
+            hyper_r=config.physics.hyper_r,
+            hyper_n=config.physics.hyper_n
+        )
+        t += dt
+
+        # Save diagnostics
+        if (step + 1) % config.time_integration.save_interval == 0:
+            energy_history.append(state)
+            E = compute_energy(state)
+
+            if verbose:
+                mag_frac = E['magnetic'] / E['total'] if E['total'] > 0 else 0
+                print(
+                    f"  Step {step+1:5d}/{config.time_integration.n_steps}: "
+                    f"t = {t:.4f}, E = {E['total']:.6e}, "
+                    f"E_mag/E_tot = {mag_frac:.3f}"
+                )
+
+        # Save checkpoint if enabled
+        if (config.time_integration.checkpoint_interval is not None and
+            (step + 1) % config.time_integration.checkpoint_interval == 0):
+            checkpoint_file = output_dir / f"checkpoint_step{step+1:06d}.h5"
+            save_checkpoint(
+                state,
+                str(checkpoint_file),
+                metadata={
+                    'step': step + 1,
+                    'time': t,
+                    'config_name': config.name,
+                    'eta': config.physics.eta,
+                    'nu': config.physics.nu,
+                }
+            )
+            if verbose:
+                print(f"    ✓ Saved checkpoint: {checkpoint_file.name}")
+
+    elapsed = time.time() - start_time
+
+    if verbose:
+        print("-" * 70)
+        print(f"✓ Evolution complete: {elapsed:.1f}s")
+        print(f"  Performance: {config.time_integration.n_steps / elapsed:.1f} steps/s")
+
+    # Final Diagnostics and Output
+    if verbose:
+        print("\n" + "-" * 70)
+        print("Computing diagnostics...")
+
+    # Final energy
+    E_final = compute_energy(state)
+    if verbose:
+        print(f"✓ Final energy: {E_final['total']:.6e}")
+        print(f"  Energy change: {(E_final['total'] - E_init['total']) / E_init['total'] * 100:.2f}%")
+
+    # Compute spectra
+    if config.io.save_spectra:
+        k_bins, E_k = energy_spectrum_1d(state)
+        k_perp_bins, E_kperp = energy_spectrum_perpendicular(state)
+        k_par_bins, E_kpar = energy_spectrum_parallel(state)
+
+        spectra = {
+            'k_1d': k_bins,
+            'E_1d': E_k,
+            'k_perp': k_perp_bins,
+            'E_perp': E_kperp,
+            'k_par': k_par_bins,
+            'E_par': E_kpar,
+        }
+
+        if verbose:
+            print(f"✓ Computed energy spectra")
+    else:
+        spectra = {}
+
+    # Save outputs
+    if config.io.save_energy_history:
+        save_timeseries(
+            energy_history,
+            str(output_dir / "energy_history.h5"),
+            metadata={
+                'config_name': config.name,
+                'n_steps': config.time_integration.n_steps,
+                'save_interval': config.time_integration.save_interval,
+            },
+            overwrite=config.io.overwrite
+        )
+        if verbose:
+            print(f"✓ Saved energy history (HDF5)")
+
+    if config.io.save_spectra:
+        np.savez(
+            output_dir / "spectra.npz",
+            **spectra
+        )
+        if verbose:
+            print(f"✓ Saved energy spectra")
+
+    if config.io.save_final_state:
+        save_checkpoint(
+            state,
+            str(output_dir / "final_state.h5"),
+            metadata={
+                'config_name': config.name,
+                'description': 'Final simulation state',
+                'n_steps': config.time_integration.n_steps,
+                'total_time': state.time,
+            },
+            overwrite=config.io.overwrite
+        )
+        if verbose:
+            print(f"✓ Saved final state (HDF5 checkpoint)")
+
+    # Create plots
+    if config.io.save_spectra or config.io.save_energy_history:
+        if verbose:
+            print("\nGenerating plots...")
+
+        if config.io.save_energy_history:
+            plot_energy_history(
+                energy_history,
+                filename=str(output_dir / "energy_history.png"),
+                show=False
+            )
+            if verbose:
+                print(f"✓ Saved energy_history.png")
+
+        if config.io.save_spectra:
+            plot_energy_spectrum(
+                spectra['k_1d'],
+                spectra['E_1d'],
+                spectrum_type='1D',
+                filename=str(output_dir / "spectrum_1d.png"),
+                show=False
+            )
+
+            plot_energy_spectrum(
+                spectra['k_perp'],
+                spectra['E_perp'],
+                spectrum_type='Perpendicular',
+                filename=str(output_dir / "spectrum_perp.png"),
+                show=False
+            )
+
+            if verbose:
+                print(f"✓ Saved spectrum plots")
+
+    if verbose:
+        print("\n" + "=" * 70)
+        print("Simulation complete!")
+        print(f"Results saved to: {output_dir}")
+        print("=" * 70)
+
+    return state, energy_history, grid
 
 
 # =============================================================================
@@ -99,9 +397,9 @@ gpu_image = (
 @app.function(
     image=image,
     volumes={"/results": volume},
-    timeout=3600 * 4,  # 4 hour timeout
-    cpu=8.0,  # 8 CPU cores
-    memory=32768,  # 32 GB RAM
+    timeout=TIMEOUT_SINGLE_SIMULATION,
+    cpu=DEFAULT_CPU_CORES,
+    memory=DEFAULT_CPU_MEMORY_MB,
 )
 def run_simulation_remote(
     config_yaml: str,
@@ -119,84 +417,101 @@ def run_simulation_remote(
         verbose: Print progress information
 
     Returns:
-        Dictionary with simulation results and metadata
+        Dictionary with simulation results and metadata on success,
+        or error information on failure
     """
-    import tempfile
     import yaml
-    from pathlib import Path
-    import numpy as np
-
+    import traceback
     from krmhd.config import SimulationConfig
-    from krmhd.io import save_checkpoint, save_timeseries
-
-    # Import the run_simulation function from scripts
-    import sys
-    sys.path.insert(0, '/root/gandalf')
-    from scripts.run_simulation import run_simulation
-
-    # Parse configuration
-    config_dict = yaml.safe_load(config_yaml)
-    config = SimulationConfig(**config_dict)
-
-    # Override output directory to use Modal volume
-    if output_subdir:
-        output_path = f"/results/{output_subdir}"
-    else:
-        # Use timestamp-based directory
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        output_path = f"/results/{config.name}_{timestamp}"
-
-    # Update config with Modal output path
-    config = config.model_copy(
-        update={'io': config.io.model_copy(update={'output_dir': output_path, 'overwrite': True})}
-    )
-
-    if verbose:
-        print(f"\n{'='*70}")
-        print(f"Running on Modal Cloud")
-        print(f"Output directory: {output_path}")
-        print(f"{'='*70}\n")
-
-    # Run simulation
-    start_time = time.time()
-    state, energy_history, grid = run_simulation(config, verbose=verbose)
-    elapsed = time.time() - start_time
-
-    # Commit volume changes
-    volume.commit()
-
-    if verbose:
-        print(f"\n{'='*70}")
-        print(f"Simulation complete!")
-        print(f"Total time: {elapsed:.1f}s")
-        print(f"Results saved to: {output_path}")
-        print(f"{'='*70}\n")
-
-    # Return metadata
     from krmhd import energy as compute_energy
-    final_energy = compute_energy(state)
 
-    return {
-        'status': 'success',
-        'output_dir': output_path,
-        'elapsed_time': elapsed,
-        'config_name': config.name,
-        'resolution': (config.grid.Nx, config.grid.Ny, config.grid.Nz),
-        'n_steps': config.time_integration.n_steps,
-        'final_time': float(state.time),
-        'final_energy_total': float(final_energy['total']),
-        'final_energy_magnetic': float(final_energy['magnetic']),
-        'final_energy_kinetic': float(final_energy['kinetic']),
-    }
+    try:
+        # Parse configuration
+        config_dict = yaml.safe_load(config_yaml)
+        config = SimulationConfig(**config_dict)
+
+        # Override output directory to use Modal volume
+        if output_subdir:
+            output_path = f"/results/{output_subdir}"
+        else:
+            # Use timestamp-based directory
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            output_path = f"/results/{config.name}_{timestamp}"
+
+        # Update config with Modal output path
+        config = config.model_copy(
+            update={'io': config.io.model_copy(update={'output_dir': output_path, 'overwrite': True})}
+        )
+
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"Running on Modal Cloud")
+            print(f"Output directory: {output_path}")
+            print(f"{'='*70}\n")
+
+        # Run simulation
+        start_time = time.time()
+        state, energy_history, grid = _run_gandalf_simulation(config, verbose=verbose)
+        elapsed = time.time() - start_time
+
+        # Commit volume changes
+        volume.commit()
+
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"Simulation complete!")
+            print(f"Total time: {elapsed:.1f}s")
+            print(f"Results saved to: {output_path}")
+            print(f"{'='*70}\n")
+
+        # Return metadata
+        final_energy = compute_energy(state)
+
+        return {
+            'status': 'success',
+            'output_dir': output_path,
+            'elapsed_time': elapsed,
+            'config_name': config.name,
+            'resolution': (config.grid.Nx, config.grid.Ny, config.grid.Nz),
+            'n_steps': config.time_integration.n_steps,
+            'final_time': float(state.time),
+            'final_energy_total': float(final_energy['total']),
+            'final_energy_magnetic': float(final_energy['magnetic']),
+            'final_energy_kinetic': float(final_energy['kinetic']),
+        }
+
+    except Exception as e:
+        # Handle errors gracefully and return diagnostics
+        error_msg = str(e)
+        error_trace = traceback.format_exc()
+
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"ERROR: Simulation failed!")
+            print(f"{'='*70}")
+            print(error_trace)
+
+        # Try to commit any partial results
+        try:
+            volume.commit()
+        except Exception:
+            pass  # Ignore volume commit errors
+
+        return {
+            'status': 'failed',
+            'error': error_msg,
+            'traceback': error_trace,
+            'output_dir': output_subdir or 'unknown',
+        }
 
 
 @app.function(
     image=gpu_image,
     volumes={"/results": volume},
-    timeout=3600 * 4,  # 4 hour timeout
-    gpu="T4",  # NVIDIA T4 GPU (can use "A10G", "A100", etc.)
-    cpu=4.0,
-    memory=16384,  # 16 GB RAM
+    timeout=TIMEOUT_SINGLE_SIMULATION,
+    gpu=DEFAULT_GPU_TYPE,
+    cpu=DEFAULT_GPU_CORES,
+    memory=DEFAULT_GPU_MEMORY_MB,
 )
 def run_simulation_gpu(
     config_yaml: str,
@@ -214,82 +529,100 @@ def run_simulation_gpu(
         verbose: Print progress information
 
     Returns:
-        Dictionary with simulation results and metadata
+        Dictionary with simulation results and metadata on success,
+        or error information on failure
     """
-    import tempfile
     import yaml
-    from pathlib import Path
-    import numpy as np
+    import traceback
     import jax
-
-    # Verify GPU is available
-    if verbose:
-        print(f"\nJAX devices: {jax.devices()}")
-        print(f"Default backend: {jax.default_backend()}\n")
-
     from krmhd.config import SimulationConfig
-    from krmhd.io import save_checkpoint, save_timeseries
-
-    # Import the run_simulation function from scripts
-    import sys
-    sys.path.insert(0, '/root/gandalf')
-    from scripts.run_simulation import run_simulation
-
-    # Parse configuration
-    config_dict = yaml.safe_load(config_yaml)
-    config = SimulationConfig(**config_dict)
-
-    # Override output directory to use Modal volume
-    if output_subdir:
-        output_path = f"/results/{output_subdir}"
-    else:
-        # Use timestamp-based directory
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        output_path = f"/results/{config.name}_{timestamp}"
-
-    # Update config with Modal output path
-    config = config.model_copy(
-        update={'io': config.io.model_copy(update={'output_dir': output_path, 'overwrite': True})}
-    )
-
-    if verbose:
-        print(f"\n{'='*70}")
-        print(f"Running on Modal Cloud with GPU")
-        print(f"Output directory: {output_path}")
-        print(f"{'='*70}\n")
-
-    # Run simulation
-    start_time = time.time()
-    state, energy_history, grid = run_simulation(config, verbose=verbose)
-    elapsed = time.time() - start_time
-
-    # Commit volume changes
-    volume.commit()
-
-    if verbose:
-        print(f"\n{'='*70}")
-        print(f"Simulation complete!")
-        print(f"Total time: {elapsed:.1f}s")
-        print(f"Results saved to: {output_path}")
-        print(f"{'='*70}\n")
-
-    # Return metadata
     from krmhd import energy as compute_energy
-    final_energy = compute_energy(state)
 
-    return {
-        'status': 'success',
-        'output_dir': output_path,
-        'elapsed_time': elapsed,
-        'config_name': config.name,
-        'resolution': (config.grid.Nx, config.grid.Ny, config.grid.Nz),
-        'n_steps': config.time_integration.n_steps,
-        'final_time': float(state.time),
-        'final_energy_total': float(final_energy['total']),
-        'final_energy_magnetic': float(final_energy['magnetic']),
-        'final_energy_kinetic': float(final_energy['kinetic']),
-        'backend': 'gpu',
-    }
+    try:
+        # Verify GPU is available
+        if verbose:
+            print(f"\nJAX devices: {jax.devices()}")
+            print(f"Default backend: {jax.default_backend()}\n")
+
+        # Parse configuration
+        config_dict = yaml.safe_load(config_yaml)
+        config = SimulationConfig(**config_dict)
+
+        # Override output directory to use Modal volume
+        if output_subdir:
+            output_path = f"/results/{output_subdir}"
+        else:
+            # Use timestamp-based directory
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            output_path = f"/results/{config.name}_{timestamp}"
+
+        # Update config with Modal output path
+        config = config.model_copy(
+            update={'io': config.io.model_copy(update={'output_dir': output_path, 'overwrite': True})}
+        )
+
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"Running on Modal Cloud with GPU")
+            print(f"Output directory: {output_path}")
+            print(f"{'='*70}\n")
+
+        # Run simulation
+        start_time = time.time()
+        state, energy_history, grid = _run_gandalf_simulation(config, verbose=verbose)
+        elapsed = time.time() - start_time
+
+        # Commit volume changes
+        volume.commit()
+
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"Simulation complete!")
+            print(f"Total time: {elapsed:.1f}s")
+            print(f"Results saved to: {output_path}")
+            print(f"{'='*70}\n")
+
+        # Return metadata
+        final_energy = compute_energy(state)
+
+        return {
+            'status': 'success',
+            'output_dir': output_path,
+            'elapsed_time': elapsed,
+            'config_name': config.name,
+            'resolution': (config.grid.Nx, config.grid.Ny, config.grid.Nz),
+            'n_steps': config.time_integration.n_steps,
+            'final_time': float(state.time),
+            'final_energy_total': float(final_energy['total']),
+            'final_energy_magnetic': float(final_energy['magnetic']),
+            'final_energy_kinetic': float(final_energy['kinetic']),
+            'backend': 'gpu',
+        }
+
+    except Exception as e:
+        # Handle errors gracefully and return diagnostics
+        error_msg = str(e)
+        error_trace = traceback.format_exc()
+
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"ERROR: Simulation failed!")
+            print(f"{'='*70}")
+            print(error_trace)
+
+        # Try to commit any partial results
+        try:
+            volume.commit()
+        except Exception:
+            pass  # Ignore volume commit errors
+
+        return {
+            'status': 'failed',
+            'error': error_msg,
+            'traceback': error_trace,
+            'output_dir': output_subdir or 'unknown',
+            'backend': 'gpu',
+        }
 
 
 # =============================================================================
@@ -299,16 +632,16 @@ def run_simulation_gpu(
 @app.function(
     image=image,
     volumes={"/results": volume},
-    timeout=3600 * 8,  # 8 hour timeout for sweeps
+    timeout=TIMEOUT_PARAMETER_SWEEP,
 )
 def run_parameter_sweep(
     base_config_yaml: str,
     parameters: dict[str, list],
     sweep_name: Optional[str] = None,
     use_gpu: bool = False,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """
-    Run a parameter sweep in parallel on Modal.
+    Run a parameter sweep in parallel on Modal with fault tolerance.
 
     Args:
         base_config_yaml: Base YAML configuration as string
@@ -318,10 +651,11 @@ def run_parameter_sweep(
         use_gpu: Whether to use GPU instances for each run
 
     Returns:
-        List of result dictionaries from each simulation
+        Dictionary with sweep metadata, successful results, and failed jobs
     """
     import yaml
     import itertools
+    import json
 
     # Generate all parameter combinations
     param_names = list(parameters.keys())
@@ -337,7 +671,8 @@ def run_parameter_sweep(
     sweep_dir = sweep_name or f"sweep_{timestamp}"
 
     # Submit all jobs in parallel
-    results = []
+    futures = []
+    job_metadata = []
     func = run_simulation_gpu if use_gpu else run_simulation_remote
 
     for i, combo in enumerate(combinations):
@@ -360,32 +695,72 @@ def run_parameter_sweep(
         output_subdir = f"{sweep_dir}/run_{i:04d}_{param_str}"
 
         # Submit job (Modal will parallelize automatically)
-        result = func.remote(updated_yaml, output_subdir=output_subdir, verbose=False)
-        results.append(result)
+        future = func.spawn(updated_yaml, output_subdir=output_subdir, verbose=False)
+        futures.append(future)
+        job_metadata.append({
+            'job_id': i,
+            'parameters': dict(zip(param_names, combo)),
+            'output_subdir': output_subdir,
+        })
 
     # Wait for all jobs to complete and collect results
-    completed_results = [r.get() for r in results]
+    print(f"Waiting for {len(futures)} jobs to complete...")
+
+    successful_results = []
+    failed_jobs = []
+
+    for i, (future, metadata) in enumerate(zip(futures, job_metadata)):
+        try:
+            result = future.get()
+
+            if result['status'] == 'success':
+                successful_results.append({
+                    **result,
+                    'job_metadata': metadata,
+                })
+                print(f"✓ Job {i+1}/{len(futures)} completed successfully")
+            else:
+                failed_jobs.append({
+                    **result,
+                    'job_metadata': metadata,
+                })
+                print(f"✗ Job {i+1}/{len(futures)} failed: {result.get('error', 'Unknown error')}")
+
+        except Exception as e:
+            # Handle catastrophic job failures (e.g., timeout, OOM)
+            failed_jobs.append({
+                'status': 'failed',
+                'error': str(e),
+                'job_metadata': metadata,
+            })
+            print(f"✗ Job {i+1}/{len(futures)} crashed: {str(e)}")
 
     # Save sweep metadata
-    import json
-    metadata = {
+    sweep_metadata = {
         'sweep_name': sweep_dir,
         'timestamp': timestamp,
-        'n_runs': len(combinations),
+        'n_runs_total': len(combinations),
+        'n_runs_successful': len(successful_results),
+        'n_runs_failed': len(failed_jobs),
         'parameters': {k: list(v) for k, v in parameters.items()},
         'use_gpu': use_gpu,
-        'results': completed_results,
+        'successful_results': successful_results,
+        'failed_jobs': failed_jobs,
     }
 
     metadata_path = Path(f"/results/{sweep_dir}/sweep_metadata.json")
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
+        json.dump(sweep_metadata, f, indent=2)
 
     volume.commit()
 
-    print(f"\nSweep complete! Results saved to /results/{sweep_dir}")
-    return completed_results
+    print(f"\nSweep complete!")
+    print(f"  Successful: {len(successful_results)}/{len(combinations)}")
+    print(f"  Failed: {len(failed_jobs)}/{len(combinations)}")
+    print(f"  Results saved to /results/{sweep_dir}")
+
+    return sweep_metadata
 
 
 # =============================================================================
@@ -420,7 +795,6 @@ def download_results(result_dir: str, local_path: str) -> None:
         result_dir: Directory name within /results to download
         local_path: Local path to save results
     """
-    import shutil
     from pathlib import Path
 
     source = Path(f"/results/{result_dir}")
@@ -430,7 +804,7 @@ def download_results(result_dir: str, local_path: str) -> None:
     # This will be executed on Modal, so we need to return the data
     # In practice, you'd use modal.CloudBucketMount or download via CLI
     print(f"To download results, use:")
-    print(f"  modal volume get gandalf-results {result_dir} {local_path}")
+    print(f"  modal volume get {VOLUME_NAME} {result_dir} {local_path}")
 
 
 # =============================================================================
@@ -469,15 +843,24 @@ def main(
     result = func.remote(config_yaml, output_subdir=output_subdir, verbose=True)
 
     print("\n" + "="*70)
-    print("Simulation complete!")
-    print("="*70)
-    print(f"Status: {result['status']}")
-    print(f"Output directory: {result['output_dir']}")
-    print(f"Elapsed time: {result['elapsed_time']:.1f}s")
-    print(f"Final time: {result['final_time']:.4f}")
-    print(f"Final energy: {result['final_energy_total']:.6e}")
-    print("\nTo download results:")
-    print(f"  modal volume get gandalf-results {result['output_dir'].replace('/results/', '')} ./local_results")
+
+    if result['status'] == 'success':
+        print("Simulation complete!")
+        print("="*70)
+        print(f"Status: {result['status']}")
+        print(f"Output directory: {result['output_dir']}")
+        print(f"Elapsed time: {result['elapsed_time']:.1f}s")
+        print(f"Final time: {result['final_time']:.4f}")
+        print(f"Final energy: {result['final_energy_total']:.6e}")
+        print("\nTo download results:")
+        print(f"  modal volume get {VOLUME_NAME} {result['output_dir'].replace('/results/', '')} ./local_results")
+    else:
+        print("Simulation FAILED!")
+        print("="*70)
+        print(f"Error: {result['error']}")
+        print("\nTraceback:")
+        print(result['traceback'])
+
     print("="*70)
 
 

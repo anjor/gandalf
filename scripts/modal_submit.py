@@ -10,6 +10,7 @@ Features:
 - Run parameter sweeps in parallel
 - List and download results from Modal volumes
 - Monitor running jobs
+- Config validation before submission
 
 Usage:
     # Submit a single simulation
@@ -37,12 +38,18 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Any
 
 
-def check_modal_installed():
-    """Check if Modal is installed and authenticated."""
+def check_modal_installed() -> None:
+    """
+    Check if Modal is installed and authenticated.
+
+    Raises:
+        SystemExit: If Modal is not installed or not authenticated
+    """
     try:
         result = subprocess.run(
             ["modal", "token", "list"],
@@ -60,11 +67,49 @@ def check_modal_installed():
         sys.exit(1)
 
 
+def validate_config(config_path: Path) -> bool:
+    """
+    Validate YAML configuration before submitting to Modal.
+
+    This prevents costly cloud execution failures due to configuration errors.
+
+    Args:
+        config_path: Path to YAML configuration file
+
+    Returns:
+        True if config is valid, False otherwise
+    """
+    try:
+        import yaml
+        from krmhd.config import SimulationConfig
+
+        with open(config_path, 'r') as f:
+            config_dict = yaml.safe_load(f)
+
+        # Pydantic will validate all fields
+        config = SimulationConfig(**config_dict)
+
+        print(f"✓ Config validation passed")
+        print(f"  Resolution: {config.grid.Nx}×{config.grid.Ny}×{config.grid.Nz}")
+        print(f"  Steps: {config.time_integration.n_steps}")
+        print(f"  Hyper-dissipation: r={config.physics.hyper_r}, n={config.physics.hyper_n}")
+
+        return True
+
+    except FileNotFoundError:
+        print(f"Error: Config file not found: {config_path}")
+        return False
+    except Exception as e:
+        print(f"Error: Config validation failed: {e}")
+        return False
+
+
 def submit_simulation(
     config_path: str,
     use_gpu: bool = False,
     output_subdir: Optional[str] = None,
-    wait: bool = True
+    wait: bool = True,
+    skip_validation: bool = False
 ) -> None:
     """
     Submit a simulation to Modal.
@@ -74,11 +119,19 @@ def submit_simulation(
         use_gpu: Use GPU instance
         output_subdir: Optional output subdirectory name
         wait: Wait for job to complete
+        skip_validation: Skip config validation (not recommended)
+
+    Raises:
+        SystemExit: If submission fails
     """
     config_file = Path(config_path)
-    if not config_file.exists():
-        print(f"Error: Config file not found: {config_path}")
-        sys.exit(1)
+
+    # Validate config before submission (unless explicitly skipped)
+    if not skip_validation:
+        if not validate_config(config_file):
+            print("\nTo skip validation (not recommended), use --skip-validation")
+            sys.exit(1)
+        print()
 
     # Build command
     cmd = [
@@ -92,7 +145,7 @@ def submit_simulation(
     if output_subdir:
         cmd.extend(["--output-subdir", output_subdir])
 
-    print(f"\nSubmitting simulation to Modal...")
+    print(f"Submitting simulation to Modal...")
     print(f"Config: {config_path}")
     print(f"GPU: {use_gpu}")
     print(f"Command: {' '.join(cmd)}\n")
@@ -107,9 +160,10 @@ def submit_simulation(
 
 def submit_parameter_sweep(
     config_path: str,
-    parameters: dict[str, list],
+    parameters: Dict[str, List[Any]],
     sweep_name: Optional[str] = None,
-    use_gpu: bool = False
+    use_gpu: bool = False,
+    skip_validation: bool = False
 ) -> None:
     """
     Submit a parameter sweep to Modal.
@@ -119,18 +173,26 @@ def submit_parameter_sweep(
         parameters: Dictionary mapping parameter paths to value lists
         sweep_name: Optional name for the sweep
         use_gpu: Use GPU instances
+        skip_validation: Skip config validation (not recommended)
+
+    Raises:
+        SystemExit: If submission fails
     """
     config_file = Path(config_path)
-    if not config_file.exists():
-        print(f"Error: Config file not found: {config_path}")
-        sys.exit(1)
+
+    # Validate base config before submission (unless explicitly skipped)
+    if not skip_validation:
+        if not validate_config(config_file):
+            print("\nTo skip validation (not recommended), use --skip-validation")
+            sys.exit(1)
+        print()
 
     # Read base config
     with open(config_file, 'r') as f:
         base_config = f.read()
 
-    # Create sweep script
-    sweep_script = f"""
+    # Create temporary Python script for sweep
+    sweep_script_content = f"""
 import modal_app
 
 base_config = '''{base_config}'''
@@ -145,18 +207,30 @@ result = modal_app.run_parameter_sweep.remote(
 )
 
 print("\\nSweep results:")
-for i, r in enumerate(result):
+for i, r in enumerate(result['successful_results']):
     print(f"  Run {{i}}: {{r['config_name']}} - E_final={{r['final_energy_total']:.6e}}")
+
+if result['failed_jobs']:
+    print(f"\\nFailed jobs: {{len(result['failed_jobs'])}}")
+    for job in result['failed_jobs']:
+        print(f"  - {{job['job_metadata']['output_subdir']}}: {{job.get('error', 'Unknown error')}}")
 """
 
-    # Save temporary script
-    temp_script = Path(".modal_sweep_temp.py")
-    with open(temp_script, 'w') as f:
-        f.write(sweep_script)
-
+    # Use context manager for proper cleanup
+    temp_script = None
     try:
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.py',
+            prefix='modal_sweep_',
+            delete=False
+        ) as f:
+            temp_script = Path(f.name)
+            f.write(sweep_script_content)
+
         # Run sweep
-        print(f"\nSubmitting parameter sweep to Modal...")
+        print(f"Submitting parameter sweep to Modal...")
         print(f"Base config: {config_path}")
         print(f"Parameters: {parameters}")
         print(f"GPU: {use_gpu}\n")
@@ -170,30 +244,42 @@ for i, r in enumerate(result):
 
     finally:
         # Clean up temp script
-        if temp_script.exists():
+        if temp_script and temp_script.exists():
             temp_script.unlink()
 
 
 def list_results() -> None:
-    """List all results in Modal volume."""
+    """
+    List all results in Modal volume.
+
+    Raises:
+        SystemExit: If listing fails
+    """
     print("\nListing results in Modal volume...")
 
-    script = """
+    script_content = """
 import modal_app
 results = modal_app.list_results.remote()
 for r in results:
     print(f"  {r}")
 """
 
-    temp_script = Path(".modal_list_temp.py")
-    with open(temp_script, 'w') as f:
-        f.write(script)
-
+    temp_script = None
     try:
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.py',
+            prefix='modal_list_',
+            delete=False
+        ) as f:
+            temp_script = Path(f.name)
+            f.write(script_content)
+
         cmd = ["modal", "run", str(temp_script)]
         subprocess.run(cmd, check=True)
+
     finally:
-        if temp_script.exists():
+        if temp_script and temp_script.exists():
             temp_script.unlink()
 
 
@@ -204,14 +290,22 @@ def download_results(result_dir: str, local_path: str) -> None:
     Args:
         result_dir: Directory name in Modal volume
         local_path: Local path to save results
+
+    Raises:
+        SystemExit: If download fails
     """
+    import os
+
+    # Get volume name from environment or use default
+    volume_name = os.environ.get("MODAL_VOLUME_NAME", "gandalf-results")
+
     print(f"\nDownloading results from Modal...")
     print(f"Remote: {result_dir}")
     print(f"Local: {local_path}\n")
 
     cmd = [
         "modal", "volume", "get",
-        "gandalf-results",
+        volume_name,
         result_dir,
         local_path
     ]
@@ -226,14 +320,19 @@ def download_results(result_dir: str, local_path: str) -> None:
 
 
 def show_status() -> None:
-    """Show status of Modal jobs."""
+    """
+    Show status of Modal jobs.
+
+    Raises:
+        SystemExit: If status check fails
+    """
     print("\nChecking Modal job status...\n")
 
     cmd = ["modal", "app", "list"]
     subprocess.run(cmd, check=True)
 
 
-def main():
+def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Submit and manage GANDALF simulations on Modal",
@@ -267,6 +366,8 @@ Examples:
     submit_parser.add_argument('--gpu', action='store_true', help='Use GPU instance')
     submit_parser.add_argument('--output-subdir', help='Output subdirectory name')
     submit_parser.add_argument('--no-wait', action='store_true', help='Do not wait for completion')
+    submit_parser.add_argument('--skip-validation', action='store_true',
+                              help='Skip config validation (not recommended)')
 
     # Sweep command
     sweep_parser = subparsers.add_parser('sweep', help='Run a parameter sweep')
@@ -280,6 +381,8 @@ Examples:
     )
     sweep_parser.add_argument('--name', help='Sweep name')
     sweep_parser.add_argument('--gpu', action='store_true', help='Use GPU instances')
+    sweep_parser.add_argument('--skip-validation', action='store_true',
+                             help='Skip config validation (not recommended)')
 
     # List command
     list_parser = subparsers.add_parser('list', help='List results in Modal volume')
@@ -307,7 +410,8 @@ Examples:
             args.config,
             use_gpu=args.gpu,
             output_subdir=args.output_subdir,
-            wait=not args.no_wait
+            wait=not args.no_wait,
+            skip_validation=args.skip_validation
         )
 
     elif args.command == 'sweep':
@@ -316,14 +420,14 @@ Examples:
             sys.exit(1)
 
         # Parse parameters
-        parameters = {}
+        parameters: Dict[str, List[Any]] = {}
         for param_spec in args.param:
             if len(param_spec) < 2:
                 print(f"Error: --param must have NAME VALUE [VALUE...], got: {param_spec}")
                 sys.exit(1)
 
             param_name = param_spec[0]
-            param_values = []
+            param_values: List[Any] = []
             for val in param_spec[1:]:
                 # Try to parse as number, fall back to string
                 try:
@@ -340,7 +444,8 @@ Examples:
             args.config,
             parameters,
             sweep_name=args.name,
-            use_gpu=args.gpu
+            use_gpu=args.gpu,
+            skip_validation=args.skip_validation
         )
 
     elif args.command == 'list':
