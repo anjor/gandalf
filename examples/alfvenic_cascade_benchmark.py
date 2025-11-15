@@ -79,6 +79,57 @@ GANDALF_ORIGINAL_MODES = [
 ]
 
 
+def create_checkpoint_metadata(
+    step: int,
+    eta: float,
+    nu: float,
+    hyper_r: int,
+    hyper_n: int,
+    force_amplitude: float,
+    v_A: float,
+    dt: float,
+    n_force_min: int,
+    n_force_max: int,
+    description: str,
+    **extra_metadata
+) -> dict:
+    """
+    Create standardized checkpoint metadata dictionary.
+
+    Args:
+        step: Current timestep number
+        eta: Dissipation coefficient
+        nu: Collision frequency
+        hyper_r: Hyper-dissipation order
+        hyper_n: Hyper-collision order
+        force_amplitude: Forcing amplitude
+        v_A: Alfvén velocity
+        dt: Timestep
+        n_force_min: Minimum forcing mode number
+        n_force_max: Maximum forcing mode number
+        description: Human-readable description
+        **extra_metadata: Additional metadata fields
+
+    Returns:
+        Dictionary with all checkpoint metadata
+    """
+    metadata = {
+        'step': int(step),
+        'eta': float(eta),
+        'nu': float(nu),
+        'hyper_r': int(hyper_r),
+        'hyper_n': int(hyper_n),
+        'force_amplitude': float(force_amplitude),
+        'v_A': float(v_A),
+        'dt': float(dt),
+        'n_force_min': int(n_force_min),
+        'n_force_max': int(n_force_max),
+        'description': description,
+    }
+    metadata.update(extra_metadata)
+    return metadata
+
+
 def save_snapshot(snapshot_dir, step, state, k_perp, E_kin_perp, E_mag_perp,
                   energy_history, n_force_min, n_force_max, Lx):
     """
@@ -314,9 +365,20 @@ def main():
 
         # Print original parameters from checkpoint
         print(f"\n  Original parameters from checkpoint:")
-        for key in ['eta', 'nu', 'hyper_r', 'hyper_n', 'force_amplitude', 'v_A']:
+        for key in ['eta', 'nu', 'hyper_r', 'hyper_n', 'force_amplitude', 'v_A', 'n_force_min', 'n_force_max']:
             if key in resumed_metadata:
                 print(f"    {key}: {resumed_metadata[key]}")
+
+        # Validate that critical state parameters match
+        if resumed_state.M != 10:
+            print(f"\n  ⚠️  WARNING: Checkpoint has M={resumed_state.M}, expected M=10")
+            print(f"     Hermite moment count mismatch may cause issues")
+
+        # Validate physical parameters (informational only)
+        if hasattr(resumed_state, 'beta_i') and resumed_state.beta_i != 1.0:
+            print(f"\n  ℹ️  INFO: Checkpoint has beta_i={resumed_state.beta_i} (default=1.0)")
+        if hasattr(resumed_state, 'v_th') and resumed_state.v_th != 1.0:
+            print(f"  ℹ️  INFO: Checkpoint has v_th={resumed_state.v_th} (default=1.0)")
 
     # ==========================================================================
     # PARAMETERS
@@ -387,9 +449,12 @@ def main():
     # Override parameters with command-line arguments if provided
     # Track which parameters were overridden (for resume info)
     overridden_params = {}
+    params_requiring_dt_recalc = False
+
     if args.eta is not None:
         if resumed_metadata and 'eta' in resumed_metadata and resumed_metadata['eta'] != args.eta:
             overridden_params['eta'] = (resumed_metadata['eta'], args.eta)
+            params_requiring_dt_recalc = True
         eta = args.eta
     if args.force_amplitude is not None:
         if resumed_metadata and 'force_amplitude' in resumed_metadata and resumed_metadata['force_amplitude'] != args.force_amplitude:
@@ -398,17 +463,34 @@ def main():
     if args.hyper_r is not None:
         if resumed_metadata and 'hyper_r' in resumed_metadata and resumed_metadata['hyper_r'] != args.hyper_r:
             overridden_params['hyper_r'] = (resumed_metadata['hyper_r'], args.hyper_r)
+            params_requiring_dt_recalc = True
         hyper_r = args.hyper_r
     if args.hyper_n is not None:
         if resumed_metadata and 'hyper_n' in resumed_metadata and resumed_metadata['hyper_n'] != args.hyper_n:
             overridden_params['hyper_n'] = (resumed_metadata['hyper_n'], args.hyper_n)
         hyper_n = args.hyper_n
 
+    # Add nu and v_A override support (these don't have command-line args in current implementation,
+    # but can be added if needed for advanced use cases)
+    # For now, we allow loading from checkpoint metadata
+    if resumed_metadata:
+        if 'nu' in resumed_metadata:
+            nu = float(resumed_metadata['nu'])
+        if 'v_A' in resumed_metadata:
+            v_A = float(resumed_metadata['v_A'])
+        if 'n_force_min' in resumed_metadata:
+            n_force_min = int(resumed_metadata['n_force_min'])
+        if 'n_force_max' in resumed_metadata:
+            n_force_max = int(resumed_metadata['n_force_max'])
+
     # Print parameter overrides if resuming
     if resumed_metadata and overridden_params:
         print(f"\n  Parameter overrides:")
         for param, (old_val, new_val) in overridden_params.items():
             print(f"    {param}: {old_val} → {new_val}")
+
+        if params_requiring_dt_recalc:
+            print(f"\n  ⚠️  NOTE: Parameters affecting dissipation changed - timestep may be recalculated")
 
     # Initial condition (weak, let forcing drive the turbulence)
     alpha = 5.0 / 3.0     # k^(-5/3) initial spectrum
@@ -422,6 +504,17 @@ def main():
     averaging_start = args.averaging_start * tau_A  # When to start averaging
     cfl_safety = 0.3
     save_interval = 10
+
+    # Validate resume time
+    if resumed_state is not None and initial_time >= total_time:
+        print(f"\n" + "!" * 70)
+        print(f"ERROR: Checkpoint time ({initial_time:.2f}) >= target time ({total_time:.2f})")
+        print(f"       Cannot resume - checkpoint is already past the requested --total-time")
+        print(f"       Either:")
+        print(f"         1. Increase --total-time to > {initial_time/tau_A:.1f} τ_A")
+        print(f"         2. Resume from an earlier checkpoint")
+        print("!" * 70)
+        sys.exit(1)
 
     # Diagnostic intervals (for logging/monitoring only, doesn't affect physics)
     steady_state_check_interval = 50  # Check every N steps during averaging
@@ -615,23 +708,26 @@ def main():
             if args.checkpoint_on_issues and checkpoint_dir is not None:
                 if cfl_violation or high_velocity:
                     issue_type = "CFL_VIOLATION" if cfl_violation else "HIGH_VELOCITY"
-                    checkpoint_filename = f"checkpoint_t{state.time:06.1f}_{issue_type}.h5"
+                    # Include timestamp to avoid overwriting consecutive violations
+                    checkpoint_filename = f"checkpoint_t{state.time:06.1f}_{issue_type}_step{step}.h5"
                     checkpoint_path = checkpoint_dir / checkpoint_filename
-                    checkpoint_metadata = {
-                        'step': int(step),
-                        'eta': float(eta),
-                        'nu': float(nu),
-                        'hyper_r': int(hyper_r),
-                        'hyper_n': int(hyper_n),
-                        'force_amplitude': float(force_amplitude),
-                        'v_A': float(v_A),
-                        'dt': float(dt),
-                        'issue_type': issue_type,
-                        'cfl_number': float(diag.cfl_number),
-                        'max_velocity': float(diag.max_velocity),
-                        'description': f'Auto-saved on {issue_type} at t={state.time:.2f} τ_A'
-                    }
-                    save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True)
+                    checkpoint_metadata = create_checkpoint_metadata(
+                        step=step,
+                        eta=eta,
+                        nu=nu,
+                        hyper_r=hyper_r,
+                        hyper_n=hyper_n,
+                        force_amplitude=force_amplitude,
+                        v_A=v_A,
+                        dt=dt,
+                        n_force_min=n_force_min,
+                        n_force_max=n_force_max,
+                        description=f'Auto-saved on {issue_type} at t={state.time:.2f} τ_A',
+                        issue_type=issue_type,
+                        cfl_number=float(diag.cfl_number),
+                        max_velocity=float(diag.max_velocity),
+                    )
+                    save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=False)
                     print(f"  💾 Auto-saved checkpoint: {checkpoint_filename}")
 
         # Periodic checkpoint saving (by time)
@@ -640,17 +736,19 @@ def main():
             state.time - last_checkpoint_time >= args.checkpoint_interval_time):
             checkpoint_filename = f"checkpoint_t{state.time:06.1f}.h5"
             checkpoint_path = checkpoint_dir / checkpoint_filename
-            checkpoint_metadata = {
-                'step': int(step),
-                'eta': float(eta),
-                'nu': float(nu),
-                'hyper_r': int(hyper_r),
-                'hyper_n': int(hyper_n),
-                'force_amplitude': float(force_amplitude),
-                'v_A': float(v_A),
-                'dt': float(dt),
-                'description': f'Periodic checkpoint at t={state.time:.2f} τ_A'
-            }
+            checkpoint_metadata = create_checkpoint_metadata(
+                step=step,
+                eta=eta,
+                nu=nu,
+                hyper_r=hyper_r,
+                hyper_n=hyper_n,
+                force_amplitude=force_amplitude,
+                v_A=v_A,
+                dt=dt,
+                n_force_min=n_force_min,
+                n_force_max=n_force_max,
+                description=f'Periodic checkpoint at t={state.time:.2f} τ_A',
+            )
             save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True)
             last_checkpoint_time = state.time
             print(f"  💾 Saved periodic checkpoint (by time): {checkpoint_filename}")
@@ -661,17 +759,19 @@ def main():
             step - last_checkpoint_step >= args.checkpoint_interval_steps):
             checkpoint_filename = f"checkpoint_step{step:07d}.h5"
             checkpoint_path = checkpoint_dir / checkpoint_filename
-            checkpoint_metadata = {
-                'step': int(step),
-                'eta': float(eta),
-                'nu': float(nu),
-                'hyper_r': int(hyper_r),
-                'hyper_n': int(hyper_n),
-                'force_amplitude': float(force_amplitude),
-                'v_A': float(v_A),
-                'dt': float(dt),
-                'description': f'Periodic checkpoint at step {step}'
-            }
+            checkpoint_metadata = create_checkpoint_metadata(
+                step=step,
+                eta=eta,
+                nu=nu,
+                hyper_r=hyper_r,
+                hyper_n=hyper_n,
+                force_amplitude=force_amplitude,
+                v_A=v_A,
+                dt=dt,
+                n_force_min=n_force_min,
+                n_force_max=n_force_max,
+                description=f'Periodic checkpoint at step {step}',
+            )
             save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True)
             last_checkpoint_step = step
             print(f"  💾 Saved periodic checkpoint (by steps): {checkpoint_filename}")
@@ -819,18 +919,20 @@ def main():
     if args.checkpoint_final and checkpoint_dir is not None:
         checkpoint_filename = f"checkpoint_final_t{state.time:06.1f}.h5"
         checkpoint_path = checkpoint_dir / checkpoint_filename
-        checkpoint_metadata = {
-            'step': int(step),
-            'eta': float(eta),
-            'nu': float(nu),
-            'hyper_r': int(hyper_r),
-            'hyper_n': int(hyper_n),
-            'force_amplitude': float(force_amplitude),
-            'v_A': float(v_A),
-            'dt': float(dt),
-            'total_time': float(total_time),
-            'description': f'Final checkpoint at t={state.time:.2f} τ_A (end of run)'
-        }
+        checkpoint_metadata = create_checkpoint_metadata(
+            step=step,
+            eta=eta,
+            nu=nu,
+            hyper_r=hyper_r,
+            hyper_n=hyper_n,
+            force_amplitude=force_amplitude,
+            v_A=v_A,
+            dt=dt,
+            n_force_min=n_force_min,
+            n_force_max=n_force_max,
+            description=f'Final checkpoint at t={state.time:.2f} τ_A (end of run)',
+            total_time=float(total_time),
+        )
         save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True)
         print(f"\n💾 Saved final checkpoint: {checkpoint_filename}")
 

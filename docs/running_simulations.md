@@ -401,33 +401,240 @@ plt.savefig("phi_slice.png")
 
 ## Checkpointing and Resuming
 
-### Automatic Checkpointing
-When using `run_simulation.py`:
-```yaml
-diagnostics:
-  checkpoint_interval: 10.0  # Save every 10 τ_A
+Checkpoints save simulation state to HDF5 files, enabling:
+- **Progress preservation** during long runs (avoid starting over)
+- **Parameter tuning** mid-simulation (change dissipation/forcing)
+- **Failure recovery** from numerical instabilities
+
+### Basic Checkpoint Saving
+
+Save periodic checkpoints during forced turbulence runs:
+
+```bash
+# Save checkpoint every 20 Alfvén times
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resolution 64 \
+  --total-time 200 \
+  --checkpoint-interval-time 20.0 \
+  --checkpoint-dir checkpoints_64cubed/
 ```
 
-### Manual Checkpointing
+Creates:
+- `checkpoints_64cubed/checkpoint_t020.0.h5`
+- `checkpoints_64cubed/checkpoint_t040.0.h5`
+- `checkpoints_64cubed/checkpoint_t060.0.h5`
+- ...
+- `checkpoints_64cubed/checkpoint_final_t200.0.h5`
+
+**Checkpoint options:**
+- `--checkpoint-interval-time N`: Save every N Alfvén times
+- `--checkpoint-interval-steps N`: Save every N timesteps
+- `--checkpoint-final`: Save at end of run (default: enabled)
+- `--checkpoint-on-issues`: Auto-save on CFL violations or high velocity (default: enabled)
+
+### Auto-Save on Instabilities
+
+Checkpoints automatically save when numerical issues detected:
+
+```bash
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resolution 64 \
+  --checkpoint-interval-time 20.0 \
+  --save-diagnostics \  # Required for auto-save
+  --diagnostic-interval 5
+```
+
+If instability at t=161.5:
+- Creates `checkpoint_t161.5_CFL_VIOLATION_step34470.h5`
+- Includes diagnostic data: CFL number, max velocity, etc.
+- Does NOT overwrite periodic checkpoints
+
+### Resuming from Checkpoints
+
+Continue from where you left off:
+
+```bash
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resume-from checkpoints_64cubed/checkpoint_t160.0.h5 \
+  --total-time 250  # Run from t=160 to t=250
+```
+
+**Important:** `--total-time` is the **target end time**, not additional time.
+
+### Resume with Modified Parameters
+
+**This is the key feature** for parameter tuning:
+
+```bash
+# Original run failed at t=161 with eta=4.5, amplitude=0.055
+
+# Resume with safer parameters
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resume-from checkpoints_64cubed/checkpoint_t160.0.h5 \
+  --eta 10.0 \              # OVERRIDE: stronger dissipation (was 4.5)
+  --force-amplitude 0.02 \  # OVERRIDE: weaker forcing (was 0.055)
+  --total-time 250 \
+  --checkpoint-interval-time 20.0  # Continue saving checkpoints
+```
+
+Prints:
+```
+RESUMING FROM CHECKPOINT: checkpoints_64cubed/checkpoint_t160.0.h5
+✓ Loaded checkpoint from t=160.00 τ_A
+
+  Original parameters from checkpoint:
+    eta: 4.5
+    force_amplitude: 0.055
+
+  Parameter overrides:
+    eta: 4.5 → 10.0
+    force_amplitude: 0.055 → 0.02
+
+  ⚠️  NOTE: Parameters affecting dissipation changed - timestep may be recalculated
+```
+
+**Parameters that can be overridden:**
+- `eta`, `nu` (dissipation coefficients)
+- `hyper_r`, `hyper_n` (hyper-dissipation orders)
+- `force_amplitude` (forcing strength)
+- v_A, n_force_min, n_force_max (loaded from checkpoint metadata)
+
+**Locked parameters** (from checkpoint state):
+- Grid resolution (Nx, Ny, Nz)
+- Domain size (Lx, Ly, Lz)
+- Number of Hermite moments (M)
+
+### Workflow: Recovering from Instability (Issue #82)
+
+**Scenario:** 64³ run develops instability after ~160 τ_A.
+
+**Step 1:** Initial run with checkpoints
+```bash
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resolution 64 --total-time 200 \
+  --eta 4.5 --force-amplitude 0.055 \
+  --checkpoint-interval-time 20.0 \
+  --checkpoint-dir checkpoints_64cubed/ \
+  --save-diagnostics --diagnostic-interval 5
+
+# Fails at t=161.5 with:
+#   ⚠️  CFL VIOLATION at step 34470, t=161.52: CFL = 5880029271556096.0
+#   💾 Auto-saved checkpoint: checkpoint_t161.5_CFL_VIOLATION_step34470.h5
+```
+
+**Step 2:** Resume from last stable checkpoint with modified parameters
+```bash
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resume-from checkpoints_64cubed/checkpoint_t160.0.h5 \
+  --eta 10.0 \              # 2.2× stronger dissipation
+  --force-amplitude 0.02 \  # 2.75× weaker forcing
+  --total-time 250 \
+  --checkpoint-interval-time 20.0
+```
+
+Now simulation continues from t=160 with safer parameters, no energy lost!
+
+### Inspecting Checkpoints
+
+**Using Python:**
+```python
+from krmhd.io import load_checkpoint
+from krmhd import energy as compute_energy
+
+# Load checkpoint
+state, grid, metadata = load_checkpoint("checkpoint_t160.0.h5")
+
+print(f"Time: {state.time} τ_A")
+print(f"Grid: {grid.Nx}×{grid.Ny}×{grid.Nz}")
+print(f"Original eta: {metadata['eta']}")
+print(f"Forcing: modes {metadata['n_force_min']}-{metadata['n_force_max']}")
+print(f"Saved: {metadata['timestamp']}")
+
+# Compute energy
+E = compute_energy(state)['total']
+print(f"Energy: {E:.6e}")
+```
+
+**Using HDF5 tools:**
+```bash
+# View file structure
+h5dump -n checkpoint_t160.0.h5
+
+# View metadata only
+h5dump -A checkpoint_t160.0.h5 | grep "eta\|force_amplitude"
+```
+
+### Checkpoint File Contents
+
+HDF5 files contain:
+- **State data:** z⁺, z⁻, B∥, Hermite moments g, time
+- **Grid:** Nx, Ny, Nz, Lx, Ly, Lz
+- **Parameters:** eta, nu, hyper_r, hyper_n, force_amplitude, v_A, dt
+- **Forcing config:** n_force_min, n_force_max
+- **Metadata:** step, timestamp, description
+
+### Best Practices
+
+1. **Always checkpoint long runs:** Use `--checkpoint-interval-time 20.0` for runs >50 τ_A
+2. **Enable diagnostics:** Use `--save-diagnostics` to catch instabilities early
+3. **Keep stable checkpoints:** Don't delete checkpoints until run completes
+4. **Document overrides:** When resuming with new parameters, note the reason
+5. **Validate:** Check that resumed state makes sense (energy continuous, time advances)
+
+### Common Issues
+
+**"Checkpoint time >= target time"**
+```bash
+# Error: Checkpoint at t=160, but --total-time 100
+# Solution: Increase --total-time to > 160
+uv run python examples/alfvenic_cascade_benchmark.py \
+  --resume-from checkpoint_t160.0.h5 \
+  --total-time 250  # NOT 100
+```
+
+**"Grid dimensions don't match"**
+- Cannot resume 64³ checkpoint on 128³ grid
+- Use same `--resolution` as original run
+
+**"Parameters not overriding"**
+- Ensure flags come AFTER `--resume-from`
+- Check console output for "Parameter overrides:" confirmation
+
+**"Still unstable after resume"**
+- Try even stronger dissipation or weaker forcing
+- Resume from earlier checkpoint (before instability developed)
+- See recommended_parameters.md for validated combinations
+
+### Manual Checkpointing (Advanced)
+
+For custom scripts:
+
 ```python
 from krmhd.io import save_checkpoint, load_checkpoint
 
-# Save
-save_checkpoint("my_checkpoint.h5", state, metadata={"time": t, "step": step})
+# Save with custom metadata
+metadata = {
+    'step': step,
+    'eta': eta,
+    'force_amplitude': amplitude,
+    'custom_field': 'my_value'
+}
+save_checkpoint(state, "my_checkpoint.h5", metadata=metadata)
 
 # Resume
-state, metadata = load_checkpoint("my_checkpoint.h5")
-t_start = metadata["time"]
+state, grid, metadata = load_checkpoint("my_checkpoint.h5")
+t_start = state.time
 
-# Continue evolution from t_start
+# Continue with possibly different parameters
+new_eta = 2.0 * metadata['eta']  # Double dissipation
 for t in range(t_start, t_final, dt):
-    state = gandalf_step(state, dt=dt, eta=1.0)
+    state = gandalf_step(state, dt=dt, eta=new_eta, v_A=1.0)
 ```
 
 **Use cases:**
-- Long runs (checkpoint every 10-20 τ_A in case of crashes)
-- Parameter changes (load checkpoint, modify parameters, continue)
-- Ensemble runs (load checkpoint, apply different forcing realization)
+- Parameter sweeps from common initial state
+- Ensemble runs with different forcing realizations
+- Bifurcation studies (vary parameters from fixed state)
 
 ## Common Pitfalls and Solutions
 
