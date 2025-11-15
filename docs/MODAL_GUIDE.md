@@ -82,6 +82,196 @@ Or use Modal CLI directly:
 modal volume get gandalf-results driven_turbulence_20240115_120000 ./results
 ```
 
+## Migrating Local Configs to Modal
+
+When adapting existing local configuration files for Modal cloud execution, consider these key differences and adjustments:
+
+### Config Compatibility
+
+**Good news**: Modal uses the same YAML config format as local runs! You can use your existing configs directly.
+
+**However**, you may want to adjust parameters for cloud execution:
+
+### Resolution and Resource Scaling
+
+**Local Development** (typical laptop/desktop):
+- **Recommended**: 32³ to 64³ (development, debugging)
+- **Maximum**: 128³ (M1 Pro/M2 with 16-32 GB RAM)
+- **Limitation**: Memory constraints
+
+**Modal Cloud** (scalable resources):
+- **Small**: 64³ (fast testing, ~5-10 min, ~$0.10-0.20)
+- **Medium**: 128³ (production, ~15-30 min, ~$0.50-1.00)
+- **Large**: 256³+ (high-resolution, ~1-4 hours, ~$5-20)
+- **Limitation**: Cost (but no hard memory limits)
+
+**Migration tip**: Start with your local resolution for validation, then scale up gradually.
+
+### Forcing Parameters (Issue #97 Fix)
+
+**Important**: The config uses **physical wavenumbers** (k_min, k_max), but these are automatically converted to **integer mode numbers** (n_min, n_max) at runtime.
+
+```yaml
+forcing:
+  enabled: true
+  k_min: 2.0    # Physical wavenumber (user-friendly)
+  k_max: 5.0    # Converted to mode numbers internally
+  amplitude: 0.1
+```
+
+**Conversion formula**: `n = round(k * L_min / (2π))`
+
+**Example** (for domain L=1.0):
+- k_min=2.0 → n_min=0 (clamped to 1, fundamental mode)
+- k_min=6.28 (2π) → n_min=1 (fundamental mode)
+- k_min=12.57 (4π) → n_min=2 (second harmonic)
+
+**No action needed** - conversion is automatic! Just be aware that small k values may be clamped to n≥1.
+
+### Hyper-dissipation for High Resolution
+
+For 256³+ simulations, use stronger hyper-dissipation to prevent spectral pile-up:
+
+```yaml
+# Local config (64³-128³)
+physics:
+  eta: 1.0
+  nu: 1.0
+  hyper_r: 2
+  hyper_n: 2
+
+# Modal high-res config (256³+)
+physics:
+  eta: 5.0      # Increased from 1.0
+  nu: 5.0       # Matched to eta
+  hyper_r: 2    # Keep r=2 for stability
+  hyper_n: 2
+```
+
+**Why?** Higher resolution requires stronger dissipation at small scales. See [CLAUDE.md](../CLAUDE.md) "Forced Turbulence: Parameter Selection Guide" for details.
+
+### Time Integration
+
+**Local testing** (short runs):
+```yaml
+time_integration:
+  n_steps: 100        # Quick validation
+  dt_fixed: 0.005
+```
+
+**Modal production** (long runs):
+```yaml
+time_integration:
+  n_steps: 10000      # 50 τ_A at dt=0.005
+  dt_fixed: null      # Use CFL timestep for safety
+  cfl_safety: 0.3
+```
+
+**Migration tip**: Use `dt_fixed` for reproducibility in validation, CFL for safety in long cloud runs.
+
+### I/O Configuration
+
+**Local**:
+```yaml
+io:
+  checkpoint_interval: 1000   # Frequent for interactive work
+  output_dir: "./output"      # Local filesystem
+```
+
+**Modal**:
+```yaml
+io:
+  checkpoint_interval: 500    # Balance recovery time vs I/O overhead
+  output_dir: "./output"      # Mapped to Modal volume automatically
+```
+
+**Note**: Modal saves to `/results` in the volume. The `output_dir` config is relative to this path.
+
+### GPU vs CPU Selection
+
+**When to use GPU** (via `--gpu` flag):
+- Resolution ≥ 256³
+- Long runs (>1 hour)
+- Parameter sweeps with many jobs
+
+**When to use CPU**:
+- Resolution ≤ 128³
+- Short validation runs (<10 min)
+- Development/debugging
+
+**Migration tip**: Test with CPU first, then switch to GPU for production.
+
+### Common Migration Workflow
+
+1. **Start with local config as-is**:
+   ```bash
+   python scripts/modal_submit.py submit configs/my_local_config.yaml
+   ```
+
+2. **Validate** (compare first few timesteps with local run):
+   ```bash
+   python scripts/modal_submit.py download my_local_config_<timestamp>
+   # Compare output/history.h5 with local run
+   ```
+
+3. **Scale up** (create high-res variant):
+   ```bash
+   # Copy and modify
+   cp configs/my_local_config.yaml configs/my_modal_highres.yaml
+   # Edit: Increase grid.Nx/Ny/Nz, adjust physics.eta, increase n_steps
+   ```
+
+4. **Submit production run**:
+   ```bash
+   python scripts/modal_submit.py submit configs/my_modal_highres.yaml --gpu
+   ```
+
+### Parameter Sweep Migration
+
+**Local** (sequential or manual parallelization):
+```bash
+# Run multiple configs manually
+for eta in 0.5 1.0 2.0; do
+  sed "s/eta: .*/eta: $eta/" config.yaml > config_eta${eta}.yaml
+  python scripts/run_simulation.py config_eta${eta}.yaml
+done
+```
+
+**Modal** (automatic parallelization):
+```bash
+# Single command runs all combinations in parallel!
+python scripts/modal_submit.py sweep configs/base_config.yaml \
+  --param physics.eta=0.5,1.0,2.0 \
+  --param physics.nu=0.5,1.0
+# Launches 3×2=6 parallel jobs
+```
+
+### Troubleshooting Config Issues
+
+**Problem**: "Parameter 'eta' must use dot notation"
+
+**Solution**: In parameter sweeps, use `physics.eta` not `eta`:
+```bash
+# Wrong
+--param eta=0.5,1.0
+
+# Correct
+--param physics.eta=0.5,1.0
+```
+
+**Problem**: Energy grows exponentially in forced turbulence
+
+**Solution**: Increase dissipation or reduce forcing amplitude:
+```yaml
+# If unstable
+physics:
+  eta: 2.0          # Try 5.0 or 10.0
+forcing:
+  amplitude: 0.05   # Try 0.01 or 0.02
+```
+
+See [Issue #82](https://github.com/anjor/gandalf/issues/82) for detailed stability guidelines.
+
 ## Usage Examples
 
 ### Example 1: CPU Simulation (Low-Cost)
@@ -394,7 +584,12 @@ If a simulation is interrupted:
 - **Set realistic timeouts**: Estimate 2× expected runtime as safety margin
 - **Test checkpoint/resume**: Verify it works on a short test run before multi-hour production runs
 
-**Note**: Checkpoint functionality requires GANDALF v0.3.0+ with `type: checkpoint` support (planned feature). Current version requires manual script modification to load checkpoints via `load_checkpoint()` from `krmhd.io`.
+**Note**: Checkpoint I/O functions (`save_checkpoint()`, `load_checkpoint()`) are available in `krmhd.io`. However, config-based `type: checkpoint` for automatic checkpoint resume is not yet implemented. To resume from checkpoints, you currently need to:
+1. Use `save_checkpoint()` to periodically save state during simulation (already supported in Modal runs)
+2. Manually modify your simulation script to call `load_checkpoint()` to resume from a specific checkpoint file
+3. Re-submit the modified script to Modal
+
+Future enhancement: Add `initial_condition.type: checkpoint` with `checkpoint_path` parameter for automatic resume support.
 
 ## Troubleshooting
 

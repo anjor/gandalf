@@ -50,6 +50,10 @@ TIMEOUT_SINGLE_SIMULATION = int(os.environ.get("MODAL_TIMEOUT_SINGLE", 3600 * 4)
 TIMEOUT_PARAMETER_SWEEP = int(os.environ.get("MODAL_TIMEOUT_SWEEP", 3600 * 8))  # 8 hours
 TIMEOUT_SWEEP_JOB_GET = int(os.environ.get("MODAL_TIMEOUT_JOB_GET", TIMEOUT_SINGLE_SIMULATION + 600))  # Job timeout + 10 min buffer
 
+# Volume commit retry configuration
+MAX_VOLUME_COMMIT_RETRIES = int(os.environ.get("MAX_VOLUME_COMMIT_RETRIES", 3))  # Number of retry attempts
+VOLUME_COMMIT_RETRY_DELAY = float(os.environ.get("VOLUME_COMMIT_RETRY_DELAY", 2.0))  # Initial delay in seconds
+
 # Resource defaults
 DEFAULT_CPU_CORES = 8.0
 DEFAULT_CPU_MEMORY_MB = 32768  # 32 GB
@@ -78,11 +82,21 @@ volume = modal.Volume.from_name(
 )
 
 # Define the container image with all dependencies
-# Pin JAX to 0.4.x to avoid breaking changes in 0.5.x
+# JAX version pinning rationale:
+#   - Pinned to 0.4.x series (specifically >=0.4.20,<0.5.0)
+#   - JAX 0.5.x introduces breaking API changes:
+#     * Changed semantics for JIT compilation and static arguments
+#     * Modified vmap behavior for pytree structures
+#     * Updated PRNGKey generation (backward-incompatible)
+#     * Deprecated/removed legacy random API functions
+#   - GANDALF codebase is extensively validated against JAX 0.4.x
+#   - Upgrading to 0.5.x requires comprehensive testing and potential code changes
+#   - Conservative pinning prevents unexpected failures in production cloud runs
+#   - See: https://jax.readthedocs.io/en/latest/changelog.html for JAX 0.5.x changes
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "jax[cpu]>=0.4.20,<0.5.0",  # Pin to 0.4.x series
+        "jax[cpu]>=0.4.20,<0.5.0",  # Pin to 0.4.x series (see comment above)
         "h5py>=3.11.0",
         "matplotlib>=3.7.0",
         "numpy>=1.24.0",
@@ -100,11 +114,12 @@ image = (
 
 # GPU image (optional - use for large simulations)
 # Note: JAX CUDA version is configurable via JAX_CUDA_VERSION environment variable
-# Pin JAX to 0.4.x to avoid breaking changes in 0.5.x
+#       (defaults to 'cuda12_pip', can override with e.g., 'cuda11_pip')
+# JAX version pinning: Same rationale as CPU image (see comment above)
 gpu_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        f"jax[{JAX_CUDA_VERSION}]>=0.4.20,<0.5.0",  # Pin to 0.4.x series (version configurable)
+        f"jax[{JAX_CUDA_VERSION}]>=0.4.20,<0.5.0",  # Pin to 0.4.x, CUDA version configurable
         "h5py>=3.11.0",
         "matplotlib>=3.7.0",
         "numpy>=1.24.0",
@@ -118,6 +133,50 @@ gpu_image = (
     .workdir("/root/gandalf")
     .pip_install("-e .")
 )
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def _commit_volume_with_retry(verbose: bool = True) -> tuple[bool, Optional[str]]:
+    """
+    Commit volume changes with retry logic for transient failures.
+
+    Uses exponential backoff to handle temporary network issues or Modal
+    service hiccups that may cause volume commit failures.
+
+    Args:
+        verbose: Print retry attempts
+
+    Returns:
+        tuple: (success: bool, error_msg: Optional[str])
+            - (True, None) if commit succeeded
+            - (False, error_msg) if all retries exhausted
+
+    Raises:
+        Never raises - returns error status instead
+    """
+    for attempt in range(MAX_VOLUME_COMMIT_RETRIES):
+        try:
+            volume.commit()
+            if verbose and attempt > 0:
+                print(f"✓ Volume commit succeeded on attempt {attempt + 1}/{MAX_VOLUME_COMMIT_RETRIES}")
+            return True, None
+        except Exception as e:
+            error_msg = str(e)
+            if attempt < MAX_VOLUME_COMMIT_RETRIES - 1:
+                # Exponential backoff: 2s, 4s, 8s, ...
+                delay = VOLUME_COMMIT_RETRY_DELAY * (2 ** attempt)
+                if verbose:
+                    print(f"⚠ Volume commit attempt {attempt + 1}/{MAX_VOLUME_COMMIT_RETRIES} failed: {error_msg}")
+                    print(f"  Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+            else:
+                # Final attempt failed
+                if verbose:
+                    print(f"✗ Volume commit failed after {MAX_VOLUME_COMMIT_RETRIES} attempts: {error_msg}")
+                return False, error_msg
 
 
 # =============================================================================
@@ -180,7 +239,14 @@ def _run_gandalf_simulation(config, verbose: bool = True):
     if config.forcing.enabled:
         key = jr.PRNGKey(config.forcing.seed or 42)
         if verbose:
-            print(f"✓ Forcing enabled: k ∈ [{config.forcing.k_min}, {config.forcing.k_max}]")
+            # Show both physical wavenumbers and mode numbers for clarity
+            import numpy as np
+            L_min = min(grid.Lx, grid.Ly, grid.Lz)
+            n_min = int(np.round(config.forcing.k_min * L_min / (2 * np.pi)))
+            n_max = int(np.round(config.forcing.k_max * L_min / (2 * np.pi)))
+            n_min = max(1, n_min)
+            n_max = max(n_min, n_max)
+            print(f"✓ Forcing enabled: k ∈ [{config.forcing.k_min:.2f}, {config.forcing.k_max:.2f}], modes n ∈ [{n_min}, {n_max}]")
     else:
         key = None
 
@@ -491,20 +557,15 @@ def _run_simulation_impl(
         state, energy_history, grid = _run_gandalf_simulation(config, verbose=verbose)
         elapsed = time.time() - start_time
 
-        # Commit volume changes with error logging
-        commit_success = True
-        commit_error_msg = None
-        try:
-            volume.commit()
-            if verbose:
-                print(f"\n✓ Volume changes committed successfully")
-        except Exception as commit_error:
-            commit_success = False
-            commit_error_msg = str(commit_error)
-            error_msg = f"WARNING: Failed to commit volume changes: {commit_error}"
+        # Commit volume changes with retry logic
+        commit_success, commit_error_msg = _commit_volume_with_retry(verbose=verbose)
+        if not commit_success:
+            error_msg = f"WARNING: Failed to commit volume changes after {MAX_VOLUME_COMMIT_RETRIES} retries: {commit_error_msg}"
             print(f"\n{error_msg}")
             # Don't fail the entire job, but flag as partial failure
             # Results are computed correctly but not persisted to volume
+        elif verbose:
+            print(f"\n✓ Volume changes committed successfully")
 
         if verbose:
             print(f"\n{'='*70}")
@@ -550,15 +611,13 @@ def _run_simulation_impl(
             print(f"{'='*70}")
             print(error_trace)
 
-        # Try to commit any partial results with explicit error handling
-        try:
-            volume.commit()
-            if verbose:
-                print("\n⚠ Partial results committed to volume despite error")
-        except Exception as commit_error:
-            if verbose:
-                print(f"\n⚠ Volume commit also failed: {commit_error}")
-            # Don't mask the original error
+        # Try to commit any partial results with retry logic
+        commit_success, commit_error_msg = _commit_volume_with_retry(verbose=verbose)
+        if commit_success and verbose:
+            print("\n⚠ Partial results committed to volume despite error")
+        elif not commit_success and verbose:
+            print(f"\n⚠ Volume commit also failed after {MAX_VOLUME_COMMIT_RETRIES} retries: {commit_error_msg}")
+        # Don't mask the original error
 
         return {
             'status': 'failed',
@@ -819,7 +878,11 @@ def run_parameter_sweep(
     with open(metadata_path, 'w') as f:
         json.dump(sweep_metadata, f, indent=2)
 
-    volume.commit()
+    # Commit sweep results with retry logic
+    commit_success, commit_error_msg = _commit_volume_with_retry(verbose=True)
+    if not commit_success:
+        print(f"\n⚠ WARNING: Failed to commit sweep results after {MAX_VOLUME_COMMIT_RETRIES} retries: {commit_error_msg}")
+        print("  Sweep metadata may not be persisted to volume!")
 
     print(f"\nSweep complete!")
     print(f"  Successful: {len(successful_results)}/{len(combinations)}")

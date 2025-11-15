@@ -51,16 +51,16 @@ def check_modal_installed() -> None:
         SystemExit: If Modal is not installed or not authenticated
     """
     try:
-        result = subprocess.run(
+        subprocess.run(
             ["modal", "token", "list"],
             capture_output=True,
             text=True,
-            check=False
+            check=True  # Raise CalledProcessError on non-zero exit
         )
-        if result.returncode != 0:
-            print("Error: Modal is not authenticated.")
-            print("Please run: modal token new")
-            sys.exit(1)
+    except subprocess.CalledProcessError:
+        print("Error: Modal is not authenticated.")
+        print("Please run: modal token new")
+        sys.exit(1)
     except FileNotFoundError:
         print("Error: Modal CLI not found.")
         print("Please install: pip install modal")
@@ -151,10 +151,10 @@ def submit_simulation(
     print(f"Command: {' '.join(cmd)}\n")
 
     # Run command
-    result = subprocess.run(cmd, check=False)
-
-    if result.returncode != 0:
-        print(f"\nError: Modal job failed with return code {result.returncode}")
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"\nError: Modal job failed with return code {e.returncode}")
         sys.exit(1)
 
 
@@ -241,10 +241,10 @@ if result['failed_jobs']:
         print(f"GPU: {use_gpu}\n")
 
         cmd = ["modal", "run", str(temp_script)]
-        result = subprocess.run(cmd, check=False)
-
-        if result.returncode != 0:
-            print(f"\nError: Modal sweep failed with return code {result.returncode}")
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"\nError: Modal sweep failed with return code {e.returncode}")
             sys.exit(1)
 
     finally:
@@ -315,10 +315,10 @@ def download_results(result_dir: str, local_path: str) -> None:
         local_path
     ]
 
-    result = subprocess.run(cmd, check=False)
-
-    if result.returncode != 0:
-        print(f"\nError: Download failed with return code {result.returncode}")
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"\nError: Download failed with return code {e.returncode}")
         sys.exit(1)
 
     print(f"\n✓ Results downloaded to {local_path}")
