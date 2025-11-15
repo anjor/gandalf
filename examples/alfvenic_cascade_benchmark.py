@@ -64,7 +64,6 @@ from krmhd.diagnostics import (
     compute_turbulence_diagnostics,
 )
 from krmhd.io import save_turbulence_diagnostics, save_checkpoint, load_checkpoint
-from krmhd.forcing import force_alfven_modes_balanced
 
 
 # Original GANDALF mode triplets (6 modes with low k_z = ±1)
@@ -292,14 +291,6 @@ def main():
                         help='Use original GANDALF forcing formula (1/k_perp weighting with log-random modulation)')
     parser.add_argument('--use-specific-modes', action='store_true',
                         help='Force only 6 specific mode triplets matching original GANDALF (respects RMHD ordering)')
-    parser.add_argument('--balanced-elsasser', action='store_true',
-                        help='Force z⁺ and z⁻ independently in a low-|nz| perpendicular band (recommended for robust cascade)')
-    parser.add_argument('--max-nz', type=int, default=1,
-                        help='For balanced forcing: allow |nz| ≤ max_nz (default 1)')
-    parser.add_argument('--include-nz0', action='store_true',
-                        help='For balanced forcing: include kz=0 plane (default: exclude)')
-    parser.add_argument('--correlation', type=float, default=0.0,
-                        help='For balanced forcing: correlation between z⁺ and z⁻ forcing in [0,1). 0=independent')
 
     # Checkpoint configuration
     parser.add_argument('--checkpoint-dir', type=str, default=None,
@@ -850,20 +841,7 @@ def main():
         # Apply forcing
         state_before = state
         key, subkey = jax.random.split(key)
-        if args.balanced_elsasser:
-            # Force independent z⁺/z⁻ in a perpendicular band, restrict to |nz| ≤ max_nz
-            state, key = force_alfven_modes_balanced(
-                state,
-                amplitude=force_amplitude,
-                n_min=n_force_min,
-                n_max=n_force_max,
-                dt=dt,
-                key=subkey,
-                max_nz=args.max_nz,
-                include_nz0=args.include_nz0,
-                correlation=args.correlation,
-            )
-        elif args.use_specific_modes:
+        if args.use_specific_modes:
             # Force only 6 specific mode triplets (original GANDALF)
             # This respects RMHD ordering k⊥ >> k∥ by forcing only low-k_z modes
             state, key = force_alfven_modes_specific(
