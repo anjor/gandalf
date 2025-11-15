@@ -210,6 +210,11 @@ print("\\nSweep results:")
 for i, r in enumerate(result['successful_results']):
     print(f"  Run {{i}}: {{r['config_name']}} - E_final={{r['final_energy_total']:.6e}}")
 
+if result.get('partial_failures'):
+    print(f"\\nPartial failures: {{len(result['partial_failures'])}} (computed but volume not persisted)")
+    for pf in result['partial_failures']:
+        print(f"  - {{pf['job_metadata']['output_subdir']}}: {{pf.get('volume_commit_error', 'commit error')}}")
+
 if result['failed_jobs']:
     print(f"\\nFailed jobs: {{len(result['failed_jobs'])}}")
     for job in result['failed_jobs']:

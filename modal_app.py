@@ -48,6 +48,7 @@ import modal
 # Timeout values in seconds
 TIMEOUT_SINGLE_SIMULATION = int(os.environ.get("MODAL_TIMEOUT_SINGLE", 3600 * 4))  # 4 hours
 TIMEOUT_PARAMETER_SWEEP = int(os.environ.get("MODAL_TIMEOUT_SWEEP", 3600 * 8))  # 8 hours
+TIMEOUT_SWEEP_JOB_GET = int(os.environ.get("MODAL_TIMEOUT_JOB_GET", TIMEOUT_SINGLE_SIMULATION + 600))  # Job timeout + 10 min buffer
 
 # Resource defaults
 DEFAULT_CPU_CORES = 8.0
@@ -77,10 +78,11 @@ volume = modal.Volume.from_name(
 )
 
 # Define the container image with all dependencies
+# Pin JAX to 0.4.x to avoid breaking changes in 0.5.x
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "jax[cpu]>=0.4.20",  # Start with CPU, can upgrade to GPU
+        "jax[cpu]>=0.4.20,<0.5.0",  # Pin to 0.4.x series
         "h5py>=3.11.0",
         "matplotlib>=3.7.0",
         "numpy>=1.24.0",
@@ -98,10 +100,11 @@ image = (
 
 # GPU image (optional - use for large simulations)
 # Note: JAX CUDA version is configurable via JAX_CUDA_VERSION environment variable
+# Pin JAX to 0.4.x to avoid breaking changes in 0.5.x
 gpu_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        f"jax[{JAX_CUDA_VERSION}]>=0.4.20",  # JAX with CUDA support (version configurable)
+        f"jax[{JAX_CUDA_VERSION}]>=0.4.20,<0.5.0",  # Pin to 0.4.x series (version configurable)
         "h5py>=3.11.0",
         "matplotlib>=3.7.0",
         "numpy>=1.24.0",
@@ -224,11 +227,22 @@ def _run_gandalf_simulation(config, verbose: bool = True):
     for step in range(config.time_integration.n_steps):
         # Apply forcing if enabled
         if config.forcing.enabled:
+            # Convert physical wavenumbers to integer mode numbers (Issue #97)
+            # k = 2πn/L_min, so n = k*L_min/(2π)
+            import numpy as np
+            L_min = min(grid.Lx, grid.Ly, grid.Lz)
+            n_min = int(np.round(config.forcing.k_min * L_min / (2 * np.pi)))
+            n_max = int(np.round(config.forcing.k_max * L_min / (2 * np.pi)))
+
+            # Ensure at least one mode
+            n_min = max(1, n_min)
+            n_max = max(n_min, n_max)
+
             state, key = force_alfven_modes(
                 state,
                 amplitude=config.forcing.amplitude,
-                k_min=config.forcing.k_min,
-                k_max=config.forcing.k_max,
+                n_min=n_min,
+                n_max=n_max,
                 dt=dt,
                 key=key
             )
@@ -478,28 +492,35 @@ def _run_simulation_impl(
         elapsed = time.time() - start_time
 
         # Commit volume changes with error logging
+        commit_success = True
+        commit_error_msg = None
         try:
             volume.commit()
             if verbose:
                 print(f"\n✓ Volume changes committed successfully")
         except Exception as commit_error:
+            commit_success = False
+            commit_error_msg = str(commit_error)
             error_msg = f"WARNING: Failed to commit volume changes: {commit_error}"
             print(f"\n{error_msg}")
-            # Log but don't fail the entire job
-            # Results are likely still in /results but not persisted
+            # Don't fail the entire job, but flag as partial failure
+            # Results are computed correctly but not persisted to volume
 
         if verbose:
             print(f"\n{'='*70}")
-            print(f"Simulation complete!")
+            status_str = "Simulation complete!" if commit_success else "Simulation complete (volume commit failed)!"
+            print(status_str)
             print(f"Total time: {elapsed:.1f}s")
             print(f"Results saved to: {output_path}")
+            if not commit_success:
+                print(f"WARNING: Results may not be persisted (commit failed)")
             print(f"{'='*70}\n")
 
         # Return metadata
         final_energy = compute_energy(state)
 
         result = {
-            'status': 'success',
+            'status': 'success' if commit_success else 'partial_failure',
             'output_dir': output_path,
             'elapsed_time': elapsed,
             'config_name': config.name,
@@ -511,6 +532,11 @@ def _run_simulation_impl(
             'final_energy_kinetic': float(final_energy['kinetic']),
             'backend': backend,
         }
+
+        # Add commit error details if commit failed
+        if not commit_success:
+            result['volume_commit_error'] = commit_error_msg
+
         return result
 
     except Exception as e:
@@ -723,14 +749,16 @@ def run_parameter_sweep(
         })
 
     # Wait for all jobs to complete and collect results
-    print(f"Waiting for {len(futures)} jobs to complete...")
+    print(f"Waiting for {len(futures)} jobs to complete (timeout: {TIMEOUT_SWEEP_JOB_GET}s per job)...")
 
     successful_results = []
+    partial_failures = []
     failed_jobs = []
 
     for i, (future, metadata) in enumerate(zip(futures, job_metadata)):
         try:
-            result = future.get()
+            # Add explicit timeout to prevent indefinite blocking
+            result = future.get(timeout=TIMEOUT_SWEEP_JOB_GET)
 
             if result['status'] == 'success':
                 successful_results.append({
@@ -738,15 +766,32 @@ def run_parameter_sweep(
                     'job_metadata': metadata,
                 })
                 print(f"✓ Job {i+1}/{len(futures)} completed successfully")
+            elif result['status'] == 'partial_failure':
+                # Job completed but volume commit failed
+                partial_failures.append({
+                    **result,
+                    'job_metadata': metadata,
+                })
+                print(f"⚠ Job {i+1}/{len(futures)} partial failure: {result.get('volume_commit_error', 'volume commit failed')}")
             else:
+                # Failed status
                 failed_jobs.append({
                     **result,
                     'job_metadata': metadata,
                 })
                 print(f"✗ Job {i+1}/{len(futures)} failed: {result.get('error', 'Unknown error')}")
 
+        except TimeoutError:
+            # Job exceeded timeout
+            failed_jobs.append({
+                'status': 'failed',
+                'error': f'Job timed out after {TIMEOUT_SWEEP_JOB_GET}s',
+                'job_metadata': metadata,
+            })
+            print(f"✗ Job {i+1}/{len(futures)} timed out after {TIMEOUT_SWEEP_JOB_GET}s")
+
         except Exception as e:
-            # Handle catastrophic job failures (e.g., timeout, OOM)
+            # Handle catastrophic job failures (e.g., OOM, network errors)
             failed_jobs.append({
                 'status': 'failed',
                 'error': str(e),
@@ -760,10 +805,12 @@ def run_parameter_sweep(
         'timestamp': timestamp,
         'n_runs_total': len(combinations),
         'n_runs_successful': len(successful_results),
+        'n_runs_partial_failure': len(partial_failures),
         'n_runs_failed': len(failed_jobs),
         'parameters': {k: list(v) for k, v in parameters.items()},
         'use_gpu': use_gpu,
         'successful_results': successful_results,
+        'partial_failures': partial_failures,
         'failed_jobs': failed_jobs,
     }
 
@@ -776,6 +823,8 @@ def run_parameter_sweep(
 
     print(f"\nSweep complete!")
     print(f"  Successful: {len(successful_results)}/{len(combinations)}")
+    if partial_failures:
+        print(f"  Partial failures: {len(partial_failures)}/{len(combinations)} (computed but not persisted)")
     print(f"  Failed: {len(failed_jobs)}/{len(combinations)}")
     print(f"  Results saved to /results/{sweep_dir}")
 

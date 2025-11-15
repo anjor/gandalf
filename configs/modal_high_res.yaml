@@ -15,8 +15,8 @@ grid:
 
 physics:
   v_A: 1.0
-  eta: 2.0              # Hyper-dissipation coefficient
-  nu: 2.0               # Collision frequency
+  eta: 5.0              # Hyper-dissipation coefficient (increased for 256³ forced turbulence)
+  nu: 5.0               # Collision frequency (matched to eta)
   beta_i: 1.0
   Lambda: 1.0
   hyper_r: 2            # Hyper-resistivity order (stable for high-res)
