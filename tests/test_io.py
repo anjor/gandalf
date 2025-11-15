@@ -673,3 +673,154 @@ def test_turbulence_diagnostics_compression(grid, tmpdir):
 
     # Compression should reduce size (conservative test: < 2x uncompressed)
     assert file_size < 2 * uncompressed_size, f"File too large: {file_size} > {2 * uncompressed_size}"
+
+
+# =============================================================================
+# Checkpoint Resume with Parameter Override Tests
+# =============================================================================
+
+
+def test_checkpoint_resume_with_parameter_override(grid, tmpdir):
+    """Test resuming from checkpoint with modified parameters.
+
+    This tests the workflow where:
+    1. Run simulation with initial parameters and save checkpoint
+    2. Load checkpoint
+    3. Continue simulation with modified parameters (e.g., different eta, forcing)
+    4. Verify state continuity and parameter changes
+    """
+    from krmhd import gandalf_step, force_alfven_modes
+    import jax
+
+    # Create initial state
+    state = initialize_random_spectrum(
+        grid, M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0, alpha=5/3, k_min=1, k_max=5
+    )
+
+    # Initial parameters
+    eta_initial = 0.1
+    force_amplitude_initial = 0.05
+    dt = 0.01
+    v_A = 1.0
+
+    # Run a few steps with initial parameters
+    key = jax.random.PRNGKey(42)
+    for _ in range(5):
+        state, key = force_alfven_modes(state, amplitude=force_amplitude_initial, n_min=1, n_max=2, dt=dt, key=key)
+        state = gandalf_step(state, dt=dt, eta=eta_initial, nu=0.0, v_A=v_A, hyper_r=2, hyper_n=2)
+
+    # Save checkpoint with metadata
+    checkpoint_file = tmpdir / "resume_test_checkpoint.h5"
+    checkpoint_metadata = {
+        'step': 5,
+        'eta': eta_initial,
+        'force_amplitude': force_amplitude_initial,
+        'dt': dt,
+        'v_A': v_A,
+        'description': 'Test checkpoint for resume'
+    }
+    save_checkpoint(state, str(checkpoint_file), metadata=checkpoint_metadata)
+
+    # Load checkpoint
+    loaded_state, loaded_grid, loaded_metadata = load_checkpoint(str(checkpoint_file))
+
+    # Verify metadata
+    assert loaded_metadata['step'] == 5
+    assert np.isclose(loaded_metadata['eta'], eta_initial)
+    assert np.isclose(loaded_metadata['force_amplitude'], force_amplitude_initial)
+
+    # Verify state continuity
+    assert np.allclose(loaded_state.z_plus, state.z_plus, rtol=1e-6)
+    assert np.allclose(loaded_state.time, state.time)
+
+    # Continue with MODIFIED parameters (parameter override)
+    eta_modified = 0.5  # 5x stronger dissipation
+    force_amplitude_modified = 0.01  # 5x weaker forcing
+
+    # Continue from checkpoint with modified parameters
+    for _ in range(5):
+        loaded_state, key = force_alfven_modes(
+            loaded_state, amplitude=force_amplitude_modified, n_min=1, n_max=2, dt=dt, key=key
+        )
+        loaded_state = gandalf_step(
+            loaded_state, dt=dt, eta=eta_modified, nu=0.0, v_A=v_A, hyper_r=2, hyper_n=2
+        )
+
+    # Verify that simulation continued (time advanced)
+    assert loaded_state.time > state.time
+    expected_time = state.time + 5 * dt
+    assert np.isclose(loaded_state.time, expected_time, rtol=1e-6)
+
+    # Verify that state evolved (fields changed from checkpoint)
+    # With stronger dissipation, energy should decrease
+    from krmhd import energy as compute_energy
+    E_checkpoint = compute_energy(state)['total']
+    E_continued = compute_energy(loaded_state)['total']
+
+    # Stronger dissipation should reduce energy (or at least change it)
+    assert E_continued != E_checkpoint  # State evolved
+
+    print(f"✓ Checkpoint resume with parameter override successful")
+    print(f"  Original eta={eta_initial}, modified eta={eta_modified}")
+    print(f"  Original amplitude={force_amplitude_initial}, modified amplitude={force_amplitude_modified}")
+    print(f"  Energy: {E_checkpoint:.6e} → {E_continued:.6e}")
+
+
+def test_checkpoint_parameter_override_workflow(grid, tmpdir):
+    """Test complete workflow: save → load → verify override → continue.
+
+    This simulates the user's workflow:
+    - Run to t=50 with initial parameters
+    - Checkpoint saved
+    - Load checkpoint and override eta and forcing amplitude
+    - Continue to t=100 with new parameters
+    """
+    from krmhd import gandalf_step
+
+    # Initial run
+    state = initialize_random_spectrum(
+        grid, M=10, beta_i=1.0, v_th=1.0, alpha=5/3, k_min=1, k_max=5
+    )
+
+    # Simulate running to t=50
+    dt = 0.01
+    target_time_1 = 0.5  # Short simulation for test
+    eta_v1 = 1.0
+
+    while state.time < target_time_1:
+        state = gandalf_step(state, dt=dt, eta=eta_v1, nu=0.0, v_A=1.0, hyper_r=2, hyper_n=2)
+
+    # Save checkpoint at t=50
+    checkpoint_file = tmpdir / "workflow_checkpoint_t50.h5"
+    metadata_v1 = {'eta': eta_v1, 'run_version': 'v1'}
+    save_checkpoint(state, str(checkpoint_file), metadata=metadata_v1)
+
+    # Load and verify original parameters
+    loaded_state, _, loaded_metadata = load_checkpoint(str(checkpoint_file))
+    assert np.isclose(loaded_metadata['eta'], eta_v1)
+    assert loaded_metadata['run_version'] == 'v1'
+
+    # Override parameters for resume
+    eta_v2 = 5.0  # Much stronger dissipation
+
+    # Continue to t=100 with new parameters
+    target_time_2 = 1.0
+    while loaded_state.time < target_time_2:
+        loaded_state = gandalf_step(loaded_state, dt=dt, eta=eta_v2, nu=0.0, v_A=1.0, hyper_r=2, hyper_n=2)
+
+    # Verify final state
+    assert loaded_state.time >= target_time_2
+
+    # Save final checkpoint with updated metadata
+    final_checkpoint = tmpdir / "workflow_checkpoint_final.h5"
+    metadata_v2 = {'eta': eta_v2, 'run_version': 'v2'}
+    save_checkpoint(loaded_state, str(final_checkpoint), metadata=metadata_v2)
+
+    # Verify final metadata updated
+    _, _, final_metadata = load_checkpoint(str(final_checkpoint))
+    assert np.isclose(final_metadata['eta'], eta_v2)
+    assert final_metadata['run_version'] == 'v2'
+
+    print(f"✓ Complete workflow test passed")
+    print(f"  Phase 1 (t=0→0.5): eta={eta_v1}")
+    print(f"  Phase 2 (t=0.5→1.0): eta={eta_v2} (overridden)")
