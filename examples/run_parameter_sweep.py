@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import subprocess
+import concurrent.futures as futures
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -35,14 +36,20 @@ sys.path.insert(0, str(Path(__file__).parent))
 def run_single_configuration(
     resolution: int,
     eta: float,
-    nu: float,
     amplitude: float,
     hyper_r: int,
     hyper_n: int,
     total_time: float,
     averaging_start: float,
     save_diagnostics: bool,
-    output_subdir: str
+    output_subdir: str,
+    balanced_elsasser: bool,
+    max_nz: int,
+    include_nz0: bool,
+    correlation: float,
+    checkpoint_interval_time: float = None,
+    checkpoint_interval_steps: int = None,
+    checkpoint_final: bool = True,
 ) -> Dict:
     """
     Run a single parameter configuration.
@@ -51,7 +58,7 @@ def run_single_configuration(
         dict: Contains success status, runtime, output files
     """
     print(f"\n{'='*70}")
-    print(f"Running: N={resolution}³, η={eta:.4f}, ν={nu:.4f}, amplitude={amplitude:.4f}, r={hyper_r}, n={hyper_n}")
+    print(f"Running: N={resolution}³, η={eta:.4f}, amplitude={amplitude:.4f}, r={hyper_r}, n={hyper_n}")
     print(f"{'='*70}")
 
     # Construct output subdirectory
@@ -65,15 +72,32 @@ def run_single_configuration(
         '--total-time', str(total_time),
         '--averaging-start', str(averaging_start),
         '--eta', str(eta),
-        '--nu', str(nu),
         '--force-amplitude', str(amplitude),
         '--hyper-r', str(hyper_r),
         '--hyper-n', str(hyper_n),
-        '--save-spectra'
+        '--save-spectra',
+        '--output-dir', str(output_dir)
     ]
+
+    # Use balanced Elsasser forcing with low-|nz| restriction by default
+    if balanced_elsasser:
+        cmd.append('--balanced-elsasser')
+        cmd += ['--max-nz', str(max_nz)]
+        if include_nz0:
+            cmd.append('--include-nz0')
+        if correlation > 0.0:
+            cmd += ['--correlation', str(correlation)]
 
     if save_diagnostics:
         cmd.append('--save-diagnostics')
+
+    # Checkpoint configuration
+    if checkpoint_interval_time is not None:
+        cmd += ['--checkpoint-interval-time', str(checkpoint_interval_time)]
+    if checkpoint_interval_steps is not None:
+        cmd += ['--checkpoint-interval-steps', str(checkpoint_interval_steps)]
+    if not checkpoint_final:
+        cmd.append('--no-checkpoint-final')
 
     print(f"Command: {' '.join(cmd)}")
     print(f"Output: {output_dir}")
@@ -92,27 +116,24 @@ def run_single_configuration(
         end_time = datetime.now()
         runtime = (end_time - start_time).total_seconds()
 
+        # Persist full logs for post-mortem
+        (output_dir / 'stdout.txt').write_text(result.stdout or '')
+        (output_dir / 'stderr.txt').write_text(result.stderr or '')
+
         if result.returncode == 0:
             print(f"✓ Success! Runtime: {runtime:.1f}s ({runtime/60:.1f} min)")
-
-            # Move output files to subdirectory
             output_files = {}
-            patterns = [
+            # Files should already exist in output_dir since we passed --output-dir
+            for pattern in [
                 f'spectral_data_{resolution}cubed.h5',
                 f'energy_history_{resolution}cubed.h5',
                 f'alfvenic_cascade_{resolution}cubed.png',
-                f'alfvenic_cascade_thesis_style_{resolution}cubed.png'
-            ]
-
-            if save_diagnostics:
-                patterns.append(f'turbulence_diagnostics_{resolution}cubed.h5')
-
-            for pattern in patterns:
-                src = Path('examples/output') / pattern
-                if src.exists():
-                    dst = output_dir / pattern
-                    src.rename(dst)
-                    output_files[pattern] = str(dst)
+                f'alfvenic_cascade_thesis_style_{resolution}cubed.png',
+                f'turbulence_diagnostics_{resolution}cubed.h5'
+            ]:
+                candidate = output_dir / pattern
+                if candidate.exists():
+                    output_files[pattern] = str(candidate)
 
             return {
                 'success': True,
@@ -124,7 +145,9 @@ def run_single_configuration(
             }
         else:
             print(f"✗ Failed with return code {result.returncode}")
-            print(f"STDERR:\n{result.stderr[-1000:]}")
+            tail = (result.stderr or '')[-1000:]
+            print(f"STDERR tail:\n{tail}")
+            print(f"  Full logs: {output_dir}/stdout.txt, {output_dir}/stderr.txt")
 
             return {
                 'success': False,
@@ -164,8 +187,15 @@ def run_parameter_sweep(
     total_time: float,
     averaging_start: float,
     save_diagnostics: bool,
-    hyper_r: int = 2,
-    hyper_n: int = 2
+    hyper_r_values: List[int],
+    hyper_n: int = 2,
+    balanced_elsasser: bool = True,
+    max_nz: int = 1,
+    include_nz0: bool = False,
+    correlation: float = 0.0,
+    checkpoint_interval_time: float = None,
+    checkpoint_interval_steps: int = None,
+    checkpoint_final: bool = True,
 ) -> List[Dict]:
     """
     Run parameter sweep over eta and amplitude grids.
@@ -180,51 +210,22 @@ def run_parameter_sweep(
     print(f"PARAMETER SWEEP: {resolution}³")
     print(f"{'='*70}")
     print(f"Sweep ID: {sweep_id}")
-    print(f"Grid: {len(eta_values)} eta × {len(amplitude_values)} amplitude = {len(eta_values) * len(amplitude_values)} runs")
-    print(f"Estimated time: ~{len(eta_values) * len(amplitude_values) * (5 if resolution == 32 else 15)} minutes")
+    print(f"Grid: {len(eta_values)} eta × {len(amplitude_values)} amplitude × {len(hyper_r_values)} r = {len(eta_values) * len(amplitude_values) * len(hyper_r_values)} runs")
+    print(f"Estimated time per run: ~{5 if resolution == 32 else 15} minutes")
     print(f"{'='*70}\n")
 
-    for eta in eta_values:
-        for amplitude in amplitude_values:
-            # Create unique subdirectory for this configuration
-            config_name = f"sweep_{resolution}cubed_eta{eta:.4f}_amp{amplitude:.4f}"
-            output_subdir = f"{sweep_id}/{config_name}"
+    # Build task list
+    tasks = []
+    for r in hyper_r_values:
+        for eta in eta_values:
+            for amplitude in amplitude_values:
+                config_name = f"sweep_{resolution}cubed_r{r}_eta{eta:.4f}_amp{amplitude:.4f}"
+                output_subdir = f"{sweep_id}/{config_name}"
+                tasks.append((r, eta, amplitude, output_subdir))
 
-            # Run configuration (now uses command-line arguments)
-            result = run_single_configuration(
-                resolution=resolution,
-                eta=eta,
-                nu=eta,  # Keep nu = eta
-                amplitude=amplitude,
-                hyper_r=hyper_r,
-                hyper_n=hyper_n,
-                total_time=total_time,
-                averaging_start=averaging_start,
-                save_diagnostics=save_diagnostics,
-                output_subdir=output_subdir
-            )
-
-            # Store configuration info
-            result['config'] = {
-                'resolution': resolution,
-                'eta': eta,
-                'nu': eta,
-                'amplitude': amplitude,
-                'hyper_r': hyper_r,
-                'hyper_n': hyper_n,
-                'total_time': total_time,
-                'averaging_start': averaging_start
-            }
-
-            results.append(result)
-
-            # Save intermediate results
-            results_file = Path('output') / sweep_id / 'sweep_results.json'
-            results_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(results_file, 'w') as f:
-                json.dump(results, f, indent=2)
-
-    return results, sweep_id
+    # Parallel execution using thread pool (spawns separate processes)
+    # Control concurrency via --jobs
+    return results, sweep_id, tasks
 
 
 def analyze_sweep_results(results: List[Dict], sweep_id: str):
@@ -276,10 +277,23 @@ def analyze_sweep_results(results: List[Dict], sweep_id: str):
             data = load_spectral_data(spectral_file)
             history = load_energy_history(spectral_file)
 
-            k = data['k_perp']
-            E_total = data['E_kinetic_avg'] + data['E_magnetic_avg']
+            # Fit in mode-number space, resolution-aware inertial range
+            if 'n_perp' in data:
+                n = data['n_perp']
+            else:
+                # fallback compute n from domain if needed
+                Lx = float(data.get('domain_size', (1.0, 1.0, 1.0))[0]) if 'domain_size' in data else 1.0
+                n = data['k_perp'] * Lx / (2.0 * np.pi)
 
-            fit = compute_power_law_fit(k, E_total, (2.0, 10.0))
+            if config['resolution'] == 32:
+                n_range = (2.0, 8.0)
+            elif config['resolution'] == 64:
+                n_range = (3.0, 12.0)
+            else:
+                n_range = (3.0, 20.0)
+
+            E_total = data['E_kinetic_avg'] + data['E_magnetic_avg']
+            fit = compute_power_law_fit(n, E_total, n_range)
             steady = assess_steady_state(history, data['averaging_start'])
 
             quality_metrics.append({
@@ -480,10 +494,31 @@ def main():
     # Options
     parser.add_argument('--save-diagnostics', action='store_true',
                        help='Save turbulence diagnostics (Issue #82)')
-    parser.add_argument('--hyper-r', type=int, default=2,
-                       help='Hyper-dissipation order (default: 2)')
+    parser.add_argument('--hyper-r-values', type=int, nargs='+', default=[2],
+                       help='List of hyper-dissipation orders to test (e.g., 2 3 4)')
     parser.add_argument('--hyper-n', type=int, default=2,
                        help='Hyper-collision order (default: 2)')
+    parser.add_argument('--balanced-elsasser', action='store_true',
+                       help='Use balanced Elsasser forcing (recommended)')
+    parser.add_argument('--max-nz', type=int, default=1,
+                       help='Max |nz| for forcing (default: 1)')
+    parser.add_argument('--include-nz0', action='store_true',
+                       help='Include kz=0 plane in forcing')
+    parser.add_argument('--correlation', type=float, default=0.0,
+                       help='Correlation between z+ and z- forcing [0,1)')
+
+    # Checkpoint configuration
+    parser.add_argument('--checkpoint-interval-time', type=float, default=None,
+                       help='Save checkpoint every N τ_A (passed to benchmark script)')
+    parser.add_argument('--checkpoint-interval-steps', type=int, default=None,
+                       help='Save checkpoint every N steps (passed to benchmark script)')
+    parser.add_argument('--checkpoint-final', action='store_true', default=True,
+                       help='Save final checkpoint (default: enabled)')
+    parser.add_argument('--no-checkpoint-final', dest='checkpoint_final', action='store_false',
+                       help='Disable final checkpoint')
+
+    parser.add_argument('--jobs', type=int, default=1,
+                       help='Number of parallel runs (default: 1)')
 
     args = parser.parse_args()
 
@@ -505,18 +540,72 @@ def main():
             args.amp_values = [0.005, 0.01, 0.015]
 
     # Run sweep
-    results, sweep_id = run_parameter_sweep(
+    results, sweep_id, tasks = run_parameter_sweep(
         resolution=args.resolution,
         eta_values=args.eta_values,
         amplitude_values=args.amp_values,
         total_time=args.total_time,
         averaging_start=args.averaging_start,
         save_diagnostics=args.save_diagnostics,
-        hyper_r=args.hyper_r,
-        hyper_n=args.hyper_n
+        hyper_r_values=args.hyper_r_values,
+        hyper_n=args.hyper_n,
+        balanced_elsasser=args.balanced_elsasser or True,
+        max_nz=args.max_nz,
+        include_nz0=args.include_nz0,
+        correlation=args.correlation,
+        checkpoint_interval_time=args.checkpoint_interval_time,
+        checkpoint_interval_steps=args.checkpoint_interval_steps,
+        checkpoint_final=args.checkpoint_final,
     )
 
-    # Analyze results
+    # Execute tasks in parallel (each task spawns an external process)
+    print(f"\nLaunching {len(tasks)} runs with jobs={args.jobs}...\n")
+    Path('output', sweep_id).mkdir(parents=True, exist_ok=True)
+
+    def _run(task):
+        r, eta, amplitude, output_subdir = task
+        res = run_single_configuration(
+            resolution=args.resolution,
+            eta=eta,
+            amplitude=amplitude,
+            hyper_r=r,
+            hyper_n=args.hyper_n,
+            total_time=args.total_time,
+            averaging_start=args.averaging_start,
+            save_diagnostics=args.save_diagnostics,
+            output_subdir=output_subdir,
+            balanced_elsasser=(args.balanced_elsasser or True),
+            max_nz=args.max_nz,
+            include_nz0=args.include_nz0,
+            correlation=args.correlation,
+            checkpoint_interval_time=args.checkpoint_interval_time,
+            checkpoint_interval_steps=args.checkpoint_interval_steps,
+            checkpoint_final=args.checkpoint_final,
+        )
+        res['config'] = {
+            'resolution': args.resolution,
+            'eta': eta,
+            'amplitude': amplitude,
+            'hyper_r': r,
+            'hyper_n': args.hyper_n,
+            'total_time': args.total_time,
+            'averaging_start': args.averaging_start,
+            'balanced_elsasser': (args.balanced_elsasser or True),
+            'max_nz': args.max_nz,
+            'include_nz0': args.include_nz0,
+            'correlation': args.correlation,
+        }
+        return res
+
+    with futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+        for res in ex.map(_run, tasks):
+            results.append(res)
+            # Save intermediate results incrementally
+            results_file = Path('output') / sweep_id / 'sweep_results.json'
+            with open(results_file, 'w') as f:
+                json.dump(results, f, indent=2)
+
+    # Analyze results once all runs complete
     analyze_sweep_results(results, sweep_id)
 
     print(f"\n{'='*70}")

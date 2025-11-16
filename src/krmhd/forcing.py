@@ -69,6 +69,68 @@ def _mode_to_wavenumber(n: int, L: float) -> float:
 
 
 @jax.jit
+def _gaussian_white_noise_fourier_perp_lowkz_jit(
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    amplitude: float,
+    kperp_min: float,
+    kperp_max: float,
+    kz_allowed: Array,
+    dt: float,
+    real_part: Array,
+    imag_part: Array,
+) -> Array:
+    """
+    JIT core for Gaussian white noise forcing restricted to a perpendicular band
+    and a low-|kz| set, to respect RMHD ordering (k_perp >> k_parallel).
+
+    Args:
+        kx, ky, kz: 1D wavenumber arrays
+        amplitude: Forcing amplitude (energy injection ~ amplitude²)
+        kperp_min, kperp_max: Perpendicular band limits
+        kz_allowed: Boolean mask over kz (shape [Nz]) selecting allowed kz planes
+        dt: Timestep
+        real_part, imag_part: Random normal arrays [Nz, Ny, Nx//2+1]
+
+    Returns:
+        Complex forcing field [Nz, Ny, Nx//2+1]
+    """
+    # Broadcast to grids
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
+
+    # Perpendicular magnitude
+    k_perp = jnp.sqrt(kx_3d**2 + ky_3d**2)
+
+    # Masks
+    perp_mask = (k_perp >= kperp_min) & (k_perp <= kperp_max)
+    kz_mask = kz_allowed[:, jnp.newaxis, jnp.newaxis]
+    mask = perp_mask & kz_mask
+
+    # White noise scaling
+    scale = amplitude / jnp.sqrt(dt)
+    noise = (real_part + 1j * imag_part) * scale
+
+    forced_field = noise * mask.astype(noise.dtype)
+
+    # Enforce rfft reality on kx=0 and kx=Nyquist planes
+    # Note: For JIT compatibility, we always apply the Nyquist operation even when Nx_rfft==1
+    # (in which case kx=0 and kx=Nyquist are the same, so the second operation is redundant but harmless)
+    forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
+    Nx_rfft = forced_field.shape[2]
+    nyquist_idx = Nx_rfft - 1
+    forced_field = forced_field.at[:, :, nyquist_idx].set(
+        forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+    )
+
+    # Zero DC
+    forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
+    return forced_field
+
+
+@jax.jit
 def _gaussian_white_noise_fourier_jit(
     kx: Array,
     ky: Array,
@@ -144,12 +206,13 @@ def _gaussian_white_noise_fourier_jit(
     # Enforce reality on kx=Nyquist plane (if Nx is even)
     # For rfft: shape is [Nz, Ny, Nx//2+1]
     # Nyquist is at index Nx//2 if Nx is even
+    # Note: For JIT compatibility, we always apply this operation even when Nx_rfft==1
+    # (in which case kx=0 and kx=Nyquist are the same, so the operation is redundant but harmless)
     Nx_rfft = forced_field.shape[2]  # This is Nx//2+1
-    if Nx_rfft > 1:  # Have more than just kx=0 mode
-        nyquist_idx = Nx_rfft - 1
-        forced_field = forced_field.at[:, :, nyquist_idx].set(
-            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-        )
+    nyquist_idx = Nx_rfft - 1
+    forced_field = forced_field.at[:, :, nyquist_idx].set(
+        forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+    )
 
     return forced_field
 
@@ -221,14 +284,15 @@ def _gandalf_forcing_fourier_jit(
     forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
 
     # Enforce Hermitian symmetry for rfft format
+    # Note: For JIT compatibility, we always apply the Nyquist operation even when Nx_rfft==1
+    # (in which case kx=0 and kx=Nyquist are the same, so the operation is redundant but harmless)
     forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
 
     Nx_rfft = forced_field.shape[2]
-    if Nx_rfft > 1:
-        nyquist_idx = Nx_rfft - 1
-        forced_field = forced_field.at[:, :, nyquist_idx].set(
-            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-        )
+    nyquist_idx = Nx_rfft - 1
+    forced_field = forced_field.at[:, :, nyquist_idx].set(
+        forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+    )
 
     return forced_field
 
@@ -298,6 +362,139 @@ def gandalf_forcing_fourier(
     )
 
     return forced_field, key
+
+
+def gaussian_white_noise_fourier_perp_lowkz(
+    grid: SpectralGrid3D,
+    amplitude: float,
+    n_min: int,
+    n_max: int,
+    max_nz: int,
+    include_nz0: bool,
+    dt: float,
+    key: Array,
+) -> Tuple[Array, Array]:
+    """
+    Generate Gaussian white noise forcing restricted to a perpendicular band
+    n_perp ∈ [n_min, n_max] and low-|nz| planes (|nz| ≤ max_nz, optionally excluding nz=0).
+
+    This respects RMHD ordering by avoiding injection at high k_parallel and
+    is useful for robust Alfvénic cascade development.
+
+    Args:
+        grid: SpectralGrid3D
+        amplitude: Forcing amplitude
+        n_min, n_max: Perpendicular mode-number band (integers)
+        max_nz: Maximum |nz| allowed (e.g., 1)
+        include_nz0: Whether to include kz=0 plane
+        dt: Timestep
+        key: JAX PRNG key
+
+    Returns:
+        (forced_field, new_key)
+    """
+    if amplitude <= 0:
+        raise ValueError(f"amplitude must be positive, got {amplitude}")
+    if n_min <= 0 or n_max < n_min:
+        raise ValueError(f"Invalid band: n_min={n_min}, n_max={n_max}")
+    if max_nz < 0:
+        raise ValueError(f"max_nz must be ≥ 0, got {max_nz}")
+
+    # Perpendicular band limits
+    kperp_min = _mode_to_wavenumber(n_min, grid.Lx)
+    kperp_max = _mode_to_wavenumber(n_max, grid.Lx)
+
+    # Allowed kz planes: |nz| ≤ max_nz and optionally nz=0 excluded
+    k1 = 2.0 * jnp.pi / grid.Lz
+    kz = grid.kz
+    # Build boolean mask over kz by nearest-integer test on |kz|/k1
+    nz_float = jnp.round(jnp.abs(kz) / k1)
+    nz_int = nz_float.astype(jnp.int32)
+    kz_allowed = nz_int <= max_nz
+    if not include_nz0:
+        kz_allowed = kz_allowed & (nz_int != 0)
+
+    # Random fields
+    key, k1a, k1b = jax.random.split(key, 3)
+    real_part = jax.random.normal(k1a, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1))
+    imag_part = jax.random.normal(k1b, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1))
+
+    forced_field = _gaussian_white_noise_fourier_perp_lowkz_jit(
+        grid.kx, grid.ky, grid.kz,
+        amplitude,
+        float(kperp_min), float(kperp_max),
+        kz_allowed,
+        float(dt),
+        real_part, imag_part,
+    )
+    return forced_field, key
+
+
+def force_alfven_modes_balanced(
+    state: KRMHDState,
+    amplitude: float,
+    n_min: int,
+    n_max: int,
+    dt: float,
+    key: Array,
+    max_nz: int = 1,
+    include_nz0: bool = False,
+    correlation: float = 0.0,
+) -> Tuple[KRMHDState, Array]:
+    """
+    Force Alfvén modes with independent z⁺/z⁻ forcing to sustain strong
+    counter-propagating interactions. Restricts to low-|nz| to respect RMHD.
+
+    Args:
+        state: KRMHD state
+        amplitude: Forcing amplitude (per field)
+        n_min, n_max: Perpendicular band (mode numbers)
+        dt: Timestep
+        key: JAX key
+        max_nz: Allowed |nz| (default 1)
+        include_nz0: Include kz=0 plane (default False)
+        correlation: Correlation coefficient between z⁺ and z⁻ forcing in [0,1)
+                     0 → independent (recommended), 0.5 → partially correlated.
+
+    Returns:
+        (new_state, new_key)
+    """
+    if not (0.0 <= correlation < 1.0):
+        raise ValueError(f"correlation must be in [0,1), got {correlation}")
+
+    # Draw two independent fields
+    key, kA, kB, kMix = jax.random.split(key, 4)
+    Fp, kA = gaussian_white_noise_fourier_perp_lowkz(
+        state.grid, amplitude, n_min, n_max, max_nz, include_nz0, dt, kA
+    )
+    Fm, kB = gaussian_white_noise_fourier_perp_lowkz(
+        state.grid, amplitude, n_min, n_max, max_nz, include_nz0, dt, kB
+    )
+
+    if correlation > 0.0:
+        # Mix fields to achieve desired correlation approximately
+        # z− forcing ← sqrt(1-ρ²)·Fm + ρ·Fp
+        rho = jnp.float32(correlation)
+        alpha = jnp.sqrt(jnp.maximum(0.0, 1.0 - rho * rho))
+        Fm = alpha * Fm + rho * Fp
+
+    z_plus_new = state.z_plus + Fp
+    z_minus_new = state.z_minus + Fm
+
+    new_state = KRMHDState(
+        z_plus=z_plus_new,
+        z_minus=z_minus_new,
+        B_parallel=state.B_parallel,
+        g=state.g,
+        M=state.M,
+        beta_i=state.beta_i,
+        v_th=state.v_th,
+        nu=state.nu,
+        Lambda=state.Lambda,
+        time=state.time,
+        grid=state.grid,
+    )
+    return new_state, key
 
 
 def gaussian_white_noise_fourier(

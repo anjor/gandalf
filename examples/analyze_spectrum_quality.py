@@ -40,9 +40,15 @@ def load_spectral_data(filepath: Path) -> Dict:
         data['averaging_start'] = f.attrs['averaging_start']
         data['averaging_duration'] = f.attrs['averaging_duration']
         data['v_A'] = f.attrs['v_A']
+        # Domain size (if present)
+        if 'domain_size' in f.attrs:
+            data['domain_size'] = f.attrs['domain_size']
 
         # Load spectral data
         data['k_perp'] = f['k_perp'][:]
+        # Prefer mode-number axis if present (no 2π factors for user-facing analysis)
+        if 'n_perp' in f:
+            data['n_perp'] = f['n_perp'][:]
         data['E_kinetic_avg'] = f['E_kinetic_avg'][:]
         data['E_magnetic_avg'] = f['E_magnetic_avg'][:]
         data['E_kinetic_std'] = f['E_kinetic_std'][:]
@@ -53,6 +59,11 @@ def load_spectral_data(filepath: Path) -> Dict:
             data['E_kinetic_all'] = f['E_kinetic_all'][:]
             data['E_magnetic_all'] = f['E_magnetic_all'][:]
 
+        # Embedded history fallback (benchmark writes these datasets)
+        if 'times' in f and 'energy_total' in f:
+            data['times'] = f['times'][:]
+            data['energy_total'] = f['energy_total'][:]
+
     return data
 
 
@@ -61,6 +72,19 @@ def load_energy_history(filepath: Path) -> Dict:
     history_filepath = filepath.parent / filepath.name.replace('spectral_data', 'energy_history')
 
     if not history_filepath.exists():
+        # Fallback to embedded history inside spectral file
+        try:
+            with h5py.File(filepath, 'r') as g:
+                if 'times' in g and 'energy_total' in g:
+                    return {
+                        'times': g['times'][:],
+                        'E_total': g['energy_total'][:],
+                        'E_kinetic': None,
+                        'E_magnetic': None,
+                        'E_compressive': None,
+                    }
+        except Exception:
+            pass
         print(f"Warning: Energy history file not found: {history_filepath}")
         return None
 
@@ -75,7 +99,7 @@ def load_energy_history(filepath: Path) -> Dict:
     return history
 
 
-def compute_power_law_fit(k: np.ndarray, E: np.ndarray, k_range: Tuple[float, float],
+def compute_power_law_fit(x: np.ndarray, E: np.ndarray, x_range: Tuple[float, float],
                           expected_slope: float = -5/3) -> Dict:
     """
     Compute power law fit E(k) ~ k^α in specified k range.
@@ -84,11 +108,11 @@ def compute_power_law_fit(k: np.ndarray, E: np.ndarray, k_range: Tuple[float, fl
         dict: Contains slope, intercept, R², residuals, and quality metrics
     """
     # Select inertial range
-    mask = (k >= k_range[0]) & (k <= k_range[1]) & (E > 0)
-    k_fit = k[mask]
+    mask = (x >= x_range[0]) & (x <= x_range[1]) & (E > 0)
+    x_fit = x[mask]
     E_fit = E[mask]
 
-    if len(k_fit) < 3:
+    if len(x_fit) < 3:
         return {
             'slope': np.nan,
             'intercept': np.nan,
@@ -100,13 +124,13 @@ def compute_power_law_fit(k: np.ndarray, E: np.ndarray, k_range: Tuple[float, fl
         }
 
     # Fit in log-log space: log(E) = slope * log(k) + intercept
-    log_k = np.log10(k_fit)
+    log_x = np.log10(x_fit)
     log_E = np.log10(E_fit)
 
-    slope, intercept, r_value, p_value, std_err = stats.linregress(log_k, log_E)
+    slope, intercept, r_value, p_value, std_err = stats.linregress(log_x, log_E)
 
     # Compute residuals
-    log_E_fit = slope * log_k + intercept
+    log_E_fit = slope * log_x + intercept
     residuals = log_E - log_E_fit
     rmse = np.sqrt(np.mean(residuals**2))
 
@@ -128,10 +152,10 @@ def compute_power_law_fit(k: np.ndarray, E: np.ndarray, k_range: Tuple[float, fl
         'intercept': intercept,
         'R2': R2,
         'rmse': rmse,
-        'n_points': len(k_fit),
+        'n_points': len(x_fit),
         'slope_error': slope_error,
         'residuals': residuals,
-        'k_fit': k_fit,
+        'x_fit': x_fit,
         'E_fit': E_fit,
         'quality': quality
     }
@@ -149,6 +173,13 @@ def assess_steady_state(history: Dict, averaging_start: float) -> Dict:
 
     # Select averaging window
     mask = history['times'] >= averaging_start
+    if history.get('E_total') is None:
+        return {
+            'quality': 'NO_DATA',
+            'variation': np.nan,
+            'mean_energy': np.nan,
+            'std_energy': np.nan
+        }
     E_window = history['E_total'][mask]
 
     if len(E_window) < 2:
@@ -187,20 +218,32 @@ def plot_detailed_analysis(data: Dict, history: Dict, save_path: Path):
     fig = plt.figure(figsize=(16, 12))
     gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
 
-    k = data['k_perp']
+    # Use saved mode-number axis if available; otherwise convert
+    if 'n_perp' in data:
+        n = data['n_perp']
+    else:
+        k = data['k_perp']
+        Lx = float(data.get('domain_size', (2*np.pi, 2*np.pi, 2*np.pi))[0]) if 'domain_size' in data else 2*np.pi
+        n = k * Lx / (2.0 * np.pi)
     E_kin = data['E_kinetic_avg']
     E_mag = data['E_magnetic_avg']
     E_kin_std = data['E_kinetic_std']
     E_mag_std = data['E_magnetic_std']
     E_total = E_kin + E_mag
 
-    # Define inertial range (k⊥ ~ 2-10)
-    k_inertial = (2.0, 10.0)
+    # Define inertial range in mode number
+    res = int(data.get('resolution', 64))
+    if res == 32:
+        n_inertial = (2.0, 8.0)
+    elif res == 64:
+        n_inertial = (3.0, 12.0)
+    else:
+        n_inertial = (3.0, 20.0)
 
     # Compute fits
-    fit_kin = compute_power_law_fit(k, E_kin, k_inertial)
-    fit_mag = compute_power_law_fit(k, E_mag, k_inertial)
-    fit_total = compute_power_law_fit(k, E_total, k_inertial)
+    fit_kin = compute_power_law_fit(n, E_kin, n_inertial)
+    fit_mag = compute_power_law_fit(n, E_mag, n_inertial)
+    fit_total = compute_power_law_fit(n, E_total, n_inertial)
 
     # Assess steady state
     steady_state = assess_steady_state(history, data['averaging_start'])
@@ -208,9 +251,12 @@ def plot_detailed_analysis(data: Dict, history: Dict, save_path: Path):
     # Panel 1: Energy history
     ax1 = fig.add_subplot(gs[0, 0])
     if history is not None:
-        ax1.plot(history['times'], history['E_total'], 'k-', linewidth=1.5, label='Total')
-        ax1.plot(history['times'], history['E_kinetic'], 'b-', alpha=0.7, label='Kinetic')
-        ax1.plot(history['times'], history['E_magnetic'], 'r-', alpha=0.7, label='Magnetic')
+        if history.get('times') is not None and history.get('E_total') is not None:
+            ax1.plot(history['times'], history['E_total'], 'k-', linewidth=1.5, label='Total')
+        if history.get('times') is not None and history.get('E_kinetic') is not None:
+            ax1.plot(history['times'], history['E_kinetic'], 'b-', alpha=0.7, label='Kinetic')
+        if history.get('times') is not None and history.get('E_magnetic') is not None:
+            ax1.plot(history['times'], history['E_magnetic'], 'r-', alpha=0.7, label='Magnetic')
         ax1.axvline(data['averaging_start'], color='gray', linestyle='--',
                    label=f'Averaging start')
         ax1.set_xlabel('Time (τ_A)', fontsize=11)
@@ -225,7 +271,7 @@ def plot_detailed_analysis(data: Dict, history: Dict, save_path: Path):
 
     # Panel 2: Energy history (log scale)
     ax2 = fig.add_subplot(gs[0, 1])
-    if history is not None:
+    if history is not None and history.get('times') is not None and history.get('E_total') is not None:
         ax2.semilogy(history['times'], history['E_total'], 'k-', linewidth=1.5, label='Total')
         ax2.axvline(data['averaging_start'], color='gray', linestyle='--')
         ax2.set_xlabel('Time (τ_A)', fontsize=11)
@@ -239,53 +285,55 @@ def plot_detailed_analysis(data: Dict, history: Dict, save_path: Path):
 
     # Panel 3: Combined spectrum
     ax3 = fig.add_subplot(gs[1, 0])
-    mask = k > 0
-    ax3.loglog(k[mask], E_total[mask], 'ko-', markersize=4, linewidth=1, label='Total (K+M)')
+    mask_pos = n > 0
+    ax3.loglog(n[mask_pos], E_total[mask_pos], 'ko-', markersize=4, linewidth=1, label='Total (K+M)')
 
     # Plot -5/3 reference line
     if fit_total['n_points'] > 0:
-        k_ref = np.logspace(np.log10(k_inertial[0]), np.log10(k_inertial[1]), 50)
-        E_ref = 10**fit_total['intercept'] * k_ref**(-5/3)
-        ax3.loglog(k_ref, E_ref, 'g--', linewidth=2, label=f'k^(-5/3) reference')
+        n_ref = np.logspace(np.log10(n_inertial[0]), np.log10(n_inertial[1]), 50)
+        E_ref = 10**fit_total['intercept'] * n_ref**(-5/3)
+        ax3.loglog(n_ref, E_ref, 'g--', linewidth=2, label=f'n^(-5/3) reference')
 
         # Highlight inertial range
-        ax3.axvspan(k_inertial[0], k_inertial[1], alpha=0.1, color='green', label='Inertial range')
+        ax3.axvspan(n_inertial[0], n_inertial[1], alpha=0.1, color='green', label='Inertial range')
 
-    ax3.set_xlabel('k⊥', fontsize=11)
+    ax3.set_xlabel('Mode number n', fontsize=11)
     ax3.set_ylabel('E(k⊥)', fontsize=11)
     ax3.set_title(f'Total Spectrum | Fit: {fit_total["quality"]} (α = {fit_total["slope"]:.3f}, R² = {fit_total["R2"]:.3f})',
                  fontsize=12, fontweight='bold')
     ax3.legend(fontsize=9)
     ax3.grid(True, alpha=0.3, which='both')
+    ax3.set_ylim(1e-3, None)
 
     # Panel 4: Kinetic vs Magnetic spectra
     ax4 = fig.add_subplot(gs[1, 1])
-    ax4.loglog(k[mask], E_kin[mask], 'bo-', markersize=4, linewidth=1, label=f'Kinetic (α={fit_kin["slope"]:.3f})')
-    ax4.loglog(k[mask], E_mag[mask], 'ro-', markersize=4, linewidth=1, label=f'Magnetic (α={fit_mag["slope"]:.3f})')
+    ax4.loglog(n[mask_pos], E_kin[mask_pos], 'bo-', markersize=4, linewidth=1, label=f'Kinetic (α={fit_kin["slope"]:.3f})')
+    ax4.loglog(n[mask_pos], E_mag[mask_pos], 'ro-', markersize=4, linewidth=1, label=f'Magnetic (α={fit_mag["slope"]:.3f})')
 
     # Plot -5/3 reference
     if fit_total['n_points'] > 0:
-        k_ref = np.logspace(np.log10(k_inertial[0]), np.log10(k_inertial[1]), 50)
-        E_ref_kin = 10**fit_kin['intercept'] * k_ref**(-5/3)
-        E_ref_mag = 10**fit_mag['intercept'] * k_ref**(-5/3)
-        ax4.loglog(k_ref, E_ref_kin, 'b--', linewidth=1.5, alpha=0.7)
-        ax4.loglog(k_ref, E_ref_mag, 'r--', linewidth=1.5, alpha=0.7)
-        ax4.axvspan(k_inertial[0], k_inertial[1], alpha=0.1, color='green')
+        n_ref = np.logspace(np.log10(n_inertial[0]), np.log10(n_inertial[1]), 50)
+        E_ref_kin = 10**fit_kin['intercept'] * n_ref**(-5/3)
+        E_ref_mag = 10**fit_mag['intercept'] * n_ref**(-5/3)
+        ax4.loglog(n_ref, E_ref_kin, 'b--', linewidth=1.5, alpha=0.7)
+        ax4.loglog(n_ref, E_ref_mag, 'r--', linewidth=1.5, alpha=0.7)
+        ax4.axvspan(n_inertial[0], n_inertial[1], alpha=0.1, color='green')
 
-    ax4.set_xlabel('k⊥', fontsize=11)
+    ax4.set_xlabel('Mode number n', fontsize=11)
     ax4.set_ylabel('E(k⊥)', fontsize=11)
     ax4.set_title(f'Kinetic vs Magnetic | K: {fit_kin["quality"]}, M: {fit_mag["quality"]}',
                  fontsize=12, fontweight='bold')
     ax4.legend(fontsize=9)
     ax4.grid(True, alpha=0.3, which='both')
+    ax4.set_ylim(1e-3, None)
 
     # Panel 5: Fit residuals
     ax5 = fig.add_subplot(gs[2, 0])
     if fit_total['n_points'] > 0:
-        ax5.semilogx(fit_total['k_fit'], fit_total['residuals'], 'ko-', markersize=4, linewidth=1)
+        ax5.semilogx(fit_total['x_fit'], fit_total['residuals'], 'ko-', markersize=4, linewidth=1)
         ax5.axhline(0, color='g', linestyle='--', linewidth=2)
-        ax5.fill_between(fit_total['k_fit'], -0.1, 0.1, alpha=0.2, color='green', label='±0.1 dex')
-        ax5.set_xlabel('k⊥', fontsize=11)
+        ax5.fill_between(fit_total['x_fit'], -0.1, 0.1, alpha=0.2, color='green', label='±0.1 dex')
+        ax5.set_xlabel('Mode number n', fontsize=11)
         ax5.set_ylabel('Residuals (log₁₀)', fontsize=11)
         ax5.set_title(f'Total Spectrum Fit Residuals | RMSE = {fit_total["rmse"]:.4f}',
                      fontsize=12, fontweight='bold')
@@ -299,11 +347,18 @@ def plot_detailed_analysis(data: Dict, history: Dict, save_path: Path):
     ax6 = fig.add_subplot(gs[2, 1])
     ax6.axis('off')
 
+    # Compose domain string from attributes if available (no explicit 2π mention)
+    if 'domain_size' in data:
+        Lx, Ly, Lz = data['domain_size']
+        domain_str = f"L = ({Lx:.3g}, {Ly:.3g}, {Lz:.3g})"
+    else:
+        domain_str = "(not specified)"
+
     summary_text = f"""
 PARAMETER SUMMARY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Resolution:  {data['resolution']}³
-Domain:      2π × 2π × 2π
+Domain:      {domain_str}
 v_A:         {data['v_A']:.2f}
 
 DISSIPATION
@@ -354,11 +409,23 @@ Magnetic Spectrum:    {fit_mag['quality']}
 
 def generate_summary_report(data: Dict, history: Dict) -> str:
     """Generate text summary report."""
-    k = data['k_perp']
+    # Use saved mode-number axis if available; otherwise convert
+    if 'n_perp' in data:
+        n = data['n_perp']
+    else:
+        k = data['k_perp']
+        Lx = float(data.get('domain_size', (2*np.pi, 2*np.pi, 2*np.pi))[0])
+        n = k * Lx / (2.0 * np.pi)
+    res = int(data.get('resolution', 64))
+    if res == 32:
+        n_inertial = (2.0, 8.0)
+    elif res == 64:
+        n_inertial = (3.0, 12.0)
+    else:
+        n_inertial = (3.0, 20.0)
     E_total = data['E_kinetic_avg'] + data['E_magnetic_avg']
 
-    k_inertial = (2.0, 10.0)
-    fit_total = compute_power_law_fit(k, E_total, k_inertial)
+    fit_total = compute_power_law_fit(n, E_total, n_inertial)
     steady_state = assess_steady_state(history, data['averaging_start'])
 
     report = f"""
