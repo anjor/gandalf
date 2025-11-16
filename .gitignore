@@ -76,6 +76,9 @@ figures/
 .ipynb_checkpoints/
 *.ipynb
 
+# Matplotlib
+.matplotlib_cache/
+
 # Documentation
 docs/_build/
 docs/_static/
