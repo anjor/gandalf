@@ -31,7 +31,10 @@ The normalized hyper-dissipation formulation `exp(-η·(k⊥²/k⊥²_max)^r·dt
 Implemented `force_alfven_modes_balanced()` in `src/krmhd/forcing.py` with the following key features:
 
 **Core Physics:**
-- Forces z⁺ and z⁻ **independently** (not identically) using Gaussian white noise
+- Forces z⁺ and z⁻ using **independent random realizations** of Gaussian white noise
+  - Each field receives its own random noise pattern (different PRNG keys)
+  - By default `correlation=0.0`: z⁺ and z⁻ forcing are completely uncorrelated
+  - With `correlation > 0`: Partially correlated forcing (shares some randomness)
 - Restricts forcing to low |k_z| modes to respect RMHD ordering (k⊥ >> k∥)
 - Enforces Hermitian symmetry for rfft format (kx=0 and kx=Nyquist planes real-valued)
 
@@ -50,10 +53,12 @@ Implemented `force_alfven_modes_balanced()` in `src/krmhd/forcing.py` with the f
 
 ### Why Balanced Elsasser Works
 
-1. **Drives perpendicular flow**: Forces φ (stream function) without directly forcing A∥
-2. **Avoids spurious reconnection**: Traditional z⁺ ≠ z⁻ forcing can drive artificial magnetic reconnection
+The term "balanced" refers to the **equal amplitude** forcing applied to z⁺ and z⁻ (in the limit where correlation=0 and both receive uncorrelated noise of the same RMS amplitude). This has key physical advantages:
+
+1. **Drives perpendicular flow**: Preferentially forces φ (stream function) without directly forcing A∥
+2. **Avoids spurious reconnection**: Forcing with very different z⁺ vs z⁻ patterns can drive artificial magnetic reconnection
 3. **Preserves RMHD physics**: Maintains k⊥ >> k∥ cascade without artificial parallel structure
-4. **Better energy balance**: Independent z⁺/z⁻ forcing provides more controlled energy injection
+4. **Better energy balance**: Independent random realizations for z⁺/z⁻ provide more controlled energy injection than forcing them identically (which would only force one combination of φ and A∥)
 
 ## Validation Results
 

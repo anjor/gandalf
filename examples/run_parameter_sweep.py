@@ -227,8 +227,6 @@ def run_parameter_sweep(
     # Control concurrency via --jobs
     return results, sweep_id, tasks
 
-    return results, sweep_id
-
 
 def analyze_sweep_results(results: List[Dict], sweep_id: str):
     """

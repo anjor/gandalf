@@ -116,13 +116,14 @@ def _gaussian_white_noise_fourier_perp_lowkz_jit(
     forced_field = noise * mask.astype(noise.dtype)
 
     # Enforce rfft reality on kx=0 and kx=Nyquist planes
+    # Note: For JIT compatibility, we always apply the Nyquist operation even when Nx_rfft==1
+    # (in which case kx=0 and kx=Nyquist are the same, so the second operation is redundant but harmless)
     forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
     Nx_rfft = forced_field.shape[2]
-    if Nx_rfft > 1:
-        nyquist_idx = Nx_rfft - 1
-        forced_field = forced_field.at[:, :, nyquist_idx].set(
-            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-        )
+    nyquist_idx = Nx_rfft - 1
+    forced_field = forced_field.at[:, :, nyquist_idx].set(
+        forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+    )
 
     # Zero DC
     forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
@@ -205,12 +206,13 @@ def _gaussian_white_noise_fourier_jit(
     # Enforce reality on kx=Nyquist plane (if Nx is even)
     # For rfft: shape is [Nz, Ny, Nx//2+1]
     # Nyquist is at index Nx//2 if Nx is even
+    # Note: For JIT compatibility, we always apply this operation even when Nx_rfft==1
+    # (in which case kx=0 and kx=Nyquist are the same, so the operation is redundant but harmless)
     Nx_rfft = forced_field.shape[2]  # This is Nx//2+1
-    if Nx_rfft > 1:  # Have more than just kx=0 mode
-        nyquist_idx = Nx_rfft - 1
-        forced_field = forced_field.at[:, :, nyquist_idx].set(
-            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-        )
+    nyquist_idx = Nx_rfft - 1
+    forced_field = forced_field.at[:, :, nyquist_idx].set(
+        forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+    )
 
     return forced_field
 
@@ -282,14 +284,15 @@ def _gandalf_forcing_fourier_jit(
     forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
 
     # Enforce Hermitian symmetry for rfft format
+    # Note: For JIT compatibility, we always apply the Nyquist operation even when Nx_rfft==1
+    # (in which case kx=0 and kx=Nyquist are the same, so the operation is redundant but harmless)
     forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
 
     Nx_rfft = forced_field.shape[2]
-    if Nx_rfft > 1:
-        nyquist_idx = Nx_rfft - 1
-        forced_field = forced_field.at[:, :, nyquist_idx].set(
-            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-        )
+    nyquist_idx = Nx_rfft - 1
+    forced_field = forced_field.at[:, :, nyquist_idx].set(
+        forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+    )
 
     return forced_field
 
