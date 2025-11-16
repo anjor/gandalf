@@ -516,6 +516,17 @@ def main():
         print("!" * 70)
         sys.exit(1)
 
+    # Validate averaging window
+    if averaging_start >= total_time:
+        print(f"\n" + "!" * 70)
+        print(f"ERROR: Averaging start time ({averaging_start/tau_A:.1f} τ_A) >= total time ({total_time/tau_A:.1f} τ_A)")
+        print(f"       Averaging will never start!")
+        print(f"       Either:")
+        print(f"         1. Reduce --averaging-start to < {total_time/tau_A:.1f} τ_A")
+        print(f"         2. Increase --total-time to > {averaging_start/tau_A:.1f} τ_A")
+        print("!" * 70)
+        sys.exit(1)
+
     # Diagnostic intervals (for logging/monitoring only, doesn't affect physics)
     steady_state_check_interval = 50  # Check every N steps during averaging
     progress_print_interval = 50      # Print progress every N steps (includes NaN detection)
@@ -665,7 +676,7 @@ def main():
     spectrum_kinetic_list = []
     spectrum_magnetic_list = []
     averaging_started = False
-    averaging_start_step = None
+    averaging_start_array_idx = None  # Index into energy_values array (not global step counter!)
 
     # Random key for forcing
     key = jax.random.PRNGKey(42)
@@ -782,8 +793,8 @@ def main():
             # Start averaging when we reach averaging_start time
             if not averaging_started and state.time >= averaging_start:
                 averaging_started = True
-                averaging_start_step = step
-                print(f"\n  *** AVERAGING STARTED at step {step}, t={state.time:.2f} τ_A ***\n")
+                averaging_start_array_idx = len(energy_values)  # Current position in energy_values array
+                print(f"\n  *** AVERAGING STARTED at step {step}, t={state.time:.2f} τ_A (array index {averaging_start_array_idx}) ***\n")
 
             # Collect spectra during averaging window
             if averaging_started:
@@ -799,8 +810,8 @@ def main():
                     print(f"  📸 Snapshot saved: t={state.time:.1f} τ_A")
 
                 # Periodically check and log steady-state status
-                if step % steady_state_check_interval == 0 and len(energy_values) >= averaging_start_step + steady_state_window:
-                    recent_energy = energy_values[averaging_start_step:]
+                if step % steady_state_check_interval == 0 and len(energy_values) >= averaging_start_array_idx + steady_state_window:
+                    recent_energy = energy_values[averaging_start_array_idx:]
                     is_steady = detect_steady_state(
                         energy_values,
                         window=min(steady_state_window, len(recent_energy)),
@@ -938,11 +949,24 @@ def main():
 
     # Final summary
     if averaging_started:
-        recent_energy = energy_values[averaging_start_step:]
-        energy_variation = (max(recent_energy) - min(recent_energy)) / np.mean(recent_energy) * 100
-        print(f"\n  *** EVOLUTION COMPLETE: {len(spectrum_kinetic_list)} spectra collected ***")
-        print(f"  *** Energy range during averaging: [{min(recent_energy):.2e}, {max(recent_energy):.2e}] ***")
-        print(f"  *** Relative variation: {energy_variation:.1f}% (target: <10% for good statistics) ***\n")
+        # Extract energy values from averaging window using array index
+        if averaging_start_array_idx is not None and averaging_start_array_idx < len(energy_values):
+            recent_energy = energy_values[averaging_start_array_idx:]
+        else:
+            # Fallback: use last 20% of data if index is invalid
+            print(f"  WARNING: Invalid averaging_start_array_idx={averaging_start_array_idx}, len(energy_values)={len(energy_values)}")
+            print(f"           Using fallback: last 20% of energy history for statistics")
+            fallback_idx = max(0, len(energy_values) - len(energy_values) // 5)
+            recent_energy = energy_values[fallback_idx:]
+
+        if len(recent_energy) > 0:
+            energy_variation = (max(recent_energy) - min(recent_energy)) / np.mean(recent_energy) * 100
+            print(f"\n  *** EVOLUTION COMPLETE: {len(spectrum_kinetic_list)} spectra collected ***")
+            print(f"  *** Energy range during averaging: [{min(recent_energy):.2e}, {max(recent_energy):.2e}] ***")
+            print(f"  *** Relative variation: {energy_variation:.1f}% (target: <10% for good statistics) ***\n")
+        else:
+            print(f"\n  *** EVOLUTION COMPLETE: {len(spectrum_kinetic_list)} spectra collected ***")
+            print(f"  *** WARNING: No energy data in averaging window - cannot compute statistics ***\n")
 
     elapsed = time.time() - start_time
 
