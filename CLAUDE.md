@@ -134,7 +134,8 @@ examples/
 ├── decaying_turbulence.py          # ✅ COMPLETE: Turbulent cascade with diagnostics (Issue #12)
 ├── orszag_tang.py                  # ✅ COMPLETE: Orszag-Tang vortex benchmark (Issue #11)
 ├── alfvenic_cascade_benchmark.py   # ✅ COMPLETE: Alfvénic cascade benchmark (Thesis Section 2.6.3)
-└── hyper_dissipation_demo.py       # ✅ COMPLETE: Hyper-dissipation r=1 vs r=2 comparison (Issue #28)
+├── hyper_dissipation_demo.py       # ✅ COMPLETE: Hyper-dissipation r=1 vs r=2 comparison (Issue #28)
+└── plot_checkpoint_spectrum.py     # ✅ COMPLETE: Post-processing tool for checkpoint analysis
 ```
 
 **spectral.py** includes:
@@ -730,6 +731,51 @@ force_amplitude = 0.02
   - Enables JAX transformations: tree_map, tree_leaves, etc.
   - Pydantic validation preserved after pytree operations
   - Full vmap compatibility blocked by Issue #83 (initialize_hermite_moments)
+
+### Post-Processing Tools ✅ COMPLETE
+- [x] Checkpoint spectrum plotting (`plot_checkpoint_spectrum.py`) ✅
+  - **Purpose**: Analyze saved checkpoints without rerunning simulations
+  - **Functionality**:
+    - Loads checkpoint data (state, grid, metadata) from HDF5 file
+    - Computes perpendicular energy spectra: E_kin(k⊥) from φ, E_mag(k⊥) from A∥
+    - Separates kinetic and magnetic contributions to turbulent cascade
+    - Generates publication-quality plots with k⊥^(-5/3) reference lines
+    - Prints energy summary: total energy, magnetic fraction, simulation time
+  - **Output formats**:
+    - **Standard style** (default): Total spectrum + kinetic/magnetic comparison, mode number axis n⊥
+    - **Thesis style** (`--thesis-style`): Side-by-side kinetic and magnetic panels, wavenumber axis k⊥
+  - **Physics interpretation**:
+    - k⊥^(-5/3) match in n ~ 3-10: Healthy turbulent cascade in inertial range
+    - High magnetic fraction (f_mag > 0.5): Selective decay (normal MHD behavior)
+    - Exponential cutoff at high-k: Hyper-dissipation working correctly
+    - Flat/rising spectrum at high-k: Under-dissipated, increase η parameter
+  - **Usage**:
+    ```bash
+    # Basic usage
+    python examples/plot_checkpoint_spectrum.py checkpoint_t0300.0.h5
+
+    # Thesis-style formatting (for papers/presentations)
+    python examples/plot_checkpoint_spectrum.py --thesis-style checkpoint.h5
+
+    # Custom output filename
+    python examples/plot_checkpoint_spectrum.py --output fig_spectrum.png checkpoint.h5
+
+    # Batch process multiple checkpoints
+    for f in checkpoints/checkpoint_*.h5; do
+        python examples/plot_checkpoint_spectrum.py "$f"
+    done
+    ```
+  - **Key features**:
+    - Auto-generates output filename from checkpoint time and style
+    - Normalizes reference line to mode n=3 (index 2) in inertial range
+    - Displays interpretation guide in console output
+    - High-resolution PNG output (150 dpi) suitable for publications
+  - **Related functions**:
+    - `load_checkpoint()` from io.py: Loads checkpoint HDF5 files
+    - `energy_spectrum_perpendicular_kinetic()`: Computes E_kin(k⊥) from stream function φ
+    - `energy_spectrum_perpendicular_magnetic()`: Computes E_mag(k⊥) from vector potential A∥
+    - `energy()`: Computes total energy and magnetic fraction
+  - **Implementation**: examples/plot_checkpoint_spectrum.py (278 lines, fully documented)
 
 ## Reference Parameters
 Typical astrophysical parameters:

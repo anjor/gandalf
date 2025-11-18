@@ -703,6 +703,48 @@ plot_energy_history(history, filename='energy.png')
 plot_state(state, filename='final_state.png')
 ```
 
+### Post-Processing: Analyzing Checkpoint Files
+
+The `plot_checkpoint_spectrum.py` script analyzes saved checkpoints without rerunning simulations:
+
+```bash
+# Plot spectra from a checkpoint file
+uv run python examples/plot_checkpoint_spectrum.py examples/output/checkpoints/checkpoint_t0300.0.h5
+
+# Thesis-style formatting (for papers/presentations)
+uv run python examples/plot_checkpoint_spectrum.py --thesis-style checkpoint.h5
+
+# Custom output filename
+uv run python examples/plot_checkpoint_spectrum.py --output fig_spectrum.png checkpoint.h5
+
+# Interactive display
+uv run python examples/plot_checkpoint_spectrum.py --show checkpoint.h5
+
+# Batch process multiple checkpoints
+for f in examples/output/checkpoints/checkpoint_*.h5; do
+    uv run python examples/plot_checkpoint_spectrum.py "$f"
+done
+```
+
+**What it does:**
+- Loads checkpoint data (state, grid, metadata) from HDF5 file
+- Computes perpendicular energy spectra: E_kin(k⊥) and E_mag(k⊥)
+- Separates kinetic (from φ) and magnetic (from A∥) contributions
+- Generates publication-quality plots with k⊥^(-5/3) reference lines
+- Prints energy summary (total energy, magnetic fraction, time)
+
+**Output formats:**
+1. **Standard style** (default): Total spectrum + kinetic/magnetic comparison
+2. **Thesis style** (`--thesis-style`): Side-by-side kinetic and magnetic panels with clean formatting
+
+**Physics interpretation:**
+- **Good k⊥^(-5/3) match** (n ~ 3-10): Healthy turbulent cascade in inertial range
+- **High magnetic fraction** (f_mag > 0.5): Selective decay underway (normal)
+- **Exponential cutoff at high-k**: Hyper-dissipation working correctly
+- **Flat/rising spectrum at high-k**: Under-dissipated, increase η
+
+The script automatically provides interpretation guidance in the console output.
+
 ### Generating Custom Plots
 
 ```python
