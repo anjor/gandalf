@@ -235,12 +235,11 @@ When running turbulence simulations, watch for these warning signs:
 For systematic instability investigation, use the comprehensive diagnostic tools:
 ```bash
 # Run with automated diagnostics
-uv run python examples/alfvenic_cascade_benchmark.py \
+uv run python examples/benchmarks/alfvenic_cascade_benchmark.py \
   --resolution 64 --save-diagnostics --diagnostic-interval 5
-
-# Analyze with automated detection of CFL violations, exponential growth, etc.
-uv run python examples/analyze_issue82_diagnostics.py --resolution 64
 ```
+
+Note: Analysis scripts were removed after Issue #82 investigation completed. Diagnostic data is saved to HDF5 files for manual analysis.
 
 The diagnostic tools automatically track:
 - **max_velocity** and **CFL number** (timestep stability)
@@ -379,7 +378,7 @@ forcing_amplitude² × (number of forced modes) ≤ η × (high-k mode damping)
 
 2. **Test with diagnostics** (10-20 τ_A trial run):
    ```bash
-   uv run python examples/alfvenic_cascade_benchmark.py \
+   uv run python examples/benchmarks/alfvenic_cascade_benchmark.py \
      --resolution 64 --total-time 20 --save-diagnostics
    ```
 
@@ -404,11 +403,11 @@ Monitor during runs:
 **Use automated diagnostics**:
 ```bash
 # Run with diagnostics
-uv run python examples/alfvenic_cascade_benchmark.py \
+uv run python examples/benchmarks/alfvenic_cascade_benchmark.py \
   --resolution 64 --save-diagnostics --diagnostic-interval 5
 
-# Analyze for instability signatures
-uv run python examples/analyze_64cubed_detailed.py
+# Diagnostic data saved to HDF5 files for analysis
+# (Analysis scripts removed after Issue #82 investigation)
 ```
 
 #### Resolution Scaling (Empirical)
@@ -474,9 +473,7 @@ force_amplitude = 0.02
 - Issue #82: Root cause investigation (energy imbalance)
 - PR #84: Detailed diagnostic analysis
 - docs/ISSUE82_SUMMARY.md: Comprehensive findings
-- examples/alfvenic_cascade_benchmark.py: Working examples
-- examples/analyze_64cubed_detailed.py: Diagnostic analysis tool
-- examples/analyze_issue82_diagnostics.py: General turbulence diagnostic visualization
+- examples/benchmarks/alfvenic_cascade_benchmark.py: Working examples with --save-diagnostics flag
 
 ## Validation Suite
 
@@ -619,25 +616,19 @@ force_amplitude = 0.02
   - **Implementation**:
     * compute_turbulence_diagnostics(): JIT-compiled diagnostic function (diagnostics.py:628-802)
     * save/load_turbulence_diagnostics(): HDF5 I/O with compression and metadata (io.py:541-688)
-    * alfvenic_cascade_benchmark.py: Added --save-diagnostics flag and --diagnostic-interval
-    * analyze_issue82_diagnostics.py: Visualization script with 6-panel comparison plots
-    * analyze_64cubed_detailed.py: Detailed phase analysis tool for turbulence diagnostics
+    * examples/benchmarks/alfvenic_cascade_benchmark.py: Added --save-diagnostics flag and --diagnostic-interval
   - **Features**:
     * Auto-terminates on NaN/Inf, CFL > 5, or max_velocity > 1000
-    * Exponential growth analysis: Fits γ from log(velocity) vs time
+    * Diagnostic data saved to HDF5 for manual analysis
     * Time-to-failure identification with termination reason saved to metadata
-    * Comparison mode: Side-by-side analysis of stable vs unstable runs
   - **Usage example**:
     ```bash
     # Run with diagnostics
-    uv run python examples/alfvenic_cascade_benchmark.py \
+    uv run python examples/benchmarks/alfvenic_cascade_benchmark.py \
       --resolution 64 --save-diagnostics --diagnostic-interval 5
 
-    # Analyze and compare
-    uv run python examples/analyze_issue82_diagnostics.py --compare 32 64 128
-
-    # Detailed phase analysis
-    uv run python examples/analyze_64cubed_detailed.py
+    # Diagnostics saved to HDF5 files for analysis
+    # (Automated analysis scripts removed after Issue #82 investigation completed)
     ```
   - **Physics interpretation**:
     * CFL > 1.0 → Timestep too large for explicit integration
@@ -690,7 +681,7 @@ force_amplitude = 0.02
   - **Kinetic effects**: Landau resonance (Z function), FLR corrections (I_m Bessel functions)
   - **Power laws**: Phase mixing m^(-3/2), phase unmixing m^(-1/2) from kinetic theory
 - [x] Alfvénic turbulent cascade (Thesis Section 2.6.3, Figure 2.2) ✅
-  - Full implementation in examples/alfvenic_cascade_benchmark.py
+  - Full implementation in examples/benchmarks/alfvenic_cascade_benchmark.py
   - Reproduces thesis k⊥^(-5/3) critical-balance spectrum
   - Separate kinetic E_kin(k⊥) and magnetic E_mag(k⊥) spectra via new diagnostics functions
   - Fixed-time evolution: Runs for 50 τ_A, averages last 20 τ_A (30-50) (configurable via --total-time, --averaging-start)
@@ -752,17 +743,17 @@ force_amplitude = 0.02
   - **Usage**:
     ```bash
     # Basic usage
-    python examples/plot_checkpoint_spectrum.py checkpoint_t0300.0.h5
+    python scripts/plot_checkpoint_spectrum.py checkpoint_t0300.0.h5
 
     # Thesis-style formatting (for papers/presentations)
-    python examples/plot_checkpoint_spectrum.py --thesis-style checkpoint.h5
+    python scripts/plot_checkpoint_spectrum.py --thesis-style checkpoint.h5
 
     # Custom output filename
-    python examples/plot_checkpoint_spectrum.py --output fig_spectrum.png checkpoint.h5
+    python scripts/plot_checkpoint_spectrum.py --output fig_spectrum.png checkpoint.h5
 
     # Batch process multiple checkpoints
     for f in checkpoints/checkpoint_*.h5; do
-        python examples/plot_checkpoint_spectrum.py "$f"
+        python scripts/plot_checkpoint_spectrum.py "$f"
     done
     ```
   - **Key features**:
@@ -775,7 +766,7 @@ force_amplitude = 0.02
     - `energy_spectrum_perpendicular_kinetic()`: Computes E_kin(k⊥) from stream function φ
     - `energy_spectrum_perpendicular_magnetic()`: Computes E_mag(k⊥) from vector potential A∥
     - `energy()`: Computes total energy and magnetic fraction
-  - **Implementation**: examples/plot_checkpoint_spectrum.py (278 lines, fully documented)
+  - **Implementation**: scripts/plot_checkpoint_spectrum.py (278 lines, fully documented)
 
 ## Reference Parameters
 Typical astrophysical parameters:

@@ -10,8 +10,8 @@ import jax.numpy as jnp
 import sys
 from pathlib import Path
 
-# Add examples directory to path to import grid_convergence_tests
-sys.path.insert(0, str(Path(__file__).parent.parent / "examples"))
+# Add examples/validation directory to path to import grid_convergence_tests
+sys.path.insert(0, str(Path(__file__).parent.parent / "examples" / "validation"))
 
 from grid_convergence_tests import (
     compute_l2_error,
