@@ -270,6 +270,12 @@ Additional validation is performed in the test suite (`tests/` directory):
 
 See `pytest` output for comprehensive test results.
 
+## Related Documentation
+
+- **Benchmark Simulations:** See [../benchmarks/README.md](../benchmarks/README.md) for physics applications and turbulence studies
+- **Post-Processing Tools:** See [../../scripts/README.md](../../scripts/README.md) for spectrum plotting and analysis tools
+- **Main Examples Guide:** See [../README.md](../README.md) for overview and navigation
+
 ## Adding New Validations
 
 When adding new validation scripts:

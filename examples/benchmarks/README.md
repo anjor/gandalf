@@ -181,7 +181,7 @@ uv run python examples/benchmarks/alfvenic_cascade_benchmark.py --save-diagnosti
 
 **Parameters (resolution-dependent):**
 - **32³**: η=1.0, amplitude=0.05, r=2 (stable)
-- **64³**: η=20.0, amplitude=0.01, r=2 (anomalous, see CLAUDE.md Issue #82)
+- **64³**: η=20.0, amplitude=0.01, r=2 (anomalous, see CLAUDE.md "Forced Turbulence Parameter Selection" or [Issue #82](https://github.com/anjor/gandalf/issues/82))
 - **128³**: η=2.0, amplitude=0.05, r=2 (stable)
 
 **Reference:** Thesis Section 2.6.3, Figure 2.2
@@ -207,10 +207,11 @@ eta = 2.0       # Hyper-resistivity coefficient
 hyper_r = 2     # Dissipation order (STABLE at all tested resolutions)
 ```
 
-**Thesis value (use with caution):**
+**Thesis value (use with caution - may exhibit numerical instability):**
 ```python
 eta = 0.5-1.0   # Lower coefficient compensates for higher order
-hyper_r = 4     # Sharper cutoff, but instability in forced runs (Issue #82)
+hyper_r = 4     # Sharper cutoff, but can cause exponential energy growth in forced runs
+                # See CLAUDE.md "Forced Turbulence Parameter Selection" and Issue #82
 ```
 
 ### Forcing Parameters
@@ -305,6 +306,12 @@ uv run python scripts/field_line_visualization.py --checkpoint checkpoint.h5
 ### Memory errors
 **Diagnosis:** Resolution too high for available RAM
 **Solution:** Reduce resolution or run on HPC system
+
+## Related Documentation
+
+- **Validation Tests:** See [../validation/README.md](../validation/README.md) for convergence tests and physics verification
+- **Post-Processing Tools:** See [../../scripts/README.md](../../scripts/README.md) for spectrum plotting and analysis tools
+- **Main Examples Guide:** See [../README.md](../README.md) for overview and navigation
 
 ## Physics References
 

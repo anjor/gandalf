@@ -42,6 +42,12 @@ Prints energy summary: total energy, magnetic fraction, simulation time.
 
 Visualize magnetic field line wandering and compare parallel energy spectra computed along field lines vs along the z-axis. Demonstrates spectral interpolation for field line following.
 
+**Physical Context:**
+
+In RMHD turbulence, magnetic field lines deviate from straight paths along B₀ due to perpendicular field perturbations δB⊥. The field line wandering distance scales as δr⊥ ~ ε Lz where ε ~ δB⊥/B₀ is the RMHD ordering parameter. For valid RMHD (ε << 1), wandering should be small compared to box size.
+
+True k∥ spectra should be computed along curved field lines, not along the straight z-axis. This script demonstrates the difference between these two approaches and validates the spectral interpolation infrastructure for field line following.
+
 **Basic Usage:**
 
 ```bash
@@ -53,17 +59,28 @@ uv run python scripts/field_line_visualization.py --checkpoint checkpoint.h5
 
 # Adjust number of field lines traced
 uv run python scripts/field_line_visualization.py --num-lines 10
+
+# Custom output directory
+uv run python scripts/field_line_visualization.py --output-dir ./figures/
 ```
 
 **Output:**
 
-Creates visualizations showing:
-- 3D field line trajectories (wandering in x-y plane)
-- Comparison of E(k∥) computed along field lines vs z-axis
-- Demonstrates effects of field line following on parallel structure
+Creates two visualization files:
+- **field_lines_3d.png**: 3D trajectories showing field line wandering in x-y plane as function of z
+- **parallel_spectra_comparison.png**: E(k∥) computed along field lines (curved) vs z-axis (straight)
 
-**Physics:**
-Field line wandering δr⊥ ~ ε Lz where ε ~ δB⊥/B₀ is the RMHD ordering parameter. For valid RMHD, wandering should be small compared to box size.
+**Key Features:**
+- **Spectral interpolation**: Uses FFT padding (2× resolution) for accurate field interpolation
+- **RK2 integration**: Second-order Runge-Kutta for field line tracing
+- **RMHD validity check**: Prints wandering amplitude to verify ε << 1 ordering
+
+**Interpretation:**
+- Small wandering (δr⊥ << Lz): RMHD ordering valid, field line corrections minimal
+- Large wandering (δr⊥ ~ Lz): RMHD breakdown, need full MHD treatment
+- Spectral differences: Shows how field line curvature affects parallel structure measurements
+
+**Note:** This is a diagnostic tool demonstrating field line following infrastructure. Full k∥ spectra via FFT along curved field lines is deferred (infrastructure complete, see CLAUDE.md Issue #25).
 
 ### `plot_energy_evolution.py`
 

@@ -4,6 +4,27 @@ This directory contains example simulations and validation scripts demonstrating
 
 ## Directory Structure
 
+```
+examples/
+├── benchmarks/         ← Start here for physics demos
+│   ├── README.md
+│   ├── forcing_minimal.py                 ⭐ Entry point for new users
+│   ├── driven_turbulence.py
+│   ├── decaying_turbulence.py
+│   ├── orszag_tang.py
+│   └── alfvenic_cascade_benchmark.py
+├── validation/         ← Physics verification tests
+│   ├── README.md
+│   ├── hyper_dissipation_demo.py
+│   ├── kinetic_fdt_validation.py
+│   ├── grid_convergence_tests.py
+│   └── hermite_convergence.py
+└── output/             ← Auto-generated results
+    ├── checkpoints/
+    ├── timeseries/
+    └── figures/
+```
+
 ### `benchmarks/` - Core Simulation Examples
 
 Standard test cases and demonstrations of the solver's physics capabilities. Start here if you're new to the code.
@@ -109,7 +130,7 @@ force_amplitude = 0.05
 
 # Resolution-dependent validated values
 # 32³: eta=1.0, amplitude=0.05
-# 64³: eta=20.0, amplitude=0.01 (anomalous, under investigation)
+# 64³: eta=20.0, amplitude=0.01 (anomalous, see CLAUDE.md "Forced Turbulence Parameter Selection" or Issue #82)
 # 128³: eta=2.0, amplitude=0.05
 ```
 
@@ -120,14 +141,14 @@ hyper_r = 2  # RECOMMENDED for production (stable, validated)
 hyper_r = 4  # Thesis value (sharper cutoff, but stability issues in forced runs)
 ```
 
-See `CLAUDE.md` for detailed discussion of numerical stability and parameter constraints.
+See `CLAUDE.md` section "Forced Turbulence: Parameter Selection Guide (Issue #82)" for detailed discussion of numerical stability and parameter constraints.
 
 ## Getting Help
 
 - **Code documentation**: See docstrings in each script
-- **Physics background**: See `CLAUDE.md` for KRMHD equations and numerical methods
-- **Troubleshooting**: Check `CLAUDE.md` sections on "Forced Turbulence Parameter Selection" and "Detecting Numerical Instabilities"
-- **Post-processing**: See `scripts/README.md` for visualization and analysis tools
+- **Physics background**: See `CLAUDE.md` section "KRMHD Hierarchy" for equations and "Numerical Methods" for implementation
+- **Troubleshooting**: Check `CLAUDE.md` sections "Forced Turbulence: Parameter Selection Guide (Issue #82)" and "Automated Turbulence Diagnostics"
+- **Post-processing**: See `../scripts/README.md` for visualization and analysis tools
 
 ## Contributing New Examples
 
