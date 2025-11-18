@@ -1,13 +1,59 @@
 #!/usr/bin/env python3
 """Plot energy spectra from a KRMHD checkpoint file.
 
-This script loads a checkpoint file and computes/plots the energy spectra
-without needing to rerun the simulation.
+This script loads a checkpoint file and computes/plots the perpendicular energy
+spectra E(k⊥) without needing to rerun the simulation. It separates kinetic and
+magnetic contributions and compares them to the k⊥^(-5/3) Kolmogorov spectrum
+expected in MHD turbulence.
 
-Usage:
-    python plot_checkpoint_spectrum.py checkpoint_final_t0200.0.h5
-    python plot_checkpoint_spectrum.py --output custom_name.png checkpoint.h5
+Physical Context:
+-----------------
+In RMHD turbulence, the perpendicular cascade follows critical balance with
+energy distributed as E(k⊥) ~ k⊥^(-5/3) in the inertial range. The spectrum
+is split into:
+- Kinetic energy: From perpendicular velocity (stream function φ)
+- Magnetic energy: From perpendicular magnetic field (vector potential A∥)
+
+The magnetic fraction f_mag = E_mag / E_total typically increases over time
+as magnetic energy is preferentially preserved (selective decay).
+
+Output Formats:
+--------------
+1. Standard style (default):
+   - Left panel: Total energy spectrum with reference line
+   - Right panel: Kinetic vs Magnetic spectra comparison
+   - Mode number axis: n⊥ (integers, no 2π factors)
+
+2. Thesis style (--thesis-style):
+   - Left panel: Kinetic energy spectrum
+   - Right panel: Magnetic energy spectrum
+   - Physical wavenumber axis: k⊥ (matches published figures)
+   - Clean formatting for papers/presentations
+
+Usage Examples:
+--------------
+Basic usage (saves to auto-generated filename):
+    python plot_checkpoint_spectrum.py checkpoint_t0300.0.h5
+
+Custom output filename:
+    python plot_checkpoint_spectrum.py --output fig_spectrum.png checkpoint.h5
+
+Thesis-style formatting:
     python plot_checkpoint_spectrum.py --thesis-style checkpoint.h5
+
+Interactive display:
+    python plot_checkpoint_spectrum.py --show checkpoint.h5
+
+Batch processing multiple checkpoints:
+    for f in examples/output/checkpoints/checkpoint_*.h5; do
+        python plot_checkpoint_spectrum.py "$f"
+    done
+
+Output:
+-------
+- PNG image file with log-log plots of energy spectra
+- Console output with energy summary statistics
+- Reference lines showing k⊥^(-5/3) or n⊥^(-5/3) power law
 """
 
 import argparse
@@ -24,6 +70,24 @@ from krmhd.physics import energy
 
 
 def main():
+    """Load checkpoint, compute spectra, and generate publication-quality plots.
+
+    This function:
+    1. Loads checkpoint data (state, grid, metadata) from HDF5 file
+    2. Computes total energy and magnetic fraction
+    3. Computes perpendicular energy spectra: E_kin(k⊥) and E_mag(k⊥)
+    4. Generates plots with k⊥^(-5/3) reference lines
+    5. Saves output figure to PNG file
+
+    The perpendicular spectrum E(k⊥) is computed by binning Fourier modes by
+    their perpendicular wavenumber magnitude k⊥ = sqrt(kx² + ky²), then
+    summing energy contributions from all kz modes at each k⊥.
+
+    Reference Line Normalization:
+    The k⊥^(-5/3) power law reference line is normalized to match the spectrum
+    at mode n=3 (index 2). This provides a visual guide for assessing whether
+    the inertial range follows the expected Kolmogorov scaling.
+    """
     parser = argparse.ArgumentParser(description="Plot energy spectra from checkpoint")
     parser.add_argument("checkpoint", type=Path, help="Path to checkpoint HDF5 file")
     parser.add_argument(
@@ -42,11 +106,19 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load checkpoint
+    # ===================================================================
+    # Step 1: Load checkpoint and extract state
+    # ===================================================================
     print(f"Loading checkpoint: {args.checkpoint}")
     state, grid, metadata = load_checkpoint(args.checkpoint)
 
-    # Compute total energy
+    # ===================================================================
+    # Step 2: Compute integrated energy diagnostics
+    # ===================================================================
+    # The energy() function computes volume integrals of:
+    # - Kinetic: E_kin = ∫ |∇⊥φ|²/2 dV (perpendicular flow energy)
+    # - Magnetic: E_mag = ∫ |∇⊥A∥|²/2 dV (perpendicular field energy)
+    # - Compressive: E_comp = ∫ |δB∥|²/2 dV (parallel field perturbations)
     energy_dict = energy(state)
     E_mag = energy_dict["magnetic"]
     E_kin = energy_dict["kinetic"]
@@ -59,25 +131,41 @@ def main():
     print(f"  Total energy: {E_total:.4e}")
     print(f"  Magnetic fraction: {f_mag:.3f}")
 
-    # Compute spectra
+    # ===================================================================
+    # Step 3: Compute perpendicular energy spectra E(k⊥)
+    # ===================================================================
+    # These functions bin Fourier modes by k⊥ = sqrt(kx² + ky²) and sum
+    # energy contributions from all kz modes at each k⊥. This gives the
+    # perpendicular cascade spectrum, which should follow k⊥^(-5/3) in
+    # the inertial range for RMHD turbulence.
     print("Computing energy spectra...")
     k_perp, E_kin_spec = energy_spectrum_perpendicular_kinetic(state)
     _, E_mag_spec = energy_spectrum_perpendicular_magnetic(state)
     E_total_spec = E_kin_spec + E_mag_spec
 
-    # Mode numbers (more intuitive than k with 2π factors)
-    # k_perp = 2π n / L_min, so n = k_perp L_min / 2π
+    # ===================================================================
+    # Step 4: Convert to mode numbers for user-friendly axis
+    # ===================================================================
+    # Mode numbers (n=1, 2, 3, ...) are more intuitive than wavenumbers
+    # with 2π factors. For a domain of size L, mode n has k = 2πn/L.
+    # We use L_min to ensure n corresponds to the fundamental mode.
     L_min = min(grid.Lx, grid.Ly)
     n_perp = k_perp * L_min / (2 * np.pi)
 
-    # Generate output filename
+    # ===================================================================
+    # Step 5: Generate output filename
+    # ===================================================================
     if args.output is None:
-        # Extract time from checkpoint name or use state.time
+        # Auto-generate filename from checkpoint time and style
         style_suffix = "_thesis_style" if args.thesis_style else ""
         output_name = f"spectrum_checkpoint{style_suffix}_t{state.time:.0f}.png"
         args.output = args.checkpoint.parent / output_name
 
-    # Determine axis variable (k_perp for thesis style, n_perp for standard)
+    # ===================================================================
+    # Step 6: Choose axis variable and labels based on style
+    # ===================================================================
+    # Thesis style: Use physical wavenumbers k⊥ (matches publications)
+    # Standard style: Use integer mode numbers n⊥ (easier to interpret)
     if args.thesis_style:
         x_axis = k_perp
         x_label = "k⊥"
@@ -87,14 +175,29 @@ def main():
         x_label = "Mode number n⊥"
         x_ref_label = "n⊥^(-5/3)"
 
-    # Create plot
+    # ===================================================================
+    # Step 7: Create two-panel figure
+    # ===================================================================
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Reference line normalization point
+    # Reference line normalization point (mode n=3, which is index 2)
+    # We normalize the k^(-5/3) power law to match the spectrum at this
+    # point, chosen to be in the inertial range for typical resolutions.
     idx_ref = 2  # n=3 or k⊥=3 (0-indexed)
 
+    # ===================================================================
+    # Step 8: Plot spectra with reference lines
+    # ===================================================================
+    # The k⊥^(-5/3) reference line is the expected Kolmogorov-like spectrum
+    # for MHD turbulence in the inertial range. Deviations indicate:
+    # - Steeper slope (< -5/3): Over-dissipation or insufficient forcing
+    # - Shallower slope (> -5/3): Under-resolved, energy piling up
+    # - Good match: Proper balance of forcing, cascade, and dissipation
+
     if args.thesis_style:
-        # Thesis style: Kinetic on left, Magnetic on right, clean titles
+        # ===============================================================
+        # Thesis Style: Side-by-side kinetic and magnetic spectra
+        # ===============================================================
         # Left panel: Kinetic
         ax1.loglog(x_axis, E_kin_spec, "-", linewidth=3, color='#1f77b4', label=f"{grid.Nx}³, r=2")
         if len(E_kin_spec) > idx_ref:
@@ -117,7 +220,9 @@ def main():
         ax2.legend(fontsize=12, frameon=False)
         ax2.grid(alpha=0.3, which="both")
     else:
-        # Standard style: Total on left, Kinetic vs Magnetic on right
+        # ===============================================================
+        # Standard Style: Total spectrum + kinetic/magnetic comparison
+        # ===============================================================
         # Left panel: Total spectrum
         ax1.loglog(x_axis, E_total_spec, "o-", label="Total", linewidth=2, markersize=5)
         if len(E_total_spec) > idx_ref:
@@ -144,20 +249,29 @@ def main():
         # Overall title for standard style only
         fig.suptitle(f"Energy Spectra from Checkpoint ({grid.Nx}³ grid)", fontsize=14, y=0.98)
 
-    # Adjust layout
+    # ===================================================================
+    # Step 9: Finalize layout and save figure
+    # ===================================================================
+    # Adjust spacing to prevent label overlap
     if args.thesis_style:
         plt.tight_layout()
     else:
         plt.tight_layout(rect=[0, 0, 1, 0.96])
 
-    # Save
+    # Save high-resolution PNG (150 dpi suitable for papers/presentations)
     print(f"Saving plot: {args.output}")
     plt.savefig(args.output, dpi=150, bbox_inches="tight")
 
+    # Optionally display interactively (useful for quick inspection)
     if args.show:
         plt.show()
 
     print("Done!")
+    print("\nInterpretation Guide:")
+    print("  - Good k⊥^(-5/3) match in inertial range (n ~ 3-10): Healthy turbulence")
+    print("  - High magnetic fraction (f_mag > 0.5): Selective decay underway")
+    print("  - Exponential cutoff at high-k: Hyper-dissipation working correctly")
+    print("  - Flat or rising spectrum at high-k: Under-dissipated, increase η")
 
 
 if __name__ == "__main__":
