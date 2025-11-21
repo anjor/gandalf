@@ -1,0 +1,56 @@
+# Modal Ignore File
+# Exclude files and directories from Modal deployments
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+
+# Output directories
+output/
+results/
+*.h5
+*.npz
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+docs/_build/
+*.md
+!CLAUDE.md
+
+# Examples (already copied via scripts/)
+examples/output/
+
+# Temporary files
+*.tmp
+.modal_*.py
+
+# Large data files
+*.hdf5
+*.dat
+*.bin

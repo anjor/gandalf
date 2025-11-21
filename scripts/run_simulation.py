@@ -97,7 +97,14 @@ def run_simulation(
     if config.forcing.enabled:
         key = jr.PRNGKey(config.forcing.seed or 42)
         if verbose:
-            print(f"✓ Forcing enabled: k ∈ [{config.forcing.k_min}, {config.forcing.k_max}]")
+            # Show both physical wavenumbers and mode numbers for clarity
+            import numpy as np
+            L_min = min(grid.Lx, grid.Ly, grid.Lz)
+            n_min = int(np.round(config.forcing.k_min * L_min / (2 * np.pi)))
+            n_max = int(np.round(config.forcing.k_max * L_min / (2 * np.pi)))
+            n_min = max(1, n_min)
+            n_max = max(n_min, n_max)
+            print(f"✓ Forcing enabled: k ∈ [{config.forcing.k_min:.2f}, {config.forcing.k_max:.2f}], modes n ∈ [{n_min}, {n_max}]")
     else:
         key = None
 
@@ -173,11 +180,22 @@ def run_simulation(
     for step in range(config.time_integration.n_steps):
         # Apply forcing if enabled
         if config.forcing.enabled:
+            # Convert physical wavenumbers to integer mode numbers (Issue #97)
+            # k = 2πn/L_min, so n = k*L_min/(2π)
+            import numpy as np
+            L_min = min(grid.Lx, grid.Ly, grid.Lz)
+            n_min = int(np.round(config.forcing.k_min * L_min / (2 * np.pi)))
+            n_max = int(np.round(config.forcing.k_max * L_min / (2 * np.pi)))
+
+            # Ensure at least one mode
+            n_min = max(1, n_min)
+            n_max = max(n_min, n_max)
+
             state, key = force_alfven_modes(
                 state,
                 amplitude=config.forcing.amplitude,
-                k_min=config.forcing.k_min,
-                k_max=config.forcing.k_max,
+                n_min=n_min,
+                n_max=n_max,
                 dt=dt,
                 key=key
             )
