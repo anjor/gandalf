@@ -1155,14 +1155,10 @@ def force_hermite_moments(
         - Measure time-averaged Hermite spectrum: ⟨|g_m(k)|²⟩
         - Compare with analytical prediction from fluctuation-dissipation theorem
 
-        The steady-state spectrum has the form:
-            ⟨|g_m|²⟩ ~ |R(k,ω)|² × Γ_m²(k⊥ρ_s) × m^(-3/2) × exp(-m/m_crit)
-
-        where:
-        - R(k,ω): Linear kinetic response function (Landau damping)
-        - Γ_m(b): FLR corrections via modified Bessel functions
-        - m^(-3/2): Phase mixing power law
-        - m_crit ~ k∥v_th/ν: Collisional cutoff
+        The steady-state spectrum decays with m due to:
+        - Landau damping: Parallel streaming drives energy to higher moments
+        - Collisional damping: Lenard-Bernstein operator damps high-m modes
+        - m_crit ~ k∥v_th/ν: Collisional cutoff where damping dominates
 
         Mode number convention (same as force_alfven_modes):
         - n=1: Fundamental mode (largest wavelength λ = L)
