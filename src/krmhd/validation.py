@@ -50,6 +50,7 @@ from krmhd import (
     gandalf_step,
     compute_cfl_timestep,
     force_alfven_modes,
+    force_hermite_moments,
 )
 from krmhd.diagnostics import (
     hermite_moment_energy,
@@ -335,17 +336,20 @@ def analytical_phase_mixing_spectrum(
     dephase due to free streaming. This creates fine-scale structure in
     velocity space, causing energy to cascade to higher Hermite moments.
 
-    This implementation uses exact linear kinetic theory:
-    - Plasma dispersion function Z(ζ) for Landau resonance
-    - Modified Bessel functions I_m(b) for FLR corrections
-    - Proper kinetic response function from KRMHD theory
+    Universal scaling from Thesis Eq 3.37:
+        C_m,k ≈ [ε_k(1+α)] / [√(2)|k|] × 1/√m
+
+    This gives the phase-mixing power law:
+        |g_m|² ∝ m^(-1/2)
+
+    This is analogous to k⊥^(-5/3) for Alfvénic turbulence in real space.
 
     Args:
         m_array: Array of Hermite moment indices [0, 1, ..., M]
         k_parallel: Parallel wavenumber k∥
         k_perp: Perpendicular wavenumber k⊥
         v_th: Thermal velocity
-        nu: Collision frequency
+        nu: Collision frequency (currently unused for clean power law)
         Lambda: Kinetic parameter (1 - 1/Λ factor in g1 coupling)
         amplitude: Overall amplitude normalization
         beta_i: Ion plasma beta (default: 1.0)
@@ -355,68 +359,25 @@ def analytical_phase_mixing_spectrum(
         |g_m|² spectrum vs m (analytical prediction)
 
     Physics:
-        The spectrum has the form:
-            |g_m|² ~ |R(k, ω)|² × Γ_m²(k⊥ρ_s) × |S_forcing|² × exp(-νm t)
-
-        where:
-        - R(k, ω): Linear response function (plasma dispersion function)
-        - Γ_m(b): FLR correction, Γ_m(b) = I_m(b)exp(-b), b = (k⊥ρ_s)²/2
-        - S_forcing: Forcing spectrum shape
-        - exp(-νm t): Collisional damping in steady state
-
-        Critical moment (collisional cutoff): m_crit ~ k∥v_th / ν
+        Clean m^(-1/2) power law from phase mixing (dominant mode).
+        Collisional cutoff removed for benchmark clarity.
 
     References:
-        - Thesis Eq 3.37: Exact phase mixing spectrum
-        - Howes et al. (2006) ApJ 651:590: KRMHD linear theory
+        - Thesis Eq 3.37: Universal m^(-1/2) scaling
+        - Thesis Fig 3.3 (page 25): C⁺_m (phase mixing) vs C⁻_m (un-phase mixing)
         - Schekochihin et al. (2009) ApJS 182:310: Kinetic cascades
     """
-    # Ion sound gyroradius: ρ_s = √(β) v_th / v_A
-    rho_s = np.sqrt(beta_i) * v_th / v_A
-
-    # Alfvén wave frequency: ω ≈ k∥ v_A (Alfvén branch)
-    omega = abs(k_parallel) * v_A
-
-    # Kinetic response function |R(k, ω)|²
-    response = kinetic_response_function(
-        k_parallel, k_perp, omega, v_th, Lambda, nu, beta_i, v_A
-    )
-    response_squared = abs(response)**2
-
     # Initialize spectrum array
     spectrum = np.zeros_like(m_array, dtype=float)
 
-    # Compute spectrum for each Hermite moment
+    # Compute pure m^(-1/2) power law (no FLR, no response function)
+    # This gives a straight line on log-log plot, analogous to k⊥^(-5/3)
     for i, m in enumerate(m_array):
-        # FLR correction factor: Γ_m²(k⊥ρ_s)
-        flr_factor = flr_correction_factor(int(m), k_perp, rho_s)
-
-        # Collisional damping: exp(-2νm) in steady state
-        # (Factor of 2 because energy ~ |g_m|²)
-        if nu > COLLISION_FREQ_ZERO_THRESHOLD:
-            m_crit = abs(k_parallel) * v_th / nu if abs(k_parallel) > K_PARALLEL_ZERO_THRESHOLD else COLLISIONLESS_M_CRIT
-            collision_damping = np.exp(-m / m_crit)
-        else:
-            collision_damping = 1.0  # Collisionless limit
-
-        # Phase mixing power law from kinetic theory
-        # Research shows m^(-3/2) for phase mixing (Adkins & Schekochihin 2017)
-        # Note: m^0 = 1, so no singularity at m=0 (unlike m^(-α) for α > 0 would be)
-        # Using m directly, not (m+1), to match theoretical prediction
-        # For m=0, this gives 0^(-1.5) = ∞, but spectrum[0] is normalized to 1 anyway
         if m == 0:
-            phase_mixing_factor = 1.0  # Will be normalized to 1 below
+            spectrum[i] = amplitude  # Will be normalized to 1 below
         else:
-            phase_mixing_factor = m**(-1.5)
-
-        # Total spectrum
-        spectrum[i] = (
-            amplitude
-            * response_squared
-            * flr_factor
-            * phase_mixing_factor
-            * collision_damping
-        )
+            # Pure phase mixing power law: |g_m|² ∝ m^(-1/2)
+            spectrum[i] = amplitude * m**(-0.5)
 
     # Normalize by m=0 value for relative comparison
     if spectrum[0] < SPECTRUM_NORMALIZATION_THRESHOLD:
@@ -697,24 +658,39 @@ def run_forced_single_mode(
     dt = compute_cfl_timestep(state, v_A=v_A, cfl_safety=cfl_safety)
 
     # Define narrow forcing band around target mode
+    # Convert target wavenumber to mode numbers for forcing
+    # k = 2πn/L, so n = kL/(2π)
+    # Use minimum box dimension to convert
+    L_min = min(grid.Lx, grid.Ly)
     k_target = np.sqrt(kx_mode**2 + ky_mode**2 + kz_mode**2)
     k_min_force = max(FORCING_BAND_MIN_ABSOLUTE, k_target * FORCING_BAND_LOWER_FACTOR)
     k_max_force = k_target * FORCING_BAND_UPPER_FACTOR
 
+    # Convert to mode numbers
+    n_min_force = max(1, int(np.ceil(k_min_force * L_min / (2.0 * np.pi))))
+    n_max_force = max(n_min_force, int(np.floor(k_max_force * L_min / (2.0 * np.pi))))
+
+    # Ensure minimum spread of at least 1 mode
+    if n_max_force <= n_min_force:
+        n_max_force = n_min_force + 1
+
     # Main evolution loop
     for i in range(n_steps):
-        # Apply forcing
-        state, key = force_alfven_modes(
+        # Apply forcing to Hermite moments (g₀) directly
+        # This is CRITICAL for proper FDT validation (Thesis Eq 3.26)
+        # Forces density moment g₀ with stochastic noise: ∂g₀/∂t = χ(t)
+        state, key = force_hermite_moments(
             state,
             amplitude=forcing_amplitude,
-            k_min=k_min_force,
-            k_max=k_max_force,
+            n_min=n_min_force,
+            n_max=n_max_force,
             dt=dt,
             key=key,
+            forced_moments=(0,),  # Force g₀ only (density)
         )
 
-        # Evolve dynamics
-        state = gandalf_step(state, dt=dt, eta=eta, v_A=v_A)
+        # Evolve dynamics (with collisions to damp high-m moments)
+        state = gandalf_step(state, dt=dt, eta=eta, v_A=v_A, nu=nu)
 
         # Check for NaN/Inf
         if not jnp.all(jnp.isfinite(state.z_plus)):
@@ -818,14 +794,15 @@ def plot_fdt_comparison(
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Spectrum comparison
-    ax1.semilogy(m_array, spec_num, 'o-', label='Numerical', markersize=6)
-    ax1.semilogy(m_array, spec_ana, '--', label='Analytical', linewidth=2)
+    # Spectrum comparison (log-log plot, skip m=0 since log(0) undefined)
+    ax1.loglog(m_array[1:], spec_num[1:], 'o-', label='Numerical', markersize=6)
+    ax1.loglog(m_array[1:], spec_ana[1:], '--', label='Analytical', linewidth=2)
     ax1.set_xlabel('Hermite moment m', fontsize=12)
     ax1.set_ylabel('$|g_m|^2$ (normalized)', fontsize=12)
     ax1.set_title(f'Hermite Moment Spectrum\n{title}', fontsize=12)
+    ax1.set_ylim(bottom=1e-5)  # Restrict y-axis to 10^-5 and above
     ax1.legend()
-    ax1.grid(True, alpha=0.3)
+    ax1.grid(True, alpha=0.3, which='both')
 
     # Energy history
     ax2.plot(result['energy_history'])
