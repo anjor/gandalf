@@ -110,7 +110,7 @@ class KRMHDState(BaseModel):
     beta_i: float = Field(gt=0.0, description="Ion plasma beta")
     v_th: float = Field(gt=0.0, description="Electron thermal velocity")
     nu: float = Field(ge=0.0, description="Collision frequency")
-    Lambda: float = Field(gt=0.0, description="Kinetic closure parameter Λ")
+    Lambda: float = Field(description="Kinetic closure parameter Λ (α = -1/Λ, can be negative)")
     time: float = Field(ge=0.0, description="Simulation time")
     grid: SpectralGrid3D = Field(description="Spectral grid specification")
 

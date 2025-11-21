@@ -88,6 +88,7 @@ from krmhd.forcing import (
     force_alfven_modes_gandalf,
     force_alfven_modes_specific,
     force_slow_modes,
+    force_hermite_moments,
     compute_energy_injection_rate,
 )
 
@@ -161,6 +162,7 @@ __all__ = [
     "gaussian_white_noise_fourier",
     "force_alfven_modes",
     "force_slow_modes",
+    "force_hermite_moments",
     "compute_energy_injection_rate",
     # Configuration
     "GridConfig",
