@@ -38,7 +38,7 @@ where {f,g} = ẑ·(∇f × ∇g) is the Poisson bracket.
 
 RMHD is an asymptotic expansion in the small parameter ε:
 ```
-ε ~ δB⊥/B₀ ~ ρᵢ/L  << 1
+ε ~ δB⊥/B₀  << 1
 ```
 
 **Ordering hierarchy:**
@@ -52,7 +52,6 @@ RMHD is an asymptotic expansion in the small parameter ε:
   - ε ~ 0.1: Moderate perturbations, visible field line wandering
   - ε ~ 0.3: Strong perturbations, approaching RMHD breakdown
 - **Beyond ε ~ 0.5**: RMHD ordering breaks down, need full MHD
-- **k_max ρᵢ << 1**: Valid only at scales larger than ion gyroradius
 
 **Physical consequences:**
 - Field line wandering: δr⊥ ~ ε Lz (always << Lz in valid RMHD)
@@ -479,9 +478,8 @@ force_amplitude = 0.02
 
 ### Linear Physics Tests
 1. **Alfvén wave dispersion**: ω² = k∥²v_A²
-2. **Kinetic Alfvén waves**: Include FLR corrections if β ~ 1
-3. **Slow mode damping**: Verify passive advection without back-reaction
-4. **Landau damping**: Compare damping rates with analytical theory
+2. **Slow mode damping**: Verify passive advection without back-reaction
+3. **Landau damping**: Emerges from parallel streaming in Hermite moments
 
 ### Nonlinear Benchmarks
 1. **Orszag-Tang vortex**: Standard MHD test (fluid limit)
@@ -671,15 +669,6 @@ force_amplitude = 0.02
   - k^(-5/3) turbulent spectrum initialization
   - Energy history tracking and selective decay
   - Spectrum analysis with visualization
-- [x] Kinetic FDT validation (Issue #27, #66) ✅
-  - Infrastructure complete: Force single k-modes, measure |gₘ|² spectrum, time-average
-  - 3 passing tests: Basic validation, parameter scaling, energy balance
-  - Example script: examples/kinetic_fdt_validation.py demonstrates workflow
-  - **Status**: Exact analytical expressions implemented (Issue #66)
-  - **Implementation**: Thesis Eqs 3.37 & 3.58 with plasma dispersion functions and Bessel functions
-  - **Physics validated**: Spectrum decays exponentially with m (collisional damping works)
-  - **Kinetic effects**: Landau resonance (Z function), FLR corrections (I_m Bessel functions)
-  - **Power laws**: Phase mixing m^(-3/2), phase unmixing m^(-1/2) from kinetic theory
 - [x] Alfvénic turbulent cascade (Thesis Section 2.6.3, Figure 2.2) ✅
   - Full implementation in examples/benchmarks/alfvenic_cascade_benchmark.py
   - Reproduces thesis k⊥^(-5/3) critical-balance spectrum
@@ -773,7 +762,6 @@ Typical astrophysical parameters:
 - β (plasma beta): 0.01 - 100
 - τ (T_i/T_e): 1 - 10
 - Resolution: 128³ to 512³ (3D spatial grid)
-- k_max ρ_s << 1 (KRMHD valid only at scales larger than ion gyroradius)
 
 ### Note on k∥ Independence
 For straight, uniform B₀ = B₀ẑ, different k∥ modes evolve independently through the
