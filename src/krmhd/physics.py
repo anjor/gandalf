@@ -110,7 +110,7 @@ class KRMHDState(BaseModel):
     beta_i: float = Field(gt=0.0, description="Ion plasma beta")
     v_th: float = Field(gt=0.0, description="Electron thermal velocity")
     nu: float = Field(ge=0.0, description="Collision frequency")
-    Lambda: float = Field(gt=0.0, description="Kinetic closure parameter Λ")
+    Lambda: float = Field(description="Kinetic closure parameter Λ (α = -1/Λ, can be negative)")
     time: float = Field(ge=0.0, description="Simulation time")
     grid: SpectralGrid3D = Field(description="Spectral grid specification")
 
@@ -1307,78 +1307,6 @@ def initialize_alfven_wave(
     )
 
 
-def initialize_kinetic_alfven_wave(
-    grid: SpectralGrid3D,
-    M: int,
-    kx_mode: float = 1.0,
-    ky_mode: float = 0.0,
-    kz_mode: float = 1.0,
-    amplitude: float = 0.1,
-    v_th: float = 1.0,
-    beta_i: float = 1.0,
-    nu: float = 0.01,
-    Lambda: float = 1.0,
-) -> KRMHDState:
-    """
-    Initialize kinetic Alfvén wave with full kinetic response in Hermite moments.
-
-    Similar to initialize_alfven_wave(), but includes proper kinetic response
-    in the Hermite moments. The kinetic Alfvén wave (KAW) includes:
-    - Finite Larmor radius (FLR) corrections at k⊥ρ_i ~ 1
-    - Landau damping when ω/(k∥·v_th) ~ 1
-    - Modified dispersion: ω² = k∥² v_A² (1 + k⊥²ρ_s²)
-
-    The Hermite moments are initialized consistently with the wave fields to
-    capture the kinetic response from the start.
-
-    Args:
-        grid: SpectralGrid3D defining spatial dimensions
-        M: Number of Hermite moments
-        kx_mode: Wavenumber in x direction (default: 1.0)
-        ky_mode: Wavenumber in y direction (default: 0.0)
-        kz_mode: Wavenumber in z (parallel) direction (default: 1.0)
-        amplitude: Wave amplitude (default: 0.1)
-        v_th: Electron thermal velocity (default: 1.0)
-        beta_i: Ion plasma beta (default: 1.0)
-        nu: Collision frequency (default: 0.01)
-
-    Returns:
-        KRMHDState with kinetic Alfvén wave initial condition
-
-    Example:
-        >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
-        >>> state = initialize_kinetic_alfven_wave(
-        ...     grid, M=30, kx_mode=2.0, kz_mode=1.0, v_th=1.0, beta_i=1.0
-        ... )
-        >>> # Should show Landau damping for appropriate parameters
-
-    Physics:
-        This initialization is for testing kinetic effects:
-        - Use when k⊥ρ_s ~ 1 (kinetic regime)
-        - Compare with fluid Alfvén wave to measure kinetic corrections
-        - Validate Landau damping rate against linear theory
-    """
-    # Start with fluid Alfvén wave
-    state = initialize_alfven_wave(
-        grid, M, kx_mode, ky_mode, kz_mode, amplitude, v_th, beta_i, nu, Lambda
-    )
-
-    # TODO(Issue #TBD): Implement proper kinetic Alfvén wave solution
-    # Currently uses fluid initialization. Need to add:
-    # 1. Solve linearized kinetic equation for wave mode
-    # 2. Set g moments from analytic solution: g_m(k) ∝ Z(ω/k∥v_th)
-    # 3. Include FLR corrections: dispersion ω² = k∥²v_A²(1 + k⊥²ρ_s²)
-    # 4. Validate Landau damping rate against linear theory
-    #
-    # References:
-    # - Howes et al. (2006) ApJ 651:590 - KRMHD linear theory
-    # - Schekochihin et al. (2009) ApJS 182:310 - Kinetic cascades
-    #
-    # For now, this returns fluid wave + small moment perturbations as placeholder.
-
-    return state
-
-
 def initialize_random_spectrum(
     grid: SpectralGrid3D,
     M: int,
@@ -1691,7 +1619,6 @@ def initialize_orszag_tang(
         - Uses Nz=2 minimum for 2D problem (3D machinery with z-independence)
         - **Initial Hermite moments g = 0** represents fluid limit (no kinetic response).
           This is correct for Orszag-Tang, which tests fluid nonlinear dynamics.
-          For kinetic problems, use initialize_kinetic_alfven_wave() instead.
         - No compressibility: ∇·v = 0, ∇·B = 0 enforced by spectral methods
 
     References:

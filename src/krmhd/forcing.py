@@ -1097,6 +1097,128 @@ def force_slow_modes(
     return new_state, key
 
 
+def force_hermite_moments(
+    state: KRMHDState,
+    amplitude: float,
+    n_min: int,
+    n_max: int,
+    dt: float,
+    key: Array,
+    forced_moments: Tuple[int, ...] = (0,),
+) -> Tuple[KRMHDState, Array]:
+    """
+    Apply Gaussian white noise forcing to Hermite moments (kinetic distribution).
+
+    **CRITICAL FOR KINETIC FDT VALIDATION**: This function forces the Hermite
+    moments g_m directly, which is required for proper fluctuation-dissipation
+    theorem (FDT) validation in velocity space (Thesis Chapter 3, Eq 3.26).
+
+    Unlike force_alfven_modes() which forces z± and excites g_m indirectly through
+    nonlinear coupling, this function adds stochastic forcing directly to the
+    specified Hermite moments. For FDT validation, typically only g₀ (density) is
+    forced, matching the kinetic Langevin equation:
+
+        ∂g₀/∂t + ∂(g₁/√2)/∂z = χ(t)
+
+    where χ(t) is Gaussian white noise forcing in velocity space.
+
+    The forcing is additive: g_m → g_m + F for each m ∈ forced_moments.
+
+    Args:
+        state: Current KRMHD state with Hermite moments
+        amplitude: Forcing amplitude (energy injection ~ amplitude²)
+        n_min: Minimum mode number for forcing band (typically n=1 or n=2)
+        n_max: Maximum mode number for forcing band (typically n=2 to n=5)
+        dt: Timestep size (for white noise scaling)
+        key: JAX random key
+        forced_moments: Tuple of Hermite moment indices to force (default: (0,) for g₀ only)
+            Examples:
+            - (0,): Force density g₀ only (standard FDT validation)
+            - (0, 1): Force both g₀ and g₁ (density + parallel velocity)
+            - (0, 1, 2): Force g₀, g₁, g₂ (including parallel pressure)
+
+    Returns:
+        new_state: State with forcing applied to specified Hermite moments
+        new_key: Updated random key
+
+    Example:
+        >>> key = jax.random.PRNGKey(42)
+        >>> # Force g₀ at mode n=1 (fundamental mode) for FDT validation
+        >>> state_forced, key = force_hermite_moments(
+        ...     state, amplitude=0.15, n_min=1, n_max=1, dt=0.01, key=key,
+        ...     forced_moments=(0,)
+        ... )
+
+    Physics:
+        For kinetic FDT validation (Thesis §3.2.1):
+        - Drive a single k-mode with white noise: χ(k,t)
+        - Measure time-averaged Hermite spectrum: ⟨|g_m(k)|²⟩
+        - Compare with analytical prediction from fluctuation-dissipation theorem
+
+        The steady-state spectrum decays with m due to:
+        - Landau damping: Parallel streaming drives energy to higher moments
+        - Collisional damping: Lenard-Bernstein operator damps high-m modes
+        - m_crit ~ k∥v_th/ν: Collisional cutoff where damping dominates
+
+        Mode number convention (same as force_alfven_modes):
+        - n=1: Fundamental mode (largest wavelength λ = L)
+        - n=2: Second harmonic (λ = L/2), etc.
+
+    References:
+        - Thesis Chapter 3: "Fluctuation-dissipation relations for a kinetic Langevin equation"
+        - Thesis Eq 3.26: Forcing term in g₀ equation
+        - Thesis Eq 3.37: Analytical phase mixing spectrum
+        - Kanekar et al. (2015) J. Plasma Phys. 81: Kinetic FDT validation
+    """
+    from typing import Tuple as TupleType  # Import for type hint
+
+    # Input validation (gaussian_white_noise_fourier validates n_min, n_max, dt)
+    if amplitude <= 0:
+        raise ValueError(f"amplitude must be positive, got {amplitude}")
+    if not forced_moments:
+        raise ValueError("forced_moments cannot be empty")
+    if not isinstance(forced_moments, (tuple, list)):
+        raise TypeError(f"forced_moments must be tuple or list, got {type(forced_moments)}")
+
+    # Validate moment indices
+    for m in forced_moments:
+        if not isinstance(m, int):
+            raise TypeError(f"Moment indices must be integers, got {type(m).__name__} for m={m}")
+        if m < 0:
+            raise ValueError(f"Moment indices must be non-negative, got m={m}")
+        if m > state.M:
+            raise ValueError(f"Moment index m={m} exceeds M={state.M}")
+
+    # Generate forcing field (same noise for all specified moments)
+    forcing, key = gaussian_white_noise_fourier(
+        state.grid, amplitude, n_min, n_max, dt, key
+    )
+
+    # Apply forcing to specified Hermite moments
+    # g has shape [Nz, Ny, Nx//2+1, M+1], forcing has shape [Nz, Ny, Nx//2+1]
+    g_new = jnp.array(state.g)  # Create mutable copy
+
+    for m in forced_moments:
+        g_new = g_new.at[:, :, :, m].add(forcing)
+
+    # Create new state
+    new_state = KRMHDState(
+        z_plus=state.z_plus,  # Alfvén modes unchanged
+        z_minus=state.z_minus,
+        B_parallel=state.B_parallel,  # Slow modes unchanged
+        g=g_new,  # Forced Hermite moments
+        M=state.M,
+        beta_i=state.beta_i,
+        v_th=state.v_th,
+        nu=state.nu,
+        Lambda=state.Lambda,
+        time=state.time,
+        grid=state.grid,
+    )
+
+    return new_state, key
+
+
 def compute_energy_injection_rate(
     state_before: KRMHDState,
     state_after: KRMHDState,

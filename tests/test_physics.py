@@ -762,32 +762,6 @@ class TestKRMHDState:
         assert n_nonzero_phi == 1, f"Should have 1 mode in phi, got {n_nonzero_phi}"
         assert n_nonzero_A == 1, f"Should have 1 mode in A_parallel, got {n_nonzero_A}"
 
-    def test_initialize_kinetic_alfven_wave(self):
-        """Test kinetic Alfvén wave initialization."""
-        from krmhd.physics import initialize_kinetic_alfven_wave
-
-        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
-        M = 10
-
-        state = initialize_kinetic_alfven_wave(
-            grid,
-            M,
-            kx_mode=1.0,
-            kz_mode=1.0,
-            amplitude=0.1,
-            v_th=1.0,
-            beta_i=1.0,
-        )
-
-        # Check state type
-        from krmhd.physics import KRMHDState
-        assert isinstance(state, KRMHDState)
-
-        # Should be similar to regular Alfvén wave for now (TODO: add kinetic response)
-        assert jnp.any(state.phi != 0.0)
-        assert jnp.any(state.A_parallel != 0.0)
-        assert jnp.all(state.B_parallel == 0.0)
-
     def test_initialize_random_spectrum(self):
         """Test random turbulent spectrum initialization."""
         from krmhd.physics import initialize_random_spectrum

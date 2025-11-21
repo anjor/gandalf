@@ -4,7 +4,7 @@ A modern Python implementation of a Kinetic Reduced Magnetohydrodynamics (KRMHD)
 
 ## Overview
 
-KRMHD is a spectral code designed to simulate turbulence in weakly collisional magnetized plasmas, incorporating kinetic effects such as Landau damping and finite Larmor radius corrections. This is a modern rewrite of the legacy [GANDALF](https://github.com/anjor/gandalf) Fortran+CUDA implementation, leveraging JAX for automatic differentiation and GPU acceleration via Apple's Metal backend.
+KRMHD is a spectral code designed to simulate turbulence in weakly collisional magnetized plasmas, incorporating kinetic effects such as Landau damping via Hermite velocity-space representation. This is a modern rewrite of the legacy [GANDALF](https://github.com/anjor/gandalf) Fortran+CUDA implementation, leveraging JAX for automatic differentiation and GPU acceleration via Apple's Metal backend.
 
 ## Physics Model
 
@@ -947,7 +947,6 @@ Reference values for astrophysical plasmas:
 - **Plasma beta**: 0.01 - 100 (ratio of thermal to magnetic pressure)
 - **Temperature ratio tau**: 1 - 10 (T_i/T_e)
 - **Resolution**: 128³ to 512³ grid points (3D spectral)
-- **Scale range**: k_max rho_s << 1 (KRMHD valid only at scales larger than ion gyroradius)
 
 ## Validation Tests
 
@@ -957,8 +956,7 @@ The code includes validation against:
 2. **Orszag-Tang vortex**: Standard MHD benchmark - `examples/orszag_tang.py` ✅
 3. **Decaying turbulence**: k^(-5/3) inertial range spectrum - `examples/decaying_turbulence.py` ✅
 4. **Energy conservation**: 0.0086% error in inviscid runs (Issue #44 resolved)
-5. **Kinetic Alfven waves**: FLR corrections (planned - Issue #10)
-6. **Landau damping**: Analytical damping rates (planned - Issue #27)
+5. **Landau damping**: Emerges from parallel streaming in Hermite moment evolution
 
 ## Current Status
 

@@ -388,7 +388,6 @@ class SimulationConfig(BaseModel):
         from krmhd import (
             initialize_random_spectrum,
             initialize_alfven_wave,
-            initialize_kinetic_alfven_wave,
             KRMHDState
         )
         import jax.numpy as jnp
@@ -411,20 +410,6 @@ class SimulationConfig(BaseModel):
         elif ic.type == "alfven_wave":
             kx, ky, kz = ic.k_wave
             return initialize_alfven_wave(
-                grid,
-                M=ic.M,
-                kx_mode=kx,
-                ky_mode=ky,
-                kz_mode=kz,
-                amplitude=ic.amplitude,
-                beta_i=self.physics.beta_i,
-                nu=self.physics.nu,
-                Lambda=self.physics.Lambda
-            )
-
-        elif ic.type == "kinetic_alfven_wave":
-            kx, ky, kz = ic.k_wave
-            return initialize_kinetic_alfven_wave(
                 grid,
                 M=ic.M,
                 kx_mode=kx,
