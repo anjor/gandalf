@@ -286,7 +286,7 @@ def main():
                         help='Forcing amplitude (overrides resolution default)')
     parser.add_argument('--hyper-r', type=int, default=None,
                         help='Hyper-dissipation order (overrides resolution default)')
-    parser.add_argument('--hyper-n', type=int, default=None, choices=[1, 2, 4],
+    parser.add_argument('--hyper-n', type=int, default=None, choices=[1, 2, 3, 4],
                         help='Hyper-collision order (overrides resolution default)')
     parser.add_argument('--use-gandalf-forcing', action='store_true',
                         help='Use original GANDALF forcing formula (1/k_perp weighting with log-random modulation)')

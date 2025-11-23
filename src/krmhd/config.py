@@ -77,7 +77,7 @@ class PhysicsConfig(BaseModel):
     # Hyper-dissipation parameters (Issue #28)
     # Constraints match timestepping.py:564 and timestepping.py:570
     hyper_r: int = Field(1, description="Hyper-resistivity order (1, 2, 4, or 8)")
-    hyper_n: int = Field(1, description="Hyper-collision order (1, 2, or 4)")
+    hyper_n: int = Field(1, description="Hyper-collision order (1, 2, 3, 4, or 6)")
 
     @field_validator('hyper_r')
     @classmethod
@@ -94,10 +94,11 @@ class PhysicsConfig(BaseModel):
     @classmethod
     def check_hyper_n(cls, v: int) -> int:
         """Validate hyper_n matches timestepping.py constraints."""
-        if v not in {1, 2, 4}:
+        if v not in {1, 2, 3, 4, 6}:
             raise ValueError(
-                f"hyper_n must be 1, 2, or 4 (got {v}). "
-                "Use n=1 for standard collisions, n=2 for typical turbulence studies."
+                f"hyper_n must be 1, 2, 3, 4, or 6 (got {v}). "
+                "Use n=1 for standard collisions, n=2 for typical studies, "
+                "n=3 to match original GANDALF alpha_m=3, n=6 for thesis Figure 3.3."
             )
         return v
 

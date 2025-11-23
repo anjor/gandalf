@@ -1219,6 +1219,163 @@ def force_hermite_moments(
     return new_state, key
 
 
+def force_hermite_moments_specific(
+    state: KRMHDState,
+    mode_triplets: list,
+    amplitude: float,
+    dt: float,
+    key: Array,
+    forced_moments: Tuple[int, ...] = (0,),
+) -> Tuple[KRMHDState, Array]:
+    """
+    Force specific (kx, ky, kz) mode triplets in Hermite moments with Gaussian white noise.
+
+    This enables single-mode or few-mode forcing for Hermite cascade validation,
+    following the kinetic Langevin equation (Thesis Chapter 3, Eq 3.26):
+
+        ∂g₀/∂t + ∂(g₁/√2)/∂z = χ(k,t)
+
+    where χ(k,t) is Gaussian white noise applied to specific k-modes.
+
+    Key differences from force_hermite_moments():
+    - Shell forcing: Forces ~50-100 modes with k_min ≤ |k| ≤ k_max
+    - Specific forcing: Forces only specified (kx,ky,kz) modes (typically 1-6)
+    - Result: Clean single-mode Hermite cascade test
+
+    Each mode is forced with Gaussian white noise amplitude:
+        amp = amplitude / sqrt(dt)
+
+    This ensures time-independent energy injection rate: dE/dt ~ amplitude²
+
+    Args:
+        state: Current KRMHD state
+        mode_triplets: List of (nx, ny, nz) integer mode number triplets to force
+            Example: [(0, 0, 1)] for single fundamental k_z mode
+        amplitude: Forcing amplitude (sets energy injection rate ~ amplitude²)
+        dt: Timestep
+        key: JAX random key
+        forced_moments: Tuple of Hermite moment indices to force (default: (0,) for g₀ only)
+            Examples:
+            - (0,): Force density g₀ only (standard FDT validation)
+            - (0, 1): Force both g₀ and g₁ (density + parallel velocity)
+
+    Returns:
+        new_state: State with forcing applied to specified Hermite moments
+        new_key: Updated random key
+
+    Example:
+        >>> # Force single k_z mode for Hermite cascade
+        >>> state, key = force_hermite_moments_specific(
+        ...     state,
+        ...     mode_triplets=[(0, 0, 1)],  # Fundamental parallel mode
+        ...     amplitude=0.1,
+        ...     dt=0.01,
+        ...     key=key,
+        ...     forced_moments=(0,)  # Force g₀ only
+        ... )
+
+    Physics:
+        For Hermite cascade validation:
+        - Force single k_z ≠ 0 mode (e.g., (0,0,1)) to drive cascade via parallel streaming
+        - Parallel streaming: ∂g₀/∂z couples g₀ → g₁ → g₂ → ... (energy to high m)
+        - Collisions: Lenard-Bernstein operator damps high-m modes
+        - Steady state: Balance between streaming (injection) and collisions (dissipation)
+        - Expected spectrum: E_m ~ m^(-1/2) (phase mixing/unmixing balance)
+
+    Reference:
+        - Thesis Chapter 3: "Fluctuation-dissipation relations for a kinetic Langevin equation"
+        - Thesis Eq 3.26-3.28: Linear kinetic equations
+        - Thesis Eq 3.37: Analytical phase mixing spectrum
+    """
+    from typing import Tuple as TupleType  # Import for type hint
+
+    # Input validation
+    if amplitude <= 0:
+        raise ValueError(f"amplitude must be positive, got {amplitude}")
+    if dt <= 0:
+        raise ValueError(f"dt must be positive, got {dt}")
+    if not mode_triplets:
+        raise ValueError("mode_triplets cannot be empty")
+    if not forced_moments:
+        raise ValueError("forced_moments cannot be empty")
+    if not isinstance(forced_moments, (tuple, list)):
+        raise TypeError(f"forced_moments must be tuple or list, got {type(forced_moments)}")
+
+    # Validate moment indices
+    for m in forced_moments:
+        if not isinstance(m, int):
+            raise TypeError(f"Moment indices must be integers, got {type(m).__name__} for m={m}")
+        if m < 0:
+            raise ValueError(f"Moment indices must be non-negative, got m={m}")
+        if m > state.M:
+            raise ValueError(f"Moment index m={m} exceeds M={state.M}")
+
+    grid = state.grid
+    Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
+
+    # Convert mode triplets to rfft-compatible format
+    rfft_modes = _get_rfft_compatible_modes(mode_triplets)
+    n_modes = len(rfft_modes)
+
+    # Generate random phase for each mode
+    key, subkey = jax.random.split(key)
+    random_phase = jax.random.uniform(subkey, shape=(n_modes,),
+                                     minval=0.0, maxval=2.0*jnp.pi)
+
+    # Compute amplitude and phase for each mode
+    mode_indices = []
+    conjugate_flags = []
+    amplitudes = []
+
+    # Gaussian white noise amplitude (time-independent energy injection)
+    amp_scale = amplitude / jnp.sqrt(dt)
+
+    for i, (nx_stored, ny_stored, nz_stored, conjugate) in enumerate(rfft_modes):
+        # Convert to array indices
+        ix, iy, iz = _mode_triplet_to_indices(nx_stored, ny_stored, nz_stored,
+                                              Nx, Ny, Nz)
+
+        # Complex amplitude with random phase (Gaussian white noise)
+        amplitude_complex = amp_scale * jnp.exp(1j * random_phase[i])
+
+        mode_indices.append([iz, iy, ix])  # Note: [Nz, Ny, Nx] order
+        conjugate_flags.append(conjugate)
+        amplitudes.append(amplitude_complex)
+
+    # Convert to JAX arrays
+    mode_indices = jnp.array(mode_indices, dtype=jnp.int32)
+    conjugate_flags = jnp.array(conjugate_flags, dtype=jnp.bool_)
+    amplitudes = jnp.array(amplitudes, dtype=jnp.complex64)
+
+    # Apply forcing via JIT kernel (reuse GANDALF kernel - works for any amplitude formula)
+    shape = (Nz, Ny, Nx // 2 + 1)
+    forcing = _gandalf_forcing_specific_jit(shape, mode_indices,
+                                            conjugate_flags, amplitudes)
+
+    # Apply forcing to specified Hermite moments
+    # g has shape [Nz, Ny, Nx//2+1, M+1], forcing has shape [Nz, Ny, Nx//2+1]
+    g_new = jnp.array(state.g)  # Create mutable copy
+    for m in forced_moments:
+        g_new = g_new.at[:, :, :, m].add(forcing)
+
+    # Create new state
+    new_state = KRMHDState(
+        z_plus=state.z_plus,
+        z_minus=state.z_minus,
+        B_parallel=state.B_parallel,
+        g=g_new,
+        M=state.M,
+        beta_i=state.beta_i,
+        v_th=state.v_th,
+        nu=state.nu,
+        Lambda=state.Lambda,
+        time=state.time,
+        grid=state.grid,
+    )
+
+    return new_state, key
+
+
 def compute_energy_injection_rate(
     state_before: KRMHDState,
     state_after: KRMHDState,
