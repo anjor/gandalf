@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from pathlib import Path
+from scipy import stats
 
 from krmhd import (
     SpectralGrid3D,
@@ -377,6 +378,39 @@ def main():
     print("\n" + "=" * 70)
     print("Diagnostic Summary:")
     print("=" * 70)
+
+    # Fit power law to C+ (forward flux)
+    m_fit_min = 3
+    m_fit_max = min(16, M // 2)
+    m_fit = m_values[m_fit_min:m_fit_max+1]
+    C_plus_fit = C_plus[m_fit_min:m_fit_max+1]
+
+    mask_fit_plus = C_plus_fit > 0
+    if mask_fit_plus.sum() >= 3:
+        log_m = np.log10(m_fit[mask_fit_plus])
+        log_C = np.log10(C_plus_fit[mask_fit_plus])
+        slope_plus, intercept_plus, r_value_plus, _, _ = stats.linregress(log_m, log_C)
+        r_squared_plus = r_value_plus**2
+        print(f"\nPower law fit for C+ (m={m_fit_min}-{m_fit_max}):")
+        print(f"  Slope: {slope_plus:.3f} (expected: -0.5 for m^(-1/2))")
+        print(f"  R²: {r_squared_plus:.4f}")
+    else:
+        print(f"\nC+ power law fit: insufficient data points")
+
+    # Fit power law to C- (backward flux) if significant
+    C_minus_fit = C_minus[m_fit_min:m_fit_max+1]
+    mask_fit_minus = C_minus_fit > 0
+    if mask_fit_minus.sum() >= 3:
+        log_m_minus = np.log10(m_fit[mask_fit_minus])
+        log_C_minus = np.log10(C_minus_fit[mask_fit_minus])
+        slope_minus, intercept_minus, r_value_minus, _, _ = stats.linregress(log_m_minus, log_C_minus)
+        r_squared_minus = r_value_minus**2
+        print(f"\nPower law fit for C- (m={m_fit_min}-{m_fit_max}):")
+        print(f"  Slope: {slope_minus:.3f} (expected: -1.5 for m^(-3/2))")
+        print(f"  R²: {r_squared_minus:.4f}")
+    else:
+        print(f"\nC- power law fit: insufficient data (C- ≈ 0, expected)")
+
     print(f"\nForward/Backward ratio at key moments:")
     for m_test in [2, 5, 10, 15]:
         if m_test < M:
