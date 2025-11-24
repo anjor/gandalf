@@ -24,6 +24,18 @@ import warnings
 import jax.numpy as jnp
 
 
+# Validation thresholds (constants)
+OVERFLOW_SAFETY_THRESHOLD = 50.0  # Maximum safe value for η·dt and ν·dt
+WARNING_THRESHOLD_RATIO = 0.8  # Warn when approaching threshold (80%)
+INJECTION_DISSIPATION_RATIO_LIMIT = 10.0  # Max ratio before warning
+DEFAULT_CFL_LIMIT = 1.0  # Default CFL stability limit
+CFL_WARNING_RATIO = 0.8  # Warn when CFL > 80% of limit
+
+# Resolution-dependent amplitude limits
+HIGH_RES_AMPLITUDE_LIMIT_128 = 0.4  # Max amplitude for 128³
+HIGH_RES_AMPLITUDE_LIMIT_256 = 0.3  # Max amplitude for 256³
+
+
 @dataclass
 class ValidationResult:
     """Result of parameter validation."""
@@ -61,7 +73,7 @@ def validate_overflow_safety(
     nu: Optional[float] = None,
     hyper_r: int = 1,
     hyper_n: int = 1,
-    threshold: float = 50.0
+    threshold: float = OVERFLOW_SAFETY_THRESHOLD
 ) -> ValidationResult:
     """
     Check overflow safety for hyper-dissipation operators.
@@ -111,9 +123,9 @@ def validate_overflow_safety(
         suggestions.append(
             f"Reduce η to < {threshold/dt:.4f} or reduce dt to < {threshold/eta:.4f}"
         )
-    elif eta_dt > 0.8 * threshold:
+    elif eta_dt > WARNING_THRESHOLD_RATIO * threshold:
         warnings_list.append(
-            f"Resistivity near overflow: η·dt = {eta_dt:.2f} > {0.8*threshold:.1f} "
+            f"Resistivity near overflow: η·dt = {eta_dt:.2f} > {WARNING_THRESHOLD_RATIO*threshold:.1f} "
             f"(close to safety limit)"
         )
         suggestions.append(f"Consider reducing η or dt for better safety margin")
@@ -129,9 +141,9 @@ def validate_overflow_safety(
             suggestions.append(
                 f"Reduce ν to < {threshold/dt:.4f} or reduce dt to < {threshold/nu:.4f}"
             )
-        elif nu_dt > 0.8 * threshold:
+        elif nu_dt > WARNING_THRESHOLD_RATIO * threshold:
             warnings_list.append(
-                f"Collision near overflow: ν·dt = {nu_dt:.2f} > {0.8*threshold:.1f}"
+                f"Collision near overflow: ν·dt = {nu_dt:.2f} > {WARNING_THRESHOLD_RATIO*threshold:.1f}"
             )
             suggestions.append(f"Consider reducing ν or dt for better safety margin")
 
@@ -151,7 +163,7 @@ def validate_cfl_condition(
     dt: float,
     dx: float,
     v_A: float = 1.0,
-    cfl_limit: float = 1.0
+    cfl_limit: float = DEFAULT_CFL_LIMIT
 ) -> ValidationResult:
     """
     Check CFL (Courant-Friedrichs-Lewy) condition for numerical stability.
@@ -182,6 +194,13 @@ def validate_cfl_condition(
     warnings_list = []
     suggestions = []
 
+    # Handle edge cases
+    if dx <= 0:
+        errors.append(
+            f"Invalid grid spacing: dx = {dx} (must be > 0)"
+        )
+        return ValidationResult(False, warnings_list, errors, suggestions)
+
     cfl_actual = dt * v_A / dx
 
     if cfl_actual > cfl_limit:
@@ -191,9 +210,9 @@ def validate_cfl_condition(
         )
         dt_max = cfl_limit * dx / v_A
         suggestions.append(f"Reduce dt to < {dt_max:.4f} for CFL = {cfl_limit}")
-    elif cfl_actual > 0.8 * cfl_limit:
+    elif cfl_actual > CFL_WARNING_RATIO * cfl_limit:
         warnings_list.append(
-            f"CFL near limit: CFL = {cfl_actual:.3f} > {0.8*cfl_limit:.2f}"
+            f"CFL near limit: CFL = {cfl_actual:.3f} > {CFL_WARNING_RATIO*cfl_limit:.2f}"
         )
         suggestions.append(
             f"Consider using dt with safety factor 0.3-0.5 for robustness"
@@ -252,21 +271,21 @@ def validate_forcing_stability(
 
     # 1. Check forcing amplitude vs resolution
     if resolution >= 128:
-        if force_amplitude > 0.4:
+        if force_amplitude > HIGH_RES_AMPLITUDE_LIMIT_128:
             warnings_list.append(
                 f"High forcing amplitude ({force_amplitude:.2f}) at {resolution}³ resolution: "
                 f"May cause exponential energy growth (Issue #82)"
             )
             suggestions.append(
-                f"Recommended: amplitude < 0.3-0.4 for {resolution}³ resolution"
+                f"Recommended: amplitude < {HIGH_RES_AMPLITUDE_LIMIT_128} for {resolution}³ resolution"
             )
 
     if resolution >= 256:
-        if force_amplitude > 0.3:
+        if force_amplitude > HIGH_RES_AMPLITUDE_LIMIT_256:
             warnings_list.append(
                 f"Forcing amplitude ({force_amplitude:.2f}) may be too strong for {resolution}³"
             )
-            suggestions.append(f"Try reducing to < 0.3 for stability")
+            suggestions.append(f"Try reducing to < {HIGH_RES_AMPLITUDE_LIMIT_256} for stability")
 
     # 2. Check forcing vs dissipation balance
     # Rough estimate: dissipation ~ η k² ~ η (2π n_max)²
@@ -274,7 +293,7 @@ def validate_forcing_stability(
     dissipation_estimate = eta * k_force**2
     injection_estimate = force_amplitude**2  # ε_inj ∝ amplitude²
 
-    if injection_estimate > 10 * dissipation_estimate:
+    if injection_estimate > INJECTION_DISSIPATION_RATIO_LIMIT * dissipation_estimate:
         warnings_list.append(
             f"Energy injection >> dissipation: may not reach steady state"
         )

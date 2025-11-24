@@ -9,6 +9,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -19,8 +20,19 @@ from .validation import (
 )
 
 
-def cmd_validate(args):
-    """Validate parameters from a config file."""
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Validate parameters from a config file.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Command line arguments
+
+    Returns
+    -------
+    int
+        Exit code (0 = success, 1 = failure)
+    """
     config_path = Path(args.config)
 
     if not config_path.exists():
@@ -50,8 +62,19 @@ def cmd_validate(args):
         return 1
 
 
-def cmd_suggest(args):
-    """Suggest parameters for a given resolution."""
+def cmd_suggest(args: argparse.Namespace) -> int:
+    """Suggest parameters for a given resolution.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Command line arguments
+
+    Returns
+    -------
+    int
+        Exit code (0 = success)
+    """
     Nx, Ny, Nz = args.resolution
     sim_type = args.type
     cfl = args.cfl
@@ -98,8 +121,19 @@ def cmd_suggest(args):
     return 0
 
 
-def cmd_check(args):
-    """Quick parameter check from command line."""
+def cmd_check(args: argparse.Namespace) -> int:
+    """Quick parameter check from command line.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Command line arguments
+
+    Returns
+    -------
+    int
+        Exit code (0 = success, 1 = failure)
+    """
     print("Checking parameters...")
     print("=" * 70)
 
@@ -128,8 +162,14 @@ def cmd_check(args):
         return 1
 
 
-def main():
-    """Main CLI entry point."""
+def main() -> int:
+    """Main CLI entry point.
+
+    Returns
+    -------
+    int
+        Exit code (0 = success, 1 = failure)
+    """
     parser = argparse.ArgumentParser(
         description="KRMHD parameter validation and suggestion tools",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -144,9 +184,22 @@ Examples:
   # Quick parameter check
   python -m krmhd check --dt 0.01 --eta 0.5 --nu 0.5 --Nx 64 --Ny 64 --Nz 32
 
+Validation Checks:
+  • Overflow safety: η·dt < 50, ν·dt < 50 (warns at 80% threshold)
+  • CFL condition: dt < CFL_limit × dx / v_A (warns at 80% of limit)
+  • Forcing stability: Energy injection vs dissipation balance
+  • Resolution constraints: Amplitude limits for high-resolution runs
+    - 128³: amplitude < 0.4
+    - 256³: amplitude < 0.3
+
+Exit Codes:
+  0  = All parameters valid
+  1  = Errors found or file not found
+
 For more information, see:
-  - docs/recommended_parameters.md
-  - docs/ISSUE82_SUMMARY.md
+  - docs/recommended_parameters.md - Parameter selection guide
+  - docs/ISSUE82_SUMMARY.md - Forced turbulence stability analysis
+  - CLAUDE.md - Hyper-dissipation implementation details
 """
     )
 
