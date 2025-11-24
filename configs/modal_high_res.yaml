@@ -16,10 +16,12 @@ grid:
 physics:
   v_A: 1.0
   eta: 5.0              # Hyper-dissipation coefficient (increased for 256³ forced turbulence)
+                        # Issue #82: Balance energy injection/dissipation for stability
+                        # See CLAUDE.md for parameter selection guidelines
   nu: 5.0               # Collision frequency (matched to eta)
   beta_i: 1.0
   Lambda: 1.0
-  hyper_r: 2            # Hyper-resistivity order (stable for high-res)
+  hyper_r: 2            # Hyper-resistivity order (r=2 stable, r=4 under investigation)
   hyper_n: 2            # Hyper-collision order
 
 initial_condition:

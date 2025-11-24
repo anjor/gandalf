@@ -534,7 +534,12 @@ def _run_simulation_impl(
 
         # Override output directory to use Modal volume
         if output_subdir:
-            output_path = f"/results/{output_subdir}"
+            # Sanitize path to prevent directory traversal attacks
+            # Remove leading/trailing slashes and any '../' patterns
+            sanitized_subdir = output_subdir.strip('/').replace('..', '')
+            if not sanitized_subdir:
+                raise ValueError("Invalid output_subdir: must contain valid directory name after sanitization")
+            output_path = f"/results/{sanitized_subdir}"
         else:
             # Use timestamp-based directory
             timestamp = time.strftime("%Y%m%d_%H%M%S")
