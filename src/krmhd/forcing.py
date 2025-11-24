@@ -68,7 +68,7 @@ def _mode_to_wavenumber(n: int, L: float) -> float:
     return 2.0 * jnp.pi * n / L
 
 
-@jax.jit
+@partial(jax.jit, static_argnums=(9,))
 def _gaussian_white_noise_fourier_perp_lowkz_jit(
     kx: Array,
     ky: Array,
@@ -80,6 +80,7 @@ def _gaussian_white_noise_fourier_perp_lowkz_jit(
     dt: float,
     real_part: Array,
     imag_part: Array,
+    Nx_full: int,
 ) -> Array:
     """
     JIT core for Gaussian white noise forcing restricted to a perpendicular band
@@ -92,6 +93,7 @@ def _gaussian_white_noise_fourier_perp_lowkz_jit(
         kz_allowed: Boolean mask over kz (shape [Nz]) selecting allowed kz planes
         dt: Timestep
         real_part, imag_part: Random normal arrays [Nz, Ny, Nx//2+1]
+        Nx_full: Full grid size in x-direction (needed to determine if Nyquist mode exists)
 
     Returns:
         Complex forcing field [Nz, Ny, Nx//2+1]
@@ -115,22 +117,27 @@ def _gaussian_white_noise_fourier_perp_lowkz_jit(
 
     forced_field = noise * mask.astype(noise.dtype)
 
-    # Enforce rfft reality on kx=0 and kx=Nyquist planes
-    # Note: For JIT compatibility, we always apply the Nyquist operation even when Nx_rfft==1
-    # (in which case kx=0 and kx=Nyquist are the same, so the second operation is redundant but harmless)
+    # Enforce rfft reality on kx=0 plane (always required)
     forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
-    Nx_rfft = forced_field.shape[2]
-    nyquist_idx = Nx_rfft - 1
-    forced_field = forced_field.at[:, :, nyquist_idx].set(
-        forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-    )
+
+    # Enforce reality on kx=Nyquist plane ONLY if Nx is even
+    # For rfft: shape is [Nz, Ny, Nx//2+1]
+    # - If Nx even (e.g., 32): Nyquist mode exists at index Nx//2 = 16
+    # - If Nx odd (e.g., 33): NO Nyquist mode; max mode is at index Nx//2 = 16 (not Nyquist!)
+    # Incorrectly setting odd-Nx highest mode to real corrupts physics at high-k
+    if Nx_full % 2 == 0:
+        Nx_rfft = forced_field.shape[2]
+        nyquist_idx = Nx_rfft - 1  # This is Nx//2 for even Nx
+        forced_field = forced_field.at[:, :, nyquist_idx].set(
+            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+        )
 
     # Zero DC
     forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
     return forced_field
 
 
-@jax.jit
+@partial(jax.jit, static_argnums=(9,))
 def _gaussian_white_noise_fourier_jit(
     kx: Array,
     ky: Array,
@@ -141,6 +148,7 @@ def _gaussian_white_noise_fourier_jit(
     dt: float,
     real_part: Array,
     imag_part: Array,
+    Nx_full: int,
 ) -> Array:
     """
     JIT-compiled core function for generating Gaussian white noise in Fourier space.
@@ -153,6 +161,7 @@ def _gaussian_white_noise_fourier_jit(
         dt: Timestep (for proper dimensional scaling)
         real_part: Random normal samples for real part [Nz, Ny, Nx//2+1]
         imag_part: Random normal samples for imaginary part [Nz, Ny, Nx//2+1]
+        Nx_full: Full grid size in x-direction (needed to determine if Nyquist mode exists)
 
     Returns:
         Complex Fourier field with forcing at k ∈ [k_min, k_max]
@@ -200,24 +209,25 @@ def _gaussian_white_noise_fourier_jit(
     # Without this enforcement, direct Fourier-space operations (like forcing)
     # can create non-Hermitian fields that violate reality condition.
 
-    # Enforce reality on kx=0 plane (all ky, kz)
+    # Enforce reality on kx=0 plane (always required)
     forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
 
-    # Enforce reality on kx=Nyquist plane (if Nx is even)
+    # Enforce reality on kx=Nyquist plane ONLY if Nx is even
     # For rfft: shape is [Nz, Ny, Nx//2+1]
-    # Nyquist is at index Nx//2 if Nx is even
-    # Note: For JIT compatibility, we always apply this operation even when Nx_rfft==1
-    # (in which case kx=0 and kx=Nyquist are the same, so the operation is redundant but harmless)
-    Nx_rfft = forced_field.shape[2]  # This is Nx//2+1
-    nyquist_idx = Nx_rfft - 1
-    forced_field = forced_field.at[:, :, nyquist_idx].set(
-        forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-    )
+    # - If Nx even (e.g., 32): Nyquist mode exists at index Nx//2 = 16
+    # - If Nx odd (e.g., 33): NO Nyquist mode; max mode is at index Nx//2 = 16 (not Nyquist!)
+    # Incorrectly setting odd-Nx highest mode to real corrupts physics at high-k
+    if Nx_full % 2 == 0:
+        Nx_rfft = forced_field.shape[2]  # This is Nx//2+1
+        nyquist_idx = Nx_rfft - 1  # This is Nx//2 for even Nx
+        forced_field = forced_field.at[:, :, nyquist_idx].set(
+            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+        )
 
     return forced_field
 
 
-@jax.jit
+@partial(jax.jit, static_argnums=(9,))
 def _gandalf_forcing_fourier_jit(
     kx: Array,
     ky: Array,
@@ -228,6 +238,7 @@ def _gandalf_forcing_fourier_jit(
     dt: float,
     random_amplitude: Array,
     random_phase: Array,
+    Nx_full: int,
 ) -> Array:
     """
     JIT-compiled core function for original GANDALF forcing (forcing.cu).
@@ -242,6 +253,7 @@ def _gandalf_forcing_fourier_jit(
         dt: Timestep
         random_amplitude: Random uniform samples in (0,1] for amplitude [Nz, Ny, Nx//2+1]
         random_phase: Random uniform samples in [0, 2π] for phase [Nz, Ny, Nx//2+1]
+        Nx_full: Full grid size in x-direction (needed to determine if Nyquist mode exists)
 
     Returns:
         Complex Fourier field with GANDALF forcing at k ∈ [k_min, k_max]
@@ -284,15 +296,20 @@ def _gandalf_forcing_fourier_jit(
     forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
 
     # Enforce Hermitian symmetry for rfft format
-    # Note: For JIT compatibility, we always apply the Nyquist operation even when Nx_rfft==1
-    # (in which case kx=0 and kx=Nyquist are the same, so the operation is redundant but harmless)
+    # Enforce reality on kx=0 plane (always required)
     forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
 
-    Nx_rfft = forced_field.shape[2]
-    nyquist_idx = Nx_rfft - 1
-    forced_field = forced_field.at[:, :, nyquist_idx].set(
-        forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-    )
+    # Enforce reality on kx=Nyquist plane ONLY if Nx is even
+    # For rfft: shape is [Nz, Ny, Nx//2+1]
+    # - If Nx even (e.g., 32): Nyquist mode exists at index Nx//2 = 16
+    # - If Nx odd (e.g., 33): NO Nyquist mode; max mode is at index Nx//2 = 16 (not Nyquist!)
+    # Incorrectly setting odd-Nx highest mode to real corrupts physics at high-k
+    if Nx_full % 2 == 0:
+        Nx_rfft = forced_field.shape[2]
+        nyquist_idx = Nx_rfft - 1  # This is Nx//2 for even Nx
+        forced_field = forced_field.at[:, :, nyquist_idx].set(
+            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+        )
 
     return forced_field
 
@@ -358,7 +375,8 @@ def gandalf_forcing_fourier(
     forced_field = _gandalf_forcing_fourier_jit(
         grid.kx, grid.ky, grid.kz,
         fampl, k_min, k_max, dt,
-        random_amplitude, random_phase
+        random_amplitude, random_phase,
+        grid.Nx,
     )
 
     return forced_field, key
@@ -426,6 +444,7 @@ def gaussian_white_noise_fourier_perp_lowkz(
         kz_allowed,
         float(dt),
         real_part, imag_part,
+        grid.Nx,
     )
     return forced_field, key
 
@@ -599,6 +618,7 @@ def gaussian_white_noise_fourier(
         dt,
         real_part,
         imag_part,
+        grid.Nx,
     )
 
     return noise_field.astype(jnp.complex64), key
