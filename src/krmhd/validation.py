@@ -201,6 +201,12 @@ def validate_cfl_condition(
         )
         return ValidationResult(False, warnings_list, errors, suggestions)
 
+    if v_A <= 0:
+        errors.append(
+            f"Invalid Alfvén velocity: v_A = {v_A} (must be > 0)"
+        )
+        return ValidationResult(False, warnings_list, errors, suggestions)
+
     cfl_actual = dt * v_A / dx
 
     if cfl_actual > cfl_limit:

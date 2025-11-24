@@ -175,6 +175,22 @@ class TestCFLCondition:
         assert len(result.errors) >= 1
         assert any("grid spacing" in err.lower() for err in result.errors)
 
+    def test_zero_v_A_edge_case(self):
+        """Zero Alfvén velocity should not crash."""
+        result = validate_cfl_condition(dt=0.01, dx=0.1, v_A=0.0)
+        # Should handle gracefully with error
+        assert isinstance(result, ValidationResult)
+        assert not result.valid
+        assert len(result.errors) >= 1
+        assert any("alfvén velocity" in err.lower() for err in result.errors)
+
+    def test_negative_v_A_edge_case(self):
+        """Negative Alfvén velocity should error."""
+        result = validate_cfl_condition(dt=0.01, dx=0.1, v_A=-1.0)
+        assert not result.valid
+        assert len(result.errors) >= 1
+        assert any("alfvén velocity" in err.lower() for err in result.errors)
+
 
 class TestForcingStability:
     """Test forcing stability validation."""
