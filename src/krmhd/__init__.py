@@ -112,6 +112,16 @@ from krmhd.io import (
     load_timeseries,
 )
 
+from krmhd.validation import (
+    ValidationResult,
+    validate_overflow_safety,
+    validate_cfl_condition,
+    validate_forcing_stability,
+    validate_parameters,
+    validate_config_dict,
+    suggest_parameters,
+)
+
 __all__ = [
     "__version__",
     # Spectral infrastructure
@@ -180,4 +190,12 @@ __all__ = [
     "load_checkpoint",
     "save_timeseries",
     "load_timeseries",
+    # Validation
+    "ValidationResult",
+    "validate_overflow_safety",
+    "validate_cfl_condition",
+    "validate_forcing_stability",
+    "validate_parameters",
+    "validate_config_dict",
+    "suggest_parameters",
 ]
