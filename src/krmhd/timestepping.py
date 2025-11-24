@@ -351,8 +351,9 @@ def _gandalf_step_jit(
             - r=8: Maximum hyper-resistivity -ηk⊥¹⁶ (expert use, requires tiny eta)
         hyper_n: Hyper-collision order (default: 1)
             - n=1: Standard collision -νm (default, backward compatible)
-            - n=2: Moderate hyper-collision -νm⁴ (recommended for most cases)
-            - n=4: Strong hyper-collision -νm⁸ (expert use, requires small nu)
+            - n=2: Moderate hyper-collision -νm² (recommended for most cases)
+            - n=3: Strong hyper-collision -νm³ (matches original GANDALF alpha_m=3)
+            - n=4: Very strong hyper-collision -νm⁴ (expert use, requires small nu)
 
     Returns:
         Updated KRMHDFields after full timestep
@@ -458,19 +459,21 @@ def _gandalf_step_jit(
 
     # (2) Collisional damping factors (moment-dependent, NORMALIZED like original GANDALF)
     # Physics: Lenard-Bernstein collision operator (thesis Eq. 2.5)
-    # Original GANDALF normalization: exp(-ν·(m/M)^(2n)·dt) (timestep.cu:111)
-    # This makes the overflow constraint resolution-independent: ν·dt < 50 (not ν·M^(2n)·dt!)
+    # Original GANDALF normalization: exp(-ν·(m/M)^n·dt) (timestep.cu:111, alpha_m parameter)
+    # This makes the overflow constraint resolution-independent: ν·dt < 50 (not ν·M^n·dt!)
+    # IMPORTANT: Unlike spatial hyper-dissipation which uses k^(2r) due to ∇² ~ k²,
+    #            moment collisions use just m^n to match original GANDALF alpha_m parameter
     #   Standard (n=1): C[g_m] = -ν·(m/M)·g_m
-    #   Hyper (n>1):    C[g_m] = -ν·(m/M)^(2n)·g_m
+    #   Hyper (n>1):    C[g_m] = -ν·(m/M)^n·g_m
     # Time evolution:
     #   Standard (n=1): g_m → g_m * exp(-ν·(m/M)·δt)
-    #   Hyper (n>1):    g_m → g_m * exp(-ν·(m/M)^(2n)·δt)
+    #   Hyper (n>1):    g_m → g_m * exp(-ν·(m/M)^n·δt)
     # Conservation: m=0 (particle number) and m=1 (momentum) are exempt from collisions
     # Note: M>=2 validation and overflow checks performed in gandalf_step() wrapper before JIT compilation
     # (M<2 would cause degenerate normalized rates and is rejected at wrapper level)
     moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
     # For hyper-collisions: normalized by M to match original GANDALF (requires M>=2)
-    collision_damping_rate = nu * ((moment_indices / M) ** (2 * hyper_n))
+    collision_damping_rate = nu * ((moment_indices / M) ** hyper_n)
     collision_factors = jnp.where(
         moment_indices >= 2,
         jnp.exp(-collision_damping_rate * dt),  # m≥2: hyper-collision damping
@@ -520,7 +523,7 @@ def gandalf_step(
         nu: Collision frequency coefficient (optional, defaults to state.nu)
             - **Precedence**: If provided, overrides state.nu for this timestep only
             - Allows runtime control of collision rate from config without recreating state
-            - Used for hyper-collision damping: -ν·m^(2n)
+            - Used for hyper-collision damping: -ν·m^n (matches GANDALF alpha_m)
             - **Note**: State is not mutated; next call uses state.nu unless nu is passed again
         hyper_r: Hyper-resistivity order (default: 1)
             - r=1: Standard resistivity -ηk⊥² (default, backward compatible)
@@ -529,8 +532,9 @@ def gandalf_step(
             - r=8: Maximum hyper-resistivity -ηk⊥¹⁶ (expert use, requires tiny eta)
         hyper_n: Hyper-collision order (default: 1)
             - n=1: Standard collision -νm (default, backward compatible)
-            - n=2: Moderate hyper-collision -νm⁴ (recommended for most cases)
-            - n=4: Maximum hyper-collision -νm⁸ (expert use, requires tiny nu)
+            - n=2: Moderate hyper-collision -νm² (recommended for most cases)
+            - n=3: Strong hyper-collision -νm³ (matches original GANDALF alpha_m=3)
+            - n=4: Very strong hyper-collision -νm⁴ (expert use, requires small nu)
 
     Returns:
         New KRMHDState at time t + dt
@@ -566,17 +570,19 @@ def gandalf_step(
 
     Safety Notes:
         Hyper-collision overflow risk (n>1):
-        - For M moments, highest damping rate is nu·M^(2n)
-        - Must satisfy: nu·M^(2n)·dt < 50 to avoid underflow
-        - Safe ranges:
-            * n=1, M=20: nu < 2.5/dt (standard, very safe)
-            * n=4, M=10: nu < 5×10⁻⁸/dt (moderate risk)
-            * n=4, M=20: nu < 2×10⁻⁹/dt (high risk, use with caution!)
+        - NORMALIZED formulation: exp(-ν·(m/M)^n·dt) matches original GANDALF
+        - Maximum damping rate at m=M is simply: ν·dt (independent of M!)
+        - Must satisfy: ν·dt < 50 to avoid underflow
+        - Safe ranges (resolution-independent!):
+            * n=1: ν·dt < 50 (standard, very safe)
+            * n=2: ν·dt < 50 (recommended, very safe)
+            * n=3: ν·dt < 50 (matches GANDALF alpha_m=3, safe)
+            * n=4: ν·dt < 50 (strong damping, safe with ν<1)
 
         Hyper-resistivity overflow risk (r>1):
-        - For grid with k_max, highest damping rate is eta·k_max^(2r)
-        - Must satisfy: eta·k_max^(2r)·dt < 50 to avoid underflow
-        - k_max ≈ Nx/2 for typical grids
+        - NORMALIZED formulation: exp(-η·(k⊥²/k⊥²_max)^r·dt)
+        - Maximum damping rate at k⊥=k⊥_max is simply: η·dt (independent of grid!)
+        - Must satisfy: η·dt < 50 to avoid underflow
 
     Reference:
         - Thesis Chapter 2, §2.4 - GANDALF Algorithm
@@ -593,23 +599,23 @@ def gandalf_step(
             "Use r=1 for standard dissipation, r>1 for hyper-dissipation."
         )
 
-    if hyper_n not in [1, 2, 4]:
+    if hyper_n < 1:
         raise ValueError(
-            f"hyper_n must be 1, 2, or 4 (got {hyper_n}). "
-            "Use n=1 for standard collisions, n=2 for typical turbulence studies."
+            f"hyper_n must be >= 1 (got {hyper_n}). "
+            "Use n=1 for standard collisions, n>1 for hyper-collisions."
         )
 
     # Validate M for collision operator (prevents division by zero)
-    # Collision damping rate = ν·(m/M)^(2n) requires M >= 2 for well-defined rates
+    # Collision damping rate = ν·(m/M)^n requires M >= 2 for well-defined rates
     # M=0 would cause division by zero, M=1 would make all rates zero
     if state.M < 2:
         raise ValueError(
             f"M must be >= 2 for collision operators (got M={state.M}). "
-            "Collision damping uses (m/M)^(2n), requiring M >= 2 for meaningful rates."
+            "Collision damping uses (m/M)^n, requiring M >= 2 for meaningful rates."
         )
 
     # Safety check for hyper-collision overflow with NORMALIZED dissipation
-    # With normalization: exp(-ν·(m/M)^(2n)·dt), maximum rate at m=M is simply ν·dt
+    # With normalization: exp(-ν·(m/M)^n·dt), maximum rate at m=M is simply ν·dt
     # This is RESOLUTION-INDEPENDENT in moment space (matches original GANDALF)
     max_collision_rate = nu_effective * dt
 
