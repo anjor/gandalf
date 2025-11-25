@@ -159,13 +159,24 @@ class InitialConditionConfig(BaseModel):
 
 
 class ForcingConfig(BaseModel):
-    """Forcing configuration for driven turbulence."""
+    """Forcing configuration for driven turbulence.
+
+    Note: The config stores physical wavenumbers (k_min, k_max) for user convenience,
+    but the forcing API (force_alfven_modes) expects integer mode numbers (n_min, n_max).
+    The conversion k = 2πn/L is performed at runtime (see Issue #97).
+
+    Example:
+        For a domain with L=1.0:
+        - k_min=2.0 → n_min=0 (rounded from 2.0/(2π) ≈ 0.32, clamped to 1)
+        - k_min=6.28 → n_min=1 (fundamental mode)
+        - k_min=12.57 → n_min=2 (second harmonic)
+    """
 
     enabled: bool = Field(False, description="Enable forcing")
 
     amplitude: float = Field(0.3, ge=0, description="Forcing amplitude")
-    k_min: float = Field(2.0, gt=0, description="Minimum forcing wavenumber")
-    k_max: float = Field(5.0, gt=0, description="Maximum forcing wavenumber")
+    k_min: float = Field(2.0, gt=0, description="Minimum forcing wavenumber (converted to mode number at runtime)")
+    k_max: float = Field(5.0, gt=0, description="Maximum forcing wavenumber (converted to mode number at runtime)")
 
     seed: Optional[int] = Field(None, description="Random seed for forcing")
 
