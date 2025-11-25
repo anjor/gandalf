@@ -43,6 +43,47 @@ from pathlib import Path
 from typing import Optional, Dict, List, Any
 
 
+def sanitize_path_component(path_str: str, allow_absolute: bool = False) -> str:
+    """
+    Sanitize a path string to prevent path traversal and command injection.
+
+    Args:
+        path_str: Path string to sanitize
+        allow_absolute: If True, allow absolute paths (for local filesystem paths)
+
+    Returns:
+        Sanitized path string
+
+    Raises:
+        ValueError: If path contains dangerous patterns
+    """
+    if not path_str:
+        raise ValueError("Path component cannot be empty")
+
+    # Strip leading/trailing whitespace
+    sanitized = path_str.strip()
+
+    # Check for path traversal attempts
+    if '..' in sanitized:
+        raise ValueError(f"Path traversal attempt detected (contains '..'): {path_str}")
+
+    # Check for absolute paths (unless we explicitly allow them for local filesystem)
+    if not allow_absolute and sanitized.startswith('/'):
+        raise ValueError(f"Absolute paths not allowed: {path_str}")
+
+    # Check for null bytes (command injection)
+    if '\0' in sanitized:
+        raise ValueError(f"Null byte in path: {path_str}")
+
+    # Check for shell metacharacters that could enable injection
+    dangerous_chars = ['&', '|', ';', '`', '$', '(', ')', '<', '>', '"', "'", '\\', '\n', '\r']
+    for char in dangerous_chars:
+        if char in sanitized:
+            raise ValueError(f"Dangerous character '{char}' in path: {path_str}")
+
+    return sanitized
+
+
 def check_modal_installed() -> None:
     """
     Check if Modal is installed and authenticated.
@@ -132,6 +173,14 @@ def submit_simulation(
             print("\nTo skip validation (not recommended), use --skip-validation")
             sys.exit(1)
         print()
+
+    # Sanitize output_subdir if provided (prevent path traversal)
+    if output_subdir:
+        try:
+            output_subdir = sanitize_path_component(output_subdir, allow_absolute=False)
+        except ValueError as e:
+            print(f"Error: Invalid output_subdir: {e}")
+            sys.exit(1)
 
     # Build command
     cmd = [
@@ -300,6 +349,16 @@ def download_results(result_dir: str, local_path: str) -> None:
         SystemExit: If download fails
     """
     import os
+
+    # Sanitize inputs to prevent path traversal and command injection
+    try:
+        # result_dir should not contain path traversal or absolute paths
+        result_dir = sanitize_path_component(result_dir, allow_absolute=False)
+        # local_path can be absolute (it's a local filesystem path)
+        local_path = sanitize_path_component(local_path, allow_absolute=True)
+    except ValueError as e:
+        print(f"Error: Invalid path: {e}")
+        sys.exit(1)
 
     # Get volume name from environment or use default
     volume_name = os.environ.get("MODAL_VOLUME_NAME", "gandalf-results")
