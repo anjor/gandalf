@@ -800,7 +800,16 @@ def run_parameter_sweep(
         updated_yaml = yaml.safe_dump(config_dict)
 
         # Create unique output directory for this run
-        param_str = "_".join(f"{k.split('.')[-1]}={v}" for k, v in zip(param_names, combo))
+        # Format float values to reasonable precision to avoid very long names
+        def format_param_value(v):
+            if isinstance(v, float):
+                return f"{v:.3g}"  # 3 significant figures
+            return str(v)
+
+        param_str = "_".join(
+            f"{k.split('.')[-1]}={format_param_value(v)}"
+            for k, v in zip(param_names, combo)
+        )
         output_subdir = f"{sweep_dir}/run_{i:04d}_{param_str}"
 
         # Submit job (Modal will parallelize automatically)

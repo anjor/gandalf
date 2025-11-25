@@ -84,6 +84,128 @@ def sanitize_path_component(path_str: str, allow_absolute: bool = False) -> str:
     return sanitized
 
 
+def estimate_cost(config_path: Path, use_gpu: bool, n_jobs: int = 1) -> Dict[str, Any]:
+    """
+    Estimate Modal cost for a simulation or sweep.
+
+    Args:
+        config_path: Path to YAML configuration file
+        use_gpu: Whether GPU instances will be used
+        n_jobs: Number of parallel jobs (for sweeps)
+
+    Returns:
+        Dictionary with cost estimate and details
+    """
+    import yaml
+
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+    except Exception:
+        # If can't read config, return unknown cost
+        return {
+            'estimated_cost': None,
+            'warning': 'Could not estimate cost (config unreadable)',
+        }
+
+    # Extract parameters
+    Nx = config.get('grid', {}).get('Nx', 64)
+    n_steps = config.get('time_integration', {}).get('n_steps', 100)
+
+    # Rough runtime estimates (minutes) based on resolution and backend
+    # These are conservative estimates from actual runs
+    if use_gpu:
+        # GPU runtime (faster for high-res)
+        if Nx <= 64:
+            runtime_min = max(5, n_steps * 0.001)
+        elif Nx <= 128:
+            runtime_min = max(5, n_steps * 0.003)
+        elif Nx <= 256:
+            runtime_min = max(10, n_steps * 0.015)
+        else:  # 512+
+            runtime_min = max(60, n_steps * 0.12)
+
+        # GPU pricing (Modal T4/A10G rates, approximate)
+        cost_per_min = 0.10  # ~$0.10/min for T4
+        if Nx > 256:
+            cost_per_min = 0.15  # A100 needed for 512³
+    else:
+        # CPU runtime (slower, especially for high-res)
+        if Nx <= 64:
+            runtime_min = max(5, n_steps * 0.003)
+        elif Nx <= 128:
+            runtime_min = max(10, n_steps * 0.01)
+        else:  # 256+ not recommended on CPU
+            runtime_min = max(60, n_steps * 0.08)
+
+        # CPU pricing (Modal CPU rates)
+        cost_per_min = 0.02  # ~$0.02/min for 8-core CPU
+
+    # Total cost for all jobs
+    total_runtime_min = runtime_min * n_jobs
+    total_cost = cost_per_min * total_runtime_min
+
+    return {
+        'estimated_cost': total_cost,
+        'runtime_min': runtime_min,
+        'total_runtime_min': total_runtime_min,
+        'resolution': f"{Nx}³",
+        'n_steps': n_steps,
+        'n_jobs': n_jobs,
+        'backend': 'GPU' if use_gpu else 'CPU',
+        'warning': None if total_cost < 10 else f'High cost estimate: ${total_cost:.2f}',
+    }
+
+
+def warn_about_cost(config_path: Path, use_gpu: bool, n_jobs: int = 1, force: bool = False) -> bool:
+    """
+    Display cost estimate and prompt for confirmation if expensive.
+
+    Args:
+        config_path: Path to YAML configuration file
+        use_gpu: Whether GPU instances will be used
+        n_jobs: Number of parallel jobs (for sweeps)
+        force: If True, skip confirmation prompt
+
+    Returns:
+        True if user confirms or cost is low, False if user cancels
+    """
+    estimate = estimate_cost(config_path, use_gpu, n_jobs)
+
+    if estimate['estimated_cost'] is None:
+        # Could not estimate, warn but allow
+        print("⚠️  Warning: Could not estimate cost")
+        if not force:
+            response = input("Continue anyway? [y/N]: ").strip().lower()
+            return response == 'y'
+        return True
+
+    cost = estimate['estimated_cost']
+
+    # Always show estimate
+    print(f"\n💰 Cost Estimate:")
+    print(f"  Resolution: {estimate['resolution']}")
+    print(f"  Steps: {estimate['n_steps']}")
+    print(f"  Backend: {estimate['backend']}")
+    if n_jobs > 1:
+        print(f"  Jobs: {n_jobs}")
+        print(f"  Runtime/job: ~{estimate['runtime_min']:.1f} min")
+        print(f"  Total runtime: ~{estimate['total_runtime_min']:.1f} min")
+    else:
+        print(f"  Runtime: ~{estimate['runtime_min']:.1f} min")
+    print(f"  Estimated cost: ${cost:.2f}")
+
+    # Prompt for confirmation if expensive (>$5 threshold)
+    if cost > 5.0 and not force:
+        print(f"\n⚠️  This job will cost approximately ${cost:.2f}")
+        print("    (Note: Estimate may vary by ±50% depending on actual runtime)")
+        response = input("\nProceed with submission? [y/N]: ").strip().lower()
+        return response == 'y'
+
+    print()  # Blank line for readability
+    return True
+
+
 def check_modal_installed() -> None:
     """
     Check if Modal is installed and authenticated.
@@ -174,6 +296,11 @@ def submit_simulation(
             sys.exit(1)
         print()
 
+    # Show cost estimate and confirm if expensive
+    if not warn_about_cost(config_file, use_gpu, n_jobs=1):
+        print("Submission cancelled by user.")
+        sys.exit(0)
+
     # Sanitize output_subdir if provided (prevent path traversal)
     if output_subdir:
         try:
@@ -235,6 +362,16 @@ def submit_parameter_sweep(
             print("\nTo skip validation (not recommended), use --skip-validation")
             sys.exit(1)
         print()
+
+    # Calculate number of jobs for cost estimation
+    from itertools import product
+    param_values = list(parameters.values())
+    n_jobs = len(list(product(*param_values)))
+
+    # Show cost estimate and confirm if expensive
+    if not warn_about_cost(config_file, use_gpu, n_jobs=n_jobs):
+        print("Sweep cancelled by user.")
+        sys.exit(0)
 
     # Read base config
     with open(config_file, 'r') as f:

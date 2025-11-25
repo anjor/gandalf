@@ -557,23 +557,10 @@ If a simulation is interrupted:
    modal volume get gandalf-results/<your_run_dir>/checkpoint_step002000.h5 ./checkpoint.h5
    ```
 
-2. **Create a resume configuration**:
-   ```yaml
-   # resume_config.yaml
-   name: resumed_simulation
-   initial_condition:
-     type: checkpoint  # Load from checkpoint instead of fresh initialization
-     checkpoint_path: ./checkpoint.h5
-
-   time_integration:
-     n_steps: 8000  # Continue for remaining 8000 steps (10000 - 2000)
-     # ... same parameters as original
-   ```
-
-3. **Submit resume job**:
-   ```bash
-   python scripts/modal_submit.py submit resume_config.yaml --gpu
-   ```
+2. **Manual resume workflow** (config-based resume not yet implemented):
+   - Modify your simulation script to call `load_checkpoint()` at startup
+   - Pass checkpoint path as command-line argument or environment variable
+   - Re-submit the modified script to Modal
 
 ### Best Practices
 
@@ -582,14 +569,17 @@ If a simulation is interrupted:
   - Low-resolution (64³): Every 1000-2000 steps
 - **Monitor job progress**: Check logs periodically for long runs
 - **Set realistic timeouts**: Estimate 2× expected runtime as safety margin
-- **Test checkpoint/resume**: Verify it works on a short test run before multi-hour production runs
+- **Download checkpoints regularly**: Don't rely solely on Modal volume for long-term storage
 
-**Note**: Checkpoint I/O functions (`save_checkpoint()`, `load_checkpoint()`) are available in `krmhd.io`. However, config-based `type: checkpoint` for automatic checkpoint resume is not yet implemented. To resume from checkpoints, you currently need to:
-1. Use `save_checkpoint()` to periodically save state during simulation (already supported in Modal runs)
-2. Manually modify your simulation script to call `load_checkpoint()` to resume from a specific checkpoint file
-3. Re-submit the modified script to Modal
+**Checkpoint Resume Status**: The core I/O functions (`save_checkpoint()`, `load_checkpoint()`) are implemented and working in Modal runs. However, config-based automatic resume is **not yet implemented** (planned for future release). For now, checkpoint resume requires manually modifying simulation scripts to call `load_checkpoint()` with the appropriate checkpoint file path.
 
-Future enhancement: Add `initial_condition.type: checkpoint` with `checkpoint_path` parameter for automatic resume support.
+**TODO (planned feature)**: Add config-based checkpoint resume support:
+```yaml
+# Planned feature (not yet available)
+initial_condition:
+  type: checkpoint
+  checkpoint_path: ./checkpoint.h5
+```
 
 ## Troubleshooting
 
