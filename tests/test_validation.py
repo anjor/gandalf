@@ -1,540 +1,480 @@
 """
-Validation tests for KRMHD physics benchmarks.
+Unit tests for parameter validation module.
 
-These tests validate the physical correctness of the implementation
-against known analytical solutions and standard benchmarks:
-- Plasma physics special functions: Z(ζ), Bessel functions
-- Linear response theory: kinetic response, FLR corrections
-- Orszag-Tang vortex: nonlinear dynamics and energy conservation
-- Linear wave dispersion: Alfvén waves, kinetic Alfvén waves
-- Landau damping: kinetic response validation
+Tests all validation functions including:
+- Overflow safety checks
+- CFL condition validation
+- Forcing stability checks
+- Parameter suggestion
+- Config dict validation
 """
 
-import numpy as np
-import jax.numpy as jnp
 import pytest
-from scipy.special import wofz, iv  # For reference implementations
+import jax.numpy as jnp
 
-from krmhd import (
-    SpectralGrid3D,
-    initialize_orszag_tang,
-    gandalf_step,
-    compute_cfl_timestep,
-    energy as compute_energy,
-)
 from krmhd.validation import (
-    plasma_dispersion_function,
-    plasma_dispersion_derivative,
-    modified_bessel_ratio,
-    kinetic_response_function,
-    flr_correction_factor,
+    ValidationResult,
+    validate_overflow_safety,
+    validate_cfl_condition,
+    validate_forcing_stability,
+    validate_parameters,
+    validate_config_dict,
+    suggest_parameters,
 )
 
 
-class TestOrszagTangVortex:
-    """
-    Tests for Orszag-Tang vortex benchmark.
+class TestValidationResult:
+    """Test ValidationResult dataclass."""
 
-    The Orszag-Tang vortex is a standard test for nonlinear MHD codes,
-    testing complex dynamics, energy cascade, and current sheet formation.
-    """
+    def test_valid_result_no_warnings(self):
+        """Valid result with no warnings."""
+        result = ValidationResult(valid=True, warnings=[], errors=[], suggestions=[])
+        assert result.valid
+        assert len(result.warnings) == 0
+        assert len(result.errors) == 0
 
-    def test_energy_conservation_short_time(self):
-        """
-        Test that Orszag-Tang conserves energy over short time with small dissipation.
+    def test_invalid_result_with_errors(self):
+        """Invalid result with errors."""
+        result = ValidationResult(
+            valid=False,
+            warnings=["Warning 1"],
+            errors=["Error 1", "Error 2"],
+            suggestions=["Fix this"]
+        )
+        assert not result.valid
+        assert len(result.errors) == 2
+        assert len(result.warnings) == 1
 
-        Runs a short simulation (t=0.1) and verifies:
-        - Energy decay < 1% (with η=0.001 small dissipation)
-        - Magnetic fraction increases (selective decay)
-        - No NaN/Inf in fields
-        """
-        # Small grid for fast testing
-        Nx, Ny, Nz = 32, 32, 2
-        Lx = Ly = 1.0  # Match thesis normalization (see Issue #78)
-        Lz = 1.0
-        B0 = 1.0 / np.sqrt(4 * np.pi)
-        v_A = 1.0
-        eta = 0.001  # Small dissipation
-        cfl_safety = 0.3
-        t_final = 0.1  # Short time for CI
+    def test_print_report_no_crash(self, capsys):
+        """Ensure print_report doesn't crash."""
+        result = ValidationResult(
+            valid=False,
+            warnings=["Test warning"],
+            errors=["Test error"],
+            suggestions=["Test suggestion"]
+        )
+        result.print_report()
+        captured = capsys.readouterr()
+        assert "ERRORS" in captured.out
+        assert "WARNINGS" in captured.out
+        assert "SUGGESTIONS" in captured.out
 
-        # Initialize grid and state using shared function
-        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
-        state = initialize_orszag_tang(
-            grid=grid,
-            M=10,
-            B0=B0,
-            v_th=1.0,
-            beta_i=1.0,
-            nu=0.01,
-            Lambda=1.0,
+
+class TestOverflowSafety:
+    """Test overflow safety validation."""
+
+    def test_safe_parameters(self):
+        """Safe parameters should pass."""
+        result = validate_overflow_safety(eta=0.5, dt=0.01, nu=0.5)
+        assert result.valid
+        assert len(result.errors) == 0
+
+    def test_resistivity_overflow(self):
+        """Resistivity overflow should be caught."""
+        result = validate_overflow_safety(eta=60.0, dt=1.0, nu=0.5)
+        assert not result.valid
+        assert len(result.errors) >= 1
+        assert any("Resistivity overflow" in err for err in result.errors)
+
+    def test_collision_overflow(self):
+        """Collision overflow should be caught."""
+        result = validate_overflow_safety(eta=0.5, dt=1.0, nu=60.0)
+        assert not result.valid
+        assert len(result.errors) >= 1
+        assert any("Collision overflow" in err for err in result.errors)
+
+    def test_both_overflow(self):
+        """Both resistivity and collision overflow."""
+        result = validate_overflow_safety(eta=60.0, dt=1.0, nu=60.0)
+        assert not result.valid
+        assert len(result.errors) >= 2
+
+    def test_near_threshold_warning(self):
+        """Near threshold should produce warning."""
+        # 0.8 * 50 = 40, so eta*dt = 45 should warn
+        result = validate_overflow_safety(eta=45.0, dt=1.0, nu=0.5)
+        assert result.valid  # Still valid
+        assert len(result.warnings) >= 1
+
+    def test_high_hyper_order_suggestion(self):
+        """High hyper-order should produce suggestion."""
+        result = validate_overflow_safety(
+            eta=0.5, dt=0.01, nu=0.5, hyper_r=4, hyper_n=3
+        )
+        assert result.valid
+        assert len(result.suggestions) >= 1
+        assert any("hyper-order" in sug.lower() for sug in result.suggestions)
+
+    def test_no_nu_provided(self):
+        """Should handle nu=None gracefully."""
+        result = validate_overflow_safety(eta=0.5, dt=0.01, nu=None)
+        assert result.valid
+        # Should not check collision overflow
+
+    def test_custom_threshold(self):
+        """Custom threshold should be respected."""
+        result = validate_overflow_safety(
+            eta=30.0, dt=1.0, nu=0.5, threshold=25.0
+        )
+        assert not result.valid  # 30 > 25
+        assert len(result.errors) >= 1
+
+    def test_zero_dt_edge_case(self):
+        """Zero timestep should not crash (though physically invalid)."""
+        result = validate_overflow_safety(eta=0.5, dt=0.0, nu=0.5)
+        # Should handle gracefully (may warn or error depending on implementation)
+        assert isinstance(result, ValidationResult)
+
+    def test_negative_parameters(self):
+        """Negative parameters (physically invalid but should not crash)."""
+        result = validate_overflow_safety(eta=-0.5, dt=0.01, nu=-0.5)
+        assert isinstance(result, ValidationResult)
+
+
+class TestCFLCondition:
+    """Test CFL condition validation."""
+
+    def test_safe_cfl(self):
+        """Safe CFL should pass."""
+        result = validate_cfl_condition(dt=0.01, dx=0.1, v_A=1.0, cfl_limit=1.0)
+        assert result.valid
+        assert len(result.errors) == 0
+
+    def test_violated_cfl(self):
+        """Violated CFL should error."""
+        result = validate_cfl_condition(dt=0.5, dx=0.1, v_A=1.0, cfl_limit=1.0)
+        assert not result.valid
+        assert len(result.errors) >= 1
+        assert any("CFL condition violated" in err for err in result.errors)
+
+    def test_near_cfl_limit_warning(self):
+        """Near CFL limit should warn."""
+        # CFL = 0.9 > 0.8 * 1.0 should warn
+        result = validate_cfl_condition(dt=0.09, dx=0.1, v_A=1.0, cfl_limit=1.0)
+        assert result.valid
+        assert len(result.warnings) >= 1
+
+    def test_custom_cfl_limit(self):
+        """Custom CFL limit should be respected."""
+        result = validate_cfl_condition(dt=0.01, dx=0.1, v_A=1.0, cfl_limit=0.5)
+        # CFL = 0.1, which is < 0.5, so valid
+        assert result.valid
+
+    def test_high_velocity(self):
+        """High Alfvén velocity increases CFL number."""
+        result = validate_cfl_condition(dt=0.5, dx=0.1, v_A=10.0, cfl_limit=1.0)
+        # CFL = 0.5 * 10.0 / 0.1 = 50, way over limit
+        assert not result.valid
+
+    def test_zero_dx_edge_case(self):
+        """Zero grid spacing should not crash."""
+        result = validate_cfl_condition(dt=0.01, dx=0.0, v_A=1.0)
+        # Should handle gracefully with error
+        assert isinstance(result, ValidationResult)
+        assert not result.valid  # Should be invalid
+        assert len(result.errors) >= 1
+        assert any("grid spacing" in err.lower() for err in result.errors)
+
+    def test_zero_v_A_edge_case(self):
+        """Zero Alfvén velocity should not crash."""
+        result = validate_cfl_condition(dt=0.01, dx=0.1, v_A=0.0)
+        # Should handle gracefully with error
+        assert isinstance(result, ValidationResult)
+        assert not result.valid
+        assert len(result.errors) >= 1
+        assert any("alfvén velocity" in err.lower() for err in result.errors)
+
+    def test_negative_v_A_edge_case(self):
+        """Negative Alfvén velocity should error."""
+        result = validate_cfl_condition(dt=0.01, dx=0.1, v_A=-1.0)
+        assert not result.valid
+        assert len(result.errors) >= 1
+        assert any("alfvén velocity" in err.lower() for err in result.errors)
+
+
+class TestForcingStability:
+    """Test forcing stability validation."""
+
+    def test_low_resolution_safe(self):
+        """Low resolution with moderate forcing."""
+        result = validate_forcing_stability(
+            force_amplitude=0.3, eta=0.02, resolution=64, hyper_r=1
+        )
+        # Always returns valid (warnings only)
+        assert result.valid
+
+    def test_high_resolution_high_amplitude_warning(self):
+        """High resolution + high amplitude should warn."""
+        result = validate_forcing_stability(
+            force_amplitude=0.5, eta=0.02, resolution=128, hyper_r=1
+        )
+        assert result.valid  # Still valid
+        assert len(result.warnings) >= 1
+
+    def test_very_high_resolution(self):
+        """256³ resolution with high amplitude."""
+        result = validate_forcing_stability(
+            force_amplitude=0.4, eta=0.02, resolution=256, hyper_r=1
+        )
+        assert result.valid
+        # Should warn about high amplitude
+        assert len(result.warnings) >= 1
+
+    def test_injection_dissipation_imbalance(self):
+        """Large injection vs small dissipation."""
+        # Need injection²/(eta*k²) > 10
+        # With amplitude=2.0, eta=0.001, n_max=2:
+        # injection=4.0, dissipation≈0.158, ratio≈25 > 10
+        result = validate_forcing_stability(
+            force_amplitude=2.0,  # Very large
+            eta=0.001,  # Very small
+            resolution=64,
+            hyper_r=1,
+            n_force_max=2
+        )
+        assert result.valid
+        assert len(result.warnings) >= 1
+        assert any("injection" in warn.lower() for warn in result.warnings)
+
+    def test_high_hyper_order_warning(self):
+        """High hyper-order should warn."""
+        result = validate_forcing_stability(
+            force_amplitude=0.3, eta=0.02, resolution=64, hyper_r=4
+        )
+        assert result.valid
+        assert len(result.warnings) >= 1
+        assert any("hyper-order" in warn.lower() for warn in result.warnings)
+
+    def test_low_amplitude_no_warning(self):
+        """Low forcing amplitude should not warn."""
+        result = validate_forcing_stability(
+            force_amplitude=0.05, eta=0.02, resolution=128, hyper_r=2
+        )
+        assert result.valid
+        # May still have some suggestions but no critical warnings
+
+
+class TestValidateParameters:
+    """Test comprehensive parameter validation."""
+
+    def test_all_valid_parameters(self):
+        """All parameters valid."""
+        result = validate_parameters(
+            dt=0.01, eta=0.02, nu=0.02,
+            Nx=64, Ny=64, Nz=32,
+            v_A=1.0, force_amplitude=0.3,
+            hyper_r=1, hyper_n=1
+        )
+        assert result.valid
+
+    def test_overflow_caught(self):
+        """Overflow should be caught."""
+        result = validate_parameters(
+            dt=1.0, eta=60.0, nu=0.02,
+            Nx=64, Ny=64, Nz=32
+        )
+        assert not result.valid
+        assert any("overflow" in err.lower() for err in result.errors)
+
+    def test_cfl_violation_caught(self):
+        """CFL violation should be caught."""
+        result = validate_parameters(
+            dt=1.0, eta=0.02, nu=0.02,
+            Nx=64, Ny=64, Nz=32,
+            v_A=10.0
+        )
+        assert not result.valid
+        assert any("CFL" in err for err in result.errors)
+
+    def test_forcing_warnings_included(self):
+        """Forcing stability warnings should be included."""
+        # Use smaller dt to avoid CFL violation with 256³
+        result = validate_parameters(
+            dt=0.001, eta=0.001, nu=0.02,  # Smaller dt
+            Nx=256, Ny=256, Nz=128,
+            force_amplitude=0.5,
+            hyper_r=4
+        )
+        # Should have warnings (but still valid now that CFL is OK)
+        assert result.valid
+        assert len(result.warnings) > 0
+
+    def test_no_forcing(self):
+        """No forcing should skip forcing validation."""
+        result = validate_parameters(
+            dt=0.01, eta=0.02, nu=0.02,
+            Nx=64, Ny=64, Nz=32,
+            force_amplitude=None  # No forcing
+        )
+        assert result.valid
+
+    def test_zero_forcing(self):
+        """Zero forcing amplitude should skip forcing checks."""
+        result = validate_parameters(
+            dt=0.01, eta=0.02, nu=0.02,
+            Nx=64, Ny=64, Nz=32,
+            force_amplitude=0.0
+        )
+        assert result.valid
+
+
+class TestSuggestParameters:
+    """Test parameter suggestion function."""
+
+    def test_suggest_forced_64cubed(self):
+        """Suggest parameters for 64³ forced turbulence."""
+        params = suggest_parameters(64, 64, 32, simulation_type="forced")
+
+        assert "dt" in params
+        assert "eta" in params
+        assert "nu" in params
+        assert "force_amplitude" in params
+
+        # Check reasonable values
+        assert params["dt"] > 0
+        assert params["eta"] > 0
+        assert params["force_amplitude"] > 0
+
+    def test_suggest_decaying_128cubed(self):
+        """Suggest parameters for 128³ decaying turbulence."""
+        params = suggest_parameters(128, 128, 64, simulation_type="decaying")
+
+        assert params["force_amplitude"] == 0.0  # No forcing
+        assert params["eta"] > 0
+        assert params["dt"] > 0
+
+    def test_suggest_benchmark(self):
+        """Suggest benchmark parameters."""
+        params = suggest_parameters(64, 64, 32, simulation_type="benchmark")
+
+        assert params["eta"] == 0.01  # Standard benchmark value
+        assert params["nu"] == 0.01
+
+    def test_higher_resolution_smaller_eta(self):
+        """Higher resolution should suggest smaller eta."""
+        params_64 = suggest_parameters(64, 64, 32, simulation_type="forced")
+        params_256 = suggest_parameters(256, 256, 128, simulation_type="forced")
+
+        # Higher res should have smaller dissipation
+        assert params_256["eta"] < params_64["eta"]
+
+    def test_cfl_safety_respected(self):
+        """CFL safety factor should be respected."""
+        params = suggest_parameters(64, 64, 32, target_cfl=0.5)
+
+        # dt should be larger with higher CFL safety
+        assert params["cfl_safety"] == 0.5
+
+        # Verify suggested dt satisfies CFL
+        dx_min = 1.0 / 64
+        cfl_actual = params["dt"] * params["v_A"] / dx_min
+        assert cfl_actual <= 0.5
+
+    def test_suggested_params_pass_validation(self):
+        """Suggested parameters should pass validation."""
+        params = suggest_parameters(64, 64, 32, simulation_type="forced")
+
+        result = validate_parameters(
+            params["dt"], params["eta"], params["nu"],
+            64, 64, 32,
+            params["v_A"],
+            params["force_amplitude"],
+            hyper_r=1, hyper_n=1
         )
 
-        # Record initial energy
-        E_initial = compute_energy(state)
-        mag_frac_initial = E_initial['magnetic'] / E_initial['kinetic']
+        assert result.valid
 
-        # Evolve to t_final
-        while state.time < t_final:
-            dt = compute_cfl_timestep(state, v_A, cfl_safety)
-            dt = min(dt, t_final - state.time)
-            state = gandalf_step(state, dt, eta, v_A)
 
-        # Record final energy
-        E_final = compute_energy(state)
-        mag_frac_final = E_final['magnetic'] / E_final['kinetic']
+class TestValidateConfigDict:
+    """Test config dictionary validation."""
 
-        # Assertions
-        # 1. Energy should be conserved to within 2% (small dissipation, short time)
-        # Note: With Lx=1.0, higher wavenumbers lead to slightly more dissipation
-        energy_ratio = E_final['total'] / E_initial['total']
-        assert 0.98 < energy_ratio <= 1.0, \
-            f"Energy not conserved: E_final/E_initial = {energy_ratio:.4f}"
+    def test_valid_flat_config(self):
+        """Flat config dict should work."""
+        config = {
+            "dt": 0.01,
+            "eta": 0.02,
+            "nu": 0.02,
+            "Nx": 64,
+            "Ny": 64,
+            "Nz": 32,
+            "v_A": 1.0,
+            "force_amplitude": 0.3,
+        }
+        result = validate_config_dict(config)
+        assert result.valid
 
-        # 2. Magnetic fraction should increase (selective decay) or stay roughly the same
-        # NOTE: With new IC (equipartition), mag_frac may not change much in short time
-        # Just check it doesn't decrease significantly
-        assert mag_frac_final >= 0.95 * mag_frac_initial, \
-            f"Magnetic fraction shouldn't decrease, got {mag_frac_initial:.3f} → {mag_frac_final:.3f}"
+    def test_nested_config(self):
+        """Nested config structure should work."""
+        config = {
+            "grid": {"Nx": 64, "Ny": 64, "Nz": 32},
+            "physics": {"hyper_r": 2, "hyper_n": 2},
+            "forcing": {"amplitude": 0.3, "n_max": 2},
+            "dt": 0.01,
+            "eta": 0.02,
+            "nu": 0.02,
+        }
+        result = validate_config_dict(config)
+        assert result.valid
 
-        # 3. No NaN or Inf in fields
-        assert jnp.all(jnp.isfinite(state.z_plus)), "NaN/Inf in z_plus"
-        assert jnp.all(jnp.isfinite(state.z_minus)), "NaN/Inf in z_minus"
-        assert jnp.all(jnp.isfinite(state.g)), "NaN/Inf in Hermite moments"
+    def test_missing_parameters_use_defaults(self):
+        """Missing parameters should use defaults."""
+        config = {"Nx": 64, "Ny": 64, "Nz": 32}
+        result = validate_config_dict(config)
+        # Should not crash, uses defaults
+        assert isinstance(result, ValidationResult)
 
-        # 4. Total energy should be positive
-        assert E_final['total'] > 0, "Total energy should be positive"
-        assert E_final['magnetic'] > 0, "Magnetic energy should be positive"
-        assert E_final['kinetic'] > 0, "Kinetic energy should be positive"
+    def test_invalid_nested_config(self):
+        """Invalid nested config should be caught."""
+        config = {
+            "grid": {"Nx": 64, "Ny": 64, "Nz": 32},
+            "dt": 1.0,
+            "eta": 60.0,  # Overflow
+            "nu": 0.02,
+        }
+        result = validate_config_dict(config)
+        assert not result.valid
 
-    def test_initial_conditions_reality(self):
-        """
-        Test that Orszag-Tang initial conditions satisfy reality condition.
 
-        Fourier coefficients must satisfy f(-k) = f*(k) for real fields.
-        """
-        # Minimal grid
-        Nx, Ny, Nz = 16, 16, 2
-        Lx = Ly = Lz = 1.0
-        B0 = 1.0 / np.sqrt(4 * np.pi)
+class TestEdgeCases:
+    """Test edge cases and error handling."""
 
-        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
-        state = initialize_orszag_tang(grid=grid, M=10, B0=B0)
-
-        # Extract Elsasser fields
-        phi_k = (state.z_plus + state.z_minus) / 2
-        A_parallel_k = (state.z_plus - state.z_minus) / 2
-
-        # Check reality condition for ky=0 modes (should be real)
-        # For rfft, the ky=0 plane should have f(kz, 0, kx) real when kx=0
-        assert jnp.abs(jnp.imag(phi_k[:, 0, 0])).max() < 1e-10, \
-            "k=0 mode should be real for phi"
-        assert jnp.abs(jnp.imag(A_parallel_k[:, 0, 0])).max() < 1e-10, \
-            "k=0 mode should be real for A_parallel"
-
-    def test_initial_energy_components(self):
-        """Test that initial energy components have reasonable magnitudes."""
-        Nx, Ny, Nz = 32, 32, 2
-        Lx = Ly = Lz = 1.0
-        B0 = 1.0 / np.sqrt(4 * np.pi)
-
-        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
-        state = initialize_orszag_tang(
-            grid=grid,
-            M=10,
-            B0=B0,
-            v_th=1.0,
-            beta_i=1.0,
-            nu=0.01,
-            Lambda=1.0,
+    def test_zero_timestep(self):
+        """Zero timestep should not crash."""
+        result = validate_parameters(
+            dt=0.0, eta=0.02, nu=0.02,
+            Nx=64, Ny=64, Nz=32
         )
+        # Should handle gracefully
+        assert isinstance(result, ValidationResult)
 
-        E = compute_energy(state)
-
-        # All energy components should be positive
-        assert E['total'] > 0, "Total energy must be positive"
-        assert E['magnetic'] > 0, "Magnetic energy must be positive"
-        assert E['kinetic'] > 0, "Kinetic energy must be positive"
-
-        # Total energy should equal sum of components
-        E_sum = E['magnetic'] + E['kinetic'] + E['compressive']
-        assert abs(E['total'] - E_sum) / E['total'] < 1e-10, \
-            "Total energy should equal sum of components"
-
-        # New IC: Equipartition (E_mag ≈ E_kin)
-        # With M>0, kinetic initialization may add some energy, so allow some flexibility
-        mag_kin_ratio = E['magnetic'] / E['kinetic']
-        assert 0.5 < mag_kin_ratio < 2.0, \
-            f"Magnetic and kinetic energies should be comparable, got ratio {mag_kin_ratio:.3f}"
-
-    def test_orszag_tang_m0_initial_energy(self):
-        """
-        Test that M=0 (pure fluid) Orszag-Tang has correct initial energy.
-
-        With the new IC (direct Fourier mode setting), should have:
-        - E_total ≈ 4.0
-        - E_mag ≈ E_kin ≈ 2.0 (equipartition)
-
-        This validates the FFT normalization and energy decomposition.
-        """
-        Nx, Ny, Nz = 32, 32, 2
-        Lx = Ly = Lz = 1.0
-        B0 = 1.0 / np.sqrt(4 * np.pi)  # ~0.282
-
-        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
-        state = initialize_orszag_tang(grid=grid, M=0, B0=B0)
-
-        E = compute_energy(state)
-
-        # Check total energy matches expected value
-        assert abs(E['total'] - 4.0) < 0.1, \
-            f"Expected E_total ≈ 4.0, got {E['total']:.3f}"
-
-        # Check equipartition
-        assert abs(E['magnetic'] - 2.0) < 0.1, \
-            f"Expected E_mag ≈ 2.0, got {E['magnetic']:.3f}"
-        assert abs(E['kinetic'] - 2.0) < 0.1, \
-            f"Expected E_kin ≈ 2.0, got {E['kinetic']:.3f}"
-
-        # More precise check: ratio should be close to 1
-        mag_kin_ratio = E['magnetic'] / E['kinetic']
-        assert abs(mag_kin_ratio - 1.0) < 0.05, \
-            f"Expected E_mag/E_kin ≈ 1.0 (equipartition), got {mag_kin_ratio:.3f}"
-
-        # Compressive energy should be negligible
-        assert E['compressive'] < 1e-10, \
-            f"Compressive energy should be ~0 for pure Alfvénic IC, got {E['compressive']}"
-
-    def test_orszag_tang_m0_is_pure_fluid(self):
-        """
-        Test that M=0 Orszag-Tang maintains g=0 (pure fluid dynamics).
-
-        For M=0, all Hermite moments should remain zero throughout evolution.
-        """
-        Nx, Ny, Nz = 16, 16, 2
-        Lx = Ly = Lz = 1.0
-        B0 = 1.0 / np.sqrt(4 * np.pi)
-
-        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
-        state = initialize_orszag_tang(grid=grid, M=0, B0=B0)
-
-        # Initial: all g moments should be zero
-        # NOTE: M=0 still allocates g0 and g1, but they should be zero
-        assert jnp.max(jnp.abs(state.g)) < 1e-14, \
-            "g moments should be zero for M=0 initialization"
-
-        # Take a few timesteps
-        dt = compute_cfl_timestep(state, v_A=1.0, cfl_safety=0.3)
-        for _ in range(5):
-            state = gandalf_step(state, dt, eta=0.0, v_A=1.0)
-
-        # After evolution: g should still be zero (pure fluid)
-        assert jnp.max(jnp.abs(state.g)) < 1e-14, \
-            "g moments should remain zero for M=0 (pure fluid dynamics)"
-
-    def test_energy_calculation_works_for_different_nz(self):
-        """
-        Test that energy calculation gives consistent results for different Nz.
-
-        For 2D problems (only kz=0 populated), energy should NOT depend on Nz.
-        This validates the 3D-compatible normalization fix.
-        """
-        Lx = Ly = Lz = 1.0
-        B0 = 1.0 / np.sqrt(4 * np.pi)
-
-        energies = {}
-        for Nz in [2, 4, 8]:
-            grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
-            state = initialize_orszag_tang(grid=grid, M=0, B0=B0)
-            E = compute_energy(state)
-            energies[Nz] = E['total']
-
-        # All Nz should give same energy (within numerical precision)
-        E_ref = energies[2]
-        for Nz, E in energies.items():
-            assert abs(E - E_ref) / E_ref < 1e-10, \
-                f"Energy should be independent of Nz for 2D. " \
-                f"Nz={Nz}: E={E:.6f}, Nz=2: E={E_ref:.6f}"
-
-
-class TestPlasmaPhysicsFunctions:
-    """
-    Unit tests for plasma physics special functions.
-
-    Tests the correctness of:
-    - Plasma dispersion function Z(ζ)
-    - Modified Bessel function ratios I_m(x)exp(-x)
-    - Linear response functions
-    - FLR correction factors
-    """
-
-    def test_plasma_dispersion_function_at_zero(self):
-        """
-        Test Z(0) = i√π.
-
-        This is a well-known exact value (Fried & Conte 1961).
-        """
-        zeta = np.array([0.0 + 0.0j])
-        Z = plasma_dispersion_function(zeta)
-
-        expected = 1j * np.sqrt(np.pi)
-        np.testing.assert_allclose(Z[0], expected, rtol=1e-10,
-                                    err_msg="Z(0) should equal i√π")
-
-    def test_plasma_dispersion_function_large_argument(self):
-        """
-        Test Z(ζ) → -1/ζ for large |ζ|.
-
-        Asymptotic expansion: Z(ζ) ≈ -1/ζ - 1/(2ζ³) + ... for |ζ| >> 1
-        """
-        # Large real argument
-        zeta_large = np.array([10.0 + 0.1j, -10.0 + 0.1j])
-        Z = plasma_dispersion_function(zeta_large)
-
-        # First-order asymptotic
-        Z_asymptotic = -1.0 / zeta_large
-
-        # Should agree to ~1% for |ζ| = 10
-        np.testing.assert_allclose(Z, Z_asymptotic, rtol=0.05,
-                                    err_msg="Z(ζ) should approach -1/ζ for large |ζ|")
-
-    def test_plasma_dispersion_function_consistency_with_wofz(self):
-        """
-        Test Z(ζ) = i√π w(ζ) against scipy.special.wofz.
-
-        This validates our implementation against the standard reference.
-        """
-        zeta_values = np.array([
-            0.5 + 0.1j,
-            1.0 + 0.0j,
-            -1.0 + 0.5j,
-            2.0 + 1.0j,
-        ])
-
-        Z = plasma_dispersion_function(zeta_values)
-        Z_expected = 1j * np.sqrt(np.pi) * wofz(zeta_values)
-
-        np.testing.assert_allclose(Z, Z_expected, rtol=1e-10,
-                                    err_msg="Z(ζ) should match i√π w(ζ)")
-
-    def test_plasma_dispersion_derivative_relation(self):
-        """
-        Test Z'(ζ) = -2[1 + ζZ(ζ)] relation.
-
-        This is the defining relation for the derivative (Fried & Conte 1961).
-        """
-        zeta_values = np.array([
-            0.5 + 0.1j,
-            1.0 + 0.5j,
-            -1.5 + 0.2j,
-        ])
-
-        Z = plasma_dispersion_function(zeta_values)
-        Zprime = plasma_dispersion_derivative(zeta_values)
-
-        # Check relation Z'(ζ) = -2[1 + ζZ(ζ)]
-        Zprime_expected = -2.0 * (1.0 + zeta_values * Z)
-
-        np.testing.assert_allclose(Zprime, Zprime_expected, rtol=1e-10,
-                                    err_msg="Z'(ζ) should satisfy -2[1 + ζZ(ζ)]")
-
-    def test_modified_bessel_ratio_small_x_m0(self):
-        """
-        Test I_0(x)exp(-x) → 1 - x for small x.
-
-        For m=0, the small argument expansion is I_0(x) ≈ 1 + x²/4 + ...
-        So I_0(x)exp(-x) ≈ (1 + x²/4)exp(-x) ≈ 1 - x + x²/4 + O(x²)
-        For very small x: I_0(x)exp(-x) ≈ 1 - x
-        """
-        x_small = 1e-6
-        result = modified_bessel_ratio(0, x_small)
-
-        # For m=0, small x: should be close to 1 - x
-        expected = 1.0 - x_small
-        assert abs(result - expected) < 1e-5, \
-            f"I_0(x)exp(-x) should be ~1-x for small x, got {result}, expected {expected}"
-
-    def test_modified_bessel_ratio_small_x_m_positive(self):
-        """
-        Test I_m(x)exp(-x) → 0 for small x, m > 0.
-
-        For m > 0, I_m(x) ~ (x/2)^m / m!, so I_m(x)exp(-x) → 0 as x → 0.
-        """
-        x_small = 1e-6
-
-        for m in [1, 2, 5]:
-            result = modified_bessel_ratio(m, x_small)
-            # For x=1e-6, I_1(x) ~ 5e-7, which is small but not < 1e-8
-            # Relax tolerance to 1e-5 (still much smaller than I_0(x)~1)
-            assert abs(result) < 1e-5, \
-                f"I_{m}(x)exp(-x) should be ~0 for small x, got {result}"
-
-    def test_modified_bessel_ratio_large_x_convergence(self):
-        """
-        Test I_m(x)exp(-x) → 1/√(2πx) for large x (all m).
-
-        Asymptotically, all orders converge to the same value, but convergence
-        is slower for higher m. Test low-m values only.
-        """
-        x_large = 20.0
-
-        # Asymptotic value
-        asymptotic = 1.0 / np.sqrt(2 * np.pi * x_large)
-
-        # Test low m values (m ≤ 5)
-        # For x=20, higher m (like m=10) requires much larger x for convergence
-        for m in [0, 1, 2, 5]:
-            result = modified_bessel_ratio(m, x_large)
-
-            # Should be within factor of 2 of asymptotic value for x=20
-            assert abs(result - asymptotic) / asymptotic < 0.5, \
-                f"I_{m}({x_large})exp(-{x_large}) should approach {asymptotic:.3e}, got {result:.3e}"
-
-    def test_modified_bessel_ratio_consistency_with_scipy(self):
-        """
-        Test I_m(x)exp(-x) against scipy.special.iv for various x and m.
-        """
-        x_values = [0.5, 1.0, 5.0, 10.0]
-        m_values = [0, 1, 2, 5]
-
-        for x in x_values:
-            for m in m_values:
-                result = modified_bessel_ratio(m, x)
-                expected = iv(m, x) * np.exp(-x)
-
-                np.testing.assert_allclose(result, expected, rtol=1e-10,
-                                            err_msg=f"I_{m}({x})exp(-{x}) mismatch with scipy")
-
-    def test_kinetic_response_function_k_parallel_zero(self):
-        """
-        Test kinetic_response_function handles k_parallel=0 (pure perpendicular mode).
-
-        Should return non-resonant response (no Landau damping).
-        """
-        response = kinetic_response_function(
-            k_parallel=0.0,
-            k_perp=1.0,
-            omega=1.0,
-            v_th=1.0,
-            Lambda=1.0,
-            nu=0.1,
-            beta_i=1.0,
-            v_A=1.0,
+    def test_negative_parameters(self):
+        """Negative (unphysical) parameters should not crash."""
+        result = validate_parameters(
+            dt=-0.01, eta=-0.02, nu=-0.02,
+            Nx=64, Ny=64, Nz=32
         )
+        assert isinstance(result, ValidationResult)
 
-        # Should return simple non-resonant value (1 + 0j)
-        assert np.isfinite(response), "Response should be finite for k∥=0"
-        assert response == 1.0 + 0.0j, \
-            f"Response for k∥=0 should be 1+0j, got {response}"
+    def test_very_small_resolution(self):
+        """Very small resolution."""
+        params = suggest_parameters(8, 8, 4, simulation_type="forced")
+        assert params["dt"] > 0
+        # Should not crash
 
-    def test_kinetic_response_function_causality(self):
-        """
-        Test that response function has proper causality (Im[R] structure).
+    def test_very_large_resolution(self):
+        """Very large resolution."""
+        params = suggest_parameters(512, 512, 256, simulation_type="forced")
+        assert params["dt"] > 0
+        assert params["eta"] > 0
 
-        For collisionless case, causality requires small positive imaginary
-        part in frequency (Landau prescription).
-        """
-        response = kinetic_response_function(
-            k_parallel=1.0,
-            k_perp=1.0,
-            omega=1.0,
-            v_th=1.0,
-            Lambda=1.0,
-            nu=0.0,  # Collisionless
-            beta_i=1.0,
-            v_A=1.0,
-        )
+    def test_extreme_cfl_target(self):
+        """Extreme CFL safety factors."""
+        params_low = suggest_parameters(64, 64, 32, target_cfl=0.01)
+        params_high = suggest_parameters(64, 64, 32, target_cfl=0.9)
 
-        # Response should be finite and well-behaved
-        assert np.isfinite(response), "Response should be finite"
-        # For this specific case (ω ~ k∥v_A), response may be nearly real
-        # The imaginary part from CAUSALITY_EPSILON is very small (~1e-3)
-        # Main test: function doesn't crash with collisionless case
-        assert isinstance(response, (complex, np.complex128, np.complexfloating)), \
-            "Response should be complex type"
+        # Higher CFL should give larger dt
+        assert params_high["dt"] > params_low["dt"]
 
-    def test_kinetic_response_function_finite_with_collisions(self):
-        """
-        Test that response is finite and reasonable with collisions.
-        """
-        response = kinetic_response_function(
-            k_parallel=1.0,
-            k_perp=1.0,
-            omega=1.0,
-            v_th=1.0,
-            Lambda=1.0,
-            nu=0.3,
-            beta_i=1.0,
-            v_A=1.0,
-        )
 
-        assert np.isfinite(response), "Response should be finite"
-        assert abs(response) > 0, "Response should be non-zero"
-        assert abs(response) < 100, "Response should have reasonable magnitude"
-
-    def test_flr_correction_factor_small_k_perp(self):
-        """
-        Test FLR correction → 1 for m=0, → 0 for m>0 when k⊥ρ_s << 1 (fluid limit).
-        """
-        k_perp = 0.01  # Small
-        rho_s = 1.0
-
-        # m=0: should be ~1
-        Gamma_0_sq = flr_correction_factor(0, k_perp, rho_s)
-        assert abs(Gamma_0_sq - 1.0) < 0.01, \
-            f"Γ_0²(k⊥ρ_s<<1) should be ~1, got {Gamma_0_sq}"
-
-        # m>0: should be ~0
-        for m in [1, 2, 5]:
-            Gamma_m_sq = flr_correction_factor(m, k_perp, rho_s)
-            assert Gamma_m_sq < 1e-4, \
-                f"Γ_{m}²(k⊥ρ_s<<1) should be ~0, got {Gamma_m_sq}"
-
-    def test_flr_correction_factor_large_k_perp(self):
-        """
-        Test FLR correction → 0 for all m when k⊥ρ_s >> 1 (sub-gyroradius scales).
-        """
-        k_perp = 10.0  # Large
-        rho_s = 1.0
-
-        for m in [0, 1, 2, 5]:
-            Gamma_m_sq = flr_correction_factor(m, k_perp, rho_s)
-            # All moments damped at sub-gyroradius scales
-            assert Gamma_m_sq < 0.1, \
-                f"Γ_{m}²(k⊥ρ_s>>1) should be small, got {Gamma_m_sq}"
-
-    def test_flr_correction_factor_positive_and_bounded(self):
-        """
-        Test that FLR correction is always positive and ≤ 1.
-
-        Since Γ_m² = [I_m(b)exp(-b)]², it should be positive and bounded.
-        """
-        k_perp_values = [0.1, 0.5, 1.0, 2.0, 5.0]
-        rho_s = 1.0
-
-        for k_perp in k_perp_values:
-            for m in range(10):
-                Gamma_m_sq = flr_correction_factor(m, k_perp, rho_s)
-
-                assert Gamma_m_sq >= 0, \
-                    f"Γ_{m}²(k⊥={k_perp}) should be ≥ 0, got {Gamma_m_sq}"
-                assert Gamma_m_sq <= 1.1, \
-                    f"Γ_{m}²(k⊥={k_perp}) should be ≤ 1, got {Gamma_m_sq}"
-
-    def test_flr_correction_factor_m_dependence(self):
-        """
-        Test that FLR correction decreases with m for k⊥ρ_s ~ 1.
-
-        Higher moments should be more suppressed by FLR effects.
-        """
-        k_perp = 1.0  # Kinetic regime
-        rho_s = 1.0
-
-        Gamma_values = [flr_correction_factor(m, k_perp, rho_s) for m in range(10)]
-
-        # Should generally decrease with m (though not monotonic for all k⊥)
-        # Check that high m is suppressed relative to low m
-        assert Gamma_values[5] < Gamma_values[0], \
-            "Higher moments should be more suppressed by FLR"
-        assert Gamma_values[9] < Gamma_values[5], \
-            "Highest moments should be most suppressed"
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

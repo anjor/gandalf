@@ -63,7 +63,8 @@ from krmhd.diagnostics import (
     plot_energy_history,
     compute_turbulence_diagnostics,
 )
-from krmhd.io import save_turbulence_diagnostics
+from krmhd.io import save_turbulence_diagnostics, save_checkpoint, load_checkpoint
+from krmhd.forcing import force_alfven_modes_balanced
 
 
 # Original GANDALF mode triplets (6 modes with low k_z = ±1)
@@ -76,6 +77,57 @@ GANDALF_ORIGINAL_MODES = [
     (0, 1, -1),  # k_perp = 1, k_z = -1
     (-1, 1, -1), # k_perp = sqrt(2), k_z = -1
 ]
+
+
+def create_checkpoint_metadata(
+    step: int,
+    eta: float,
+    nu: float,
+    hyper_r: int,
+    hyper_n: int,
+    force_amplitude: float,
+    v_A: float,
+    dt: float,
+    n_force_min: int,
+    n_force_max: int,
+    description: str,
+    **extra_metadata
+) -> dict:
+    """
+    Create standardized checkpoint metadata dictionary.
+
+    Args:
+        step: Current timestep number
+        eta: Dissipation coefficient
+        nu: Collision frequency
+        hyper_r: Hyper-dissipation order
+        hyper_n: Hyper-collision order
+        force_amplitude: Forcing amplitude
+        v_A: Alfvén velocity
+        dt: Timestep
+        n_force_min: Minimum forcing mode number
+        n_force_max: Maximum forcing mode number
+        description: Human-readable description
+        **extra_metadata: Additional metadata fields
+
+    Returns:
+        Dictionary with all checkpoint metadata
+    """
+    metadata = {
+        'step': int(step),
+        'eta': float(eta),
+        'nu': float(nu),
+        'hyper_r': int(hyper_r),
+        'hyper_n': int(hyper_n),
+        'force_amplitude': float(force_amplitude),
+        'v_A': float(v_A),
+        'dt': float(dt),
+        'n_force_min': int(n_force_min),
+        'n_force_max': int(n_force_max),
+        'description': description,
+    }
+    metadata.update(extra_metadata)
+    return metadata
 
 
 def save_snapshot(snapshot_dir, step, state, k_perp, E_kin_perp, E_mag_perp,
@@ -234,12 +286,41 @@ def main():
                         help='Forcing amplitude (overrides resolution default)')
     parser.add_argument('--hyper-r', type=int, default=None,
                         help='Hyper-dissipation order (overrides resolution default)')
-    parser.add_argument('--hyper-n', type=int, default=None, choices=[1, 2, 4],
+    parser.add_argument('--hyper-n', type=int, default=None, choices=[1, 2, 3, 4],
                         help='Hyper-collision order (overrides resolution default)')
     parser.add_argument('--use-gandalf-forcing', action='store_true',
                         help='Use original GANDALF forcing formula (1/k_perp weighting with log-random modulation)')
     parser.add_argument('--use-specific-modes', action='store_true',
                         help='Force only 6 specific mode triplets matching original GANDALF (respects RMHD ordering)')
+    parser.add_argument('--balanced-elsasser', action='store_true',
+                        help='Force z⁺ and z⁻ independently in a low-|nz| perpendicular band (recommended for robust cascade)')
+    parser.add_argument('--max-nz', type=int, default=1,
+                        help='For balanced forcing: allow |nz| ≤ max_nz (default 1)')
+    parser.add_argument('--include-nz0', action='store_true',
+                        help='For balanced forcing: include kz=0 plane (default: exclude)')
+    parser.add_argument('--correlation', type=float, default=0.0,
+                        help='For balanced forcing: correlation between z⁺ and z⁻ forcing in [0,1). 0=independent')
+
+    # Checkpoint configuration
+    parser.add_argument('--checkpoint-dir', type=str, default=None,
+                        help='Directory for checkpoint files (default: output-dir/checkpoints)')
+    parser.add_argument('--checkpoint-interval-time', type=float, default=None,
+                        help='Save checkpoint every N Alfvén times (e.g., 20.0)')
+    parser.add_argument('--checkpoint-interval-steps', type=int, default=None,
+                        help='Save checkpoint every N steps (e.g., 5000)')
+    parser.add_argument('--checkpoint-on-issues', action='store_true', default=True,
+                        help='Auto-save checkpoint on CFL violation or energy spike (default: enabled)')
+    parser.add_argument('--no-checkpoint-on-issues', dest='checkpoint_on_issues', action='store_false',
+                        help='Disable auto-save on issues')
+    parser.add_argument('--checkpoint-final', action='store_true', default=True,
+                        help='Save final checkpoint at end of run (default: enabled)')
+    parser.add_argument('--no-checkpoint-final', dest='checkpoint_final', action='store_false',
+                        help='Disable final checkpoint')
+
+    # Resume from checkpoint
+    parser.add_argument('--resume-from', type=str, default=None,
+                        help='Resume from checkpoint file (e.g., checkpoints/checkpoint_t050.0.h5)')
+
     args = parser.parse_args()
 
     print("=" * 70)
@@ -247,12 +328,73 @@ def main():
     print("=" * 70)
 
     # ==========================================================================
+    # CHECKPOINT SETUP
+    # ==========================================================================
+
+    # Determine checkpoint directory
+    checkpoint_dir = None
+    if args.checkpoint_dir is not None:
+        checkpoint_dir = Path(args.checkpoint_dir)
+    elif args.checkpoint_interval_time or args.checkpoint_interval_steps or args.checkpoint_final:
+        # Use default: output_dir/checkpoints
+        checkpoint_dir = Path(args.output_dir) / "checkpoints"
+
+    # Create checkpoint directory if needed
+    if checkpoint_dir is not None:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load checkpoint if resuming
+    resumed_state = None
+    resumed_grid = None
+    resumed_metadata = None
+    initial_time = 0.0
+    initial_step = 0
+
+    if args.resume_from is not None:
+        print("\n" + "=" * 70)
+        print(f"RESUMING FROM CHECKPOINT: {args.resume_from}")
+        print("=" * 70)
+
+        resumed_state, resumed_grid, resumed_metadata = load_checkpoint(args.resume_from)
+        initial_time = float(resumed_state.time)
+        initial_step = int(resumed_metadata.get('step', 0))
+
+        print(f"✓ Loaded checkpoint from t={initial_time:.2f} τ_A (step {initial_step})")
+        print(f"  Grid: {resumed_grid.Nx}×{resumed_grid.Ny}×{resumed_grid.Nz}")
+        print(f"  Checkpoint saved: {resumed_metadata.get('timestamp', 'unknown')}")
+
+        # Print original parameters from checkpoint
+        print(f"\n  Original parameters from checkpoint:")
+        for key in ['eta', 'nu', 'hyper_r', 'hyper_n', 'force_amplitude', 'v_A', 'n_force_min', 'n_force_max']:
+            if key in resumed_metadata:
+                print(f"    {key}: {resumed_metadata[key]}")
+
+        # Validate that critical state parameters match
+        if resumed_state.M != 10:
+            print(f"\n  ⚠️  WARNING: Checkpoint has M={resumed_state.M}, expected M=10")
+            print(f"     Hermite moment count mismatch may cause issues")
+
+        # Validate physical parameters (informational only)
+        if hasattr(resumed_state, 'beta_i') and resumed_state.beta_i != 1.0:
+            print(f"\n  ℹ️  INFO: Checkpoint has beta_i={resumed_state.beta_i} (default=1.0)")
+        if hasattr(resumed_state, 'v_th') and resumed_state.v_th != 1.0:
+            print(f"  ℹ️  INFO: Checkpoint has v_th={resumed_state.v_th} (default=1.0)")
+
+    # ==========================================================================
     # PARAMETERS
     # ==========================================================================
 
     # Resolution-dependent parameters
-    Nx = Ny = args.resolution
-    Nz = args.resolution  # Cubic grid (matching original GANDALF)
+    # If resuming, use grid from checkpoint; otherwise use command-line args
+    if resumed_grid is not None:
+        Nx = resumed_grid.Nx
+        Ny = resumed_grid.Ny
+        Nz = resumed_grid.Nz
+        if args.resolution != Nx:
+            print(f"\n  ⚠️  WARNING: --resolution={args.resolution} ignored (using checkpoint grid {Nx}×{Ny}×{Nz})")
+    else:
+        Nx = Ny = args.resolution
+        Nz = args.resolution  # Cubic grid (matching original GANDALF)
 
     # With NORMALIZED hyper-dissipation (matching original GANDALF):
     # - Constraint is eta·dt < 50 (independent of resolution!)
@@ -305,14 +447,50 @@ def main():
     n_force_max = 2  # Narrow injection range (was 3, reduced for stability)
 
     # Override parameters with command-line arguments if provided
+    # Track which parameters were overridden (for resume info)
+    overridden_params = {}
+    params_requiring_dt_recalc = False
+
     if args.eta is not None:
+        if resumed_metadata and 'eta' in resumed_metadata and resumed_metadata['eta'] != args.eta:
+            overridden_params['eta'] = (resumed_metadata['eta'], args.eta)
+            params_requiring_dt_recalc = True
         eta = args.eta
     if args.force_amplitude is not None:
+        if resumed_metadata and 'force_amplitude' in resumed_metadata and resumed_metadata['force_amplitude'] != args.force_amplitude:
+            overridden_params['force_amplitude'] = (resumed_metadata['force_amplitude'], args.force_amplitude)
         force_amplitude = args.force_amplitude
     if args.hyper_r is not None:
+        if resumed_metadata and 'hyper_r' in resumed_metadata and resumed_metadata['hyper_r'] != args.hyper_r:
+            overridden_params['hyper_r'] = (resumed_metadata['hyper_r'], args.hyper_r)
+            params_requiring_dt_recalc = True
         hyper_r = args.hyper_r
     if args.hyper_n is not None:
+        if resumed_metadata and 'hyper_n' in resumed_metadata and resumed_metadata['hyper_n'] != args.hyper_n:
+            overridden_params['hyper_n'] = (resumed_metadata['hyper_n'], args.hyper_n)
         hyper_n = args.hyper_n
+
+    # Add nu and v_A override support (these don't have command-line args in current implementation,
+    # but can be added if needed for advanced use cases)
+    # For now, we allow loading from checkpoint metadata
+    if resumed_metadata:
+        if 'nu' in resumed_metadata:
+            nu = float(resumed_metadata['nu'])
+        if 'v_A' in resumed_metadata:
+            v_A = float(resumed_metadata['v_A'])
+        if 'n_force_min' in resumed_metadata:
+            n_force_min = int(resumed_metadata['n_force_min'])
+        if 'n_force_max' in resumed_metadata:
+            n_force_max = int(resumed_metadata['n_force_max'])
+
+    # Print parameter overrides if resuming
+    if resumed_metadata and overridden_params:
+        print(f"\n  Parameter overrides:")
+        for param, (old_val, new_val) in overridden_params.items():
+            print(f"    {param}: {old_val} → {new_val}")
+
+        if params_requiring_dt_recalc:
+            print(f"\n  ⚠️  NOTE: Parameters affecting dissipation changed - timestep may be recalculated")
 
     # Initial condition (weak, let forcing drive the turbulence)
     alpha = 5.0 / 3.0     # k^(-5/3) initial spectrum
@@ -326,6 +504,28 @@ def main():
     averaging_start = args.averaging_start * tau_A  # When to start averaging
     cfl_safety = 0.3
     save_interval = 10
+
+    # Validate resume time
+    if resumed_state is not None and initial_time >= total_time:
+        print(f"\n" + "!" * 70)
+        print(f"ERROR: Checkpoint time ({initial_time:.2f}) >= target time ({total_time:.2f})")
+        print(f"       Cannot resume - checkpoint is already past the requested --total-time")
+        print(f"       Either:")
+        print(f"         1. Increase --total-time to > {initial_time/tau_A:.1f} τ_A")
+        print(f"         2. Resume from an earlier checkpoint")
+        print("!" * 70)
+        sys.exit(1)
+
+    # Validate averaging window
+    if averaging_start >= total_time:
+        print(f"\n" + "!" * 70)
+        print(f"ERROR: Averaging start time ({averaging_start/tau_A:.1f} τ_A) >= total time ({total_time/tau_A:.1f} τ_A)")
+        print(f"       Averaging will never start!")
+        print(f"       Either:")
+        print(f"         1. Reduce --averaging-start to < {total_time/tau_A:.1f} τ_A")
+        print(f"         2. Increase --total-time to > {averaging_start/tau_A:.1f} τ_A")
+        print("!" * 70)
+        sys.exit(1)
 
     # Diagnostic intervals (for logging/monitoring only, doesn't affect physics)
     steady_state_check_interval = 50  # Check every N steps during averaging
@@ -383,28 +583,37 @@ def main():
     # ==========================================================================
 
     print("\n" + "-" * 70)
-    print("Initializing...")
+    if resumed_state is not None:
+        print("Using state from checkpoint...")
+        grid = resumed_grid
+        state = resumed_state
+        E0 = compute_energy(state)['total']
+        print(f"✓ Loaded state from checkpoint")
+        print(f"  Time: t = {state.time:.2f} τ_A")
+        print(f"  Energy: E_total = {E0:.6e}")
+        print(f"  Grid: {Nx}×{Ny}×{Nz}")
+    else:
+        print("Initializing...")
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
+        print(f"✓ Created {Nx}×{Ny}×{Nz} spectral grid")
 
-    grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=Lx, Ly=Ly, Lz=Lz)
-    print(f"✓ Created {Nx}×{Ny}×{Nz} spectral grid")
+        # Weak initial spectrum
+        M = 10  # Number of Hermite moments
+        state = initialize_random_spectrum(
+            grid,
+            M=M,
+            alpha=alpha,
+            amplitude=amplitude,
+            k_min=k_min,
+            k_max=k_max,
+            v_th=1.0,
+            beta_i=beta_i,
+            seed=42
+        )
 
-    # Weak initial spectrum
-    M = 10  # Number of Hermite moments
-    state = initialize_random_spectrum(
-        grid,
-        M=M,
-        alpha=alpha,
-        amplitude=amplitude,
-        k_min=k_min,
-        k_max=k_max,
-        v_th=1.0,
-        beta_i=beta_i,
-        seed=42
-    )
-
-    E0 = compute_energy(state)['total']
-    print(f"✓ Initialized weak k^(-{alpha:.2f}) spectrum")
-    print(f"  Initial energy: E_total = {E0:.6e}")
+        E0 = compute_energy(state)['total']
+        print(f"✓ Initialized weak k^(-{alpha:.2f}) spectrum")
+        print(f"  Initial energy: E_total = {E0:.6e}")
 
     # ==========================================================================
     # Compute Timestep
@@ -433,6 +642,17 @@ def main():
     print("\n" + "-" * 70)
     print("Running forced evolution...")
 
+    # Prepare output/snapshot directories BEFORE the loop so snapshots can be saved
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_dir = None
+    if args.snapshot_interval > 0:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        snapshot_dir = output_dir / f"snapshots_{args.resolution}cubed_{timestamp}"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Snapshot directory: {snapshot_dir}")
+        print(f"Snapshots will be saved every {args.snapshot_interval} steps during averaging")
+
     # Energy history tracking
     history = EnergyHistory()
     energy_values = []  # For steady-state logging
@@ -456,13 +676,17 @@ def main():
     spectrum_kinetic_list = []
     spectrum_magnetic_list = []
     averaging_started = False
-    averaging_start_step = None
+    averaging_start_array_idx = None  # Index into energy_values array (not global step counter!)
 
     # Random key for forcing
     key = jax.random.PRNGKey(42)
 
     start_time = time.time()
-    step = 0
+    step = initial_step  # Start from checkpoint step if resuming
+
+    # Track last checkpoint times for periodic saving
+    last_checkpoint_time = initial_time
+    last_checkpoint_step = initial_step
 
     # Main loop: run until we reach total_time
     while state.time < total_time:
@@ -473,16 +697,95 @@ def main():
         # Track history (needed for steady-state detection)
         energy_values.append(E_total)
 
-        # Compute turbulence diagnostics for Issue #82 investigation
-        if args.save_diagnostics and step % args.diagnostic_interval == 0:
+        # Compute turbulence diagnostics for Issue #82 investigation or checkpoint-on-issues
+        # Compute diagnostics if either saving them OR need them for checkpoint-on-issues
+        compute_diagnostics = (args.save_diagnostics or args.checkpoint_on_issues) and step % args.diagnostic_interval == 0
+        if compute_diagnostics:
             diag = compute_turbulence_diagnostics(state, dt=dt, v_A=v_A)
-            diagnostics_list.append(diag)
+
+            # Save diagnostics if requested
+            if args.save_diagnostics:
+                diagnostics_list.append(diag)
 
             # Print warning if CFL > 1.0 or max_velocity is very large
-            if diag.cfl_number > 1.0:
+            cfl_violation = diag.cfl_number > 1.0
+            high_velocity = diag.max_velocity > 100.0
+            if cfl_violation:
                 print(f"  ⚠️  CFL VIOLATION at step {step}, t={state.time:.2f}: CFL = {diag.cfl_number:.3f}")
-            if diag.max_velocity > 100.0:
+            if high_velocity:
                 print(f"  ⚠️  HIGH VELOCITY at step {step}, t={state.time:.2f}: max_vel = {diag.max_velocity:.2e}")
+
+            # Checkpoint on issues if enabled
+            if args.checkpoint_on_issues and checkpoint_dir is not None:
+                if cfl_violation or high_velocity:
+                    issue_type = "CFL_VIOLATION" if cfl_violation else "HIGH_VELOCITY"
+                    # Include timestamp to avoid overwriting consecutive violations
+                    checkpoint_filename = f"checkpoint_t{state.time:06.1f}_{issue_type}_step{step}.h5"
+                    checkpoint_path = checkpoint_dir / checkpoint_filename
+                    checkpoint_metadata = create_checkpoint_metadata(
+                        step=step,
+                        eta=eta,
+                        nu=nu,
+                        hyper_r=hyper_r,
+                        hyper_n=hyper_n,
+                        force_amplitude=force_amplitude,
+                        v_A=v_A,
+                        dt=dt,
+                        n_force_min=n_force_min,
+                        n_force_max=n_force_max,
+                        description=f'Auto-saved on {issue_type} at t={state.time:.2f} τ_A',
+                        issue_type=issue_type,
+                        cfl_number=float(diag.cfl_number),
+                        max_velocity=float(diag.max_velocity),
+                    )
+                    save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=False)
+                    print(f"  💾 Auto-saved checkpoint: {checkpoint_filename}")
+
+        # Periodic checkpoint saving (by time)
+        if (checkpoint_dir is not None and
+            args.checkpoint_interval_time is not None and
+            state.time - last_checkpoint_time >= args.checkpoint_interval_time):
+            checkpoint_filename = f"checkpoint_t{state.time:06.1f}.h5"
+            checkpoint_path = checkpoint_dir / checkpoint_filename
+            checkpoint_metadata = create_checkpoint_metadata(
+                step=step,
+                eta=eta,
+                nu=nu,
+                hyper_r=hyper_r,
+                hyper_n=hyper_n,
+                force_amplitude=force_amplitude,
+                v_A=v_A,
+                dt=dt,
+                n_force_min=n_force_min,
+                n_force_max=n_force_max,
+                description=f'Periodic checkpoint at t={state.time:.2f} τ_A',
+            )
+            save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True)
+            last_checkpoint_time = state.time
+            print(f"  💾 Saved periodic checkpoint (by time): {checkpoint_filename}")
+
+        # Periodic checkpoint saving (by steps)
+        if (checkpoint_dir is not None and
+            args.checkpoint_interval_steps is not None and
+            step - last_checkpoint_step >= args.checkpoint_interval_steps):
+            checkpoint_filename = f"checkpoint_step{step:07d}.h5"
+            checkpoint_path = checkpoint_dir / checkpoint_filename
+            checkpoint_metadata = create_checkpoint_metadata(
+                step=step,
+                eta=eta,
+                nu=nu,
+                hyper_r=hyper_r,
+                hyper_n=hyper_n,
+                force_amplitude=force_amplitude,
+                v_A=v_A,
+                dt=dt,
+                n_force_min=n_force_min,
+                n_force_max=n_force_max,
+                description=f'Periodic checkpoint at step {step}',
+            )
+            save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True)
+            last_checkpoint_step = step
+            print(f"  💾 Saved periodic checkpoint (by steps): {checkpoint_filename}")
 
         if step % save_interval == 0:
             history.append(state)
@@ -490,8 +793,8 @@ def main():
             # Start averaging when we reach averaging_start time
             if not averaging_started and state.time >= averaging_start:
                 averaging_started = True
-                averaging_start_step = step
-                print(f"\n  *** AVERAGING STARTED at step {step}, t={state.time:.2f} τ_A ***\n")
+                averaging_start_array_idx = len(energy_values)  # Current position in energy_values array
+                print(f"\n  *** AVERAGING STARTED at step {step}, t={state.time:.2f} τ_A (array index {averaging_start_array_idx}) ***\n")
 
             # Collect spectra during averaging window
             if averaging_started:
@@ -507,8 +810,8 @@ def main():
                     print(f"  📸 Snapshot saved: t={state.time:.1f} τ_A")
 
                 # Periodically check and log steady-state status
-                if step % steady_state_check_interval == 0 and len(energy_values) >= averaging_start_step + steady_state_window:
-                    recent_energy = energy_values[averaging_start_step:]
+                if step % steady_state_check_interval == 0 and len(energy_values) >= averaging_start_array_idx + steady_state_window:
+                    recent_energy = energy_values[averaging_start_array_idx:]
                     is_steady = detect_steady_state(
                         energy_values,
                         window=min(steady_state_window, len(recent_energy)),
@@ -536,14 +839,42 @@ def main():
                 avg_inj = np.mean(injection_rates[-50:]) if len(injection_rates) >= 50 else 0
                 phase = "[AVERAGING]" if averaging_started else "[SPIN-UP]"
                 n_spectra = len(spectrum_kinetic_list)
+                # Compute cross-helicity proxy σ_c from Elsasser gradient energies
+                # E_total = 0.25 ∫ (|∇z+|² + |∇z-|²) dx
+                grid = state.grid
+                kx_3d = grid.kx[jnp.newaxis, jnp.newaxis, :]
+                ky_3d = grid.ky[jnp.newaxis, :, jnp.newaxis]
+                k_perp_sq = kx_3d**2 + ky_3d**2
+                kx_zero = (kx_3d == 0.0)
+                kx_nyq = (kx_3d == grid.Nx // 2) if (grid.Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+                kx_mid = ~(kx_zero | kx_nyq)
+                dbl = jnp.where(kx_mid, 2.0, 1.0)
+                N_perp = grid.Nx * grid.Ny
+                Ezp = 0.25 * (1.0 / N_perp) * jnp.sum(dbl * k_perp_sq * jnp.abs(state.z_plus)**2).real
+                Ezm = 0.25 * (1.0 / N_perp) * jnp.sum(dbl * k_perp_sq * jnp.abs(state.z_minus)**2).real
+                sigma_c = float((Ezp - Ezm) / (Ezp + Ezm + 1e-30))
+
                 print(f"  Step {step:5d}: t={state.time:.2f} τ_A, "
-                      f"E={E_total:.4e}, f_mag={mag_frac:.3f}, "
+                      f"E={E_total:.4e}, f_mag={mag_frac:.3f}, σ_c={sigma_c:+.3f}, "
                       f"⟨ε_inj⟩={avg_inj:.2e} {phase} (spectra: {n_spectra})")
 
         # Apply forcing
         state_before = state
         key, subkey = jax.random.split(key)
-        if args.use_specific_modes:
+        if args.balanced_elsasser:
+            # Force independent z⁺/z⁻ in a perpendicular band, restrict to |nz| ≤ max_nz
+            state, key = force_alfven_modes_balanced(
+                state,
+                amplitude=force_amplitude,
+                n_min=n_force_min,
+                n_max=n_force_max,
+                dt=dt,
+                key=subkey,
+                max_nz=args.max_nz,
+                include_nz0=args.include_nz0,
+                correlation=args.correlation,
+            )
+        elif args.use_specific_modes:
             # Force only 6 specific mode triplets (original GANDALF)
             # This respects RMHD ordering k⊥ >> k∥ by forcing only low-k_z modes
             state, key = force_alfven_modes_specific(
@@ -592,13 +923,50 @@ def main():
 
         step += 1
 
+    # ==========================================================================
+    # Save Final Checkpoint
+    # ==========================================================================
+
+    if args.checkpoint_final and checkpoint_dir is not None:
+        checkpoint_filename = f"checkpoint_final_t{state.time:06.1f}.h5"
+        checkpoint_path = checkpoint_dir / checkpoint_filename
+        checkpoint_metadata = create_checkpoint_metadata(
+            step=step,
+            eta=eta,
+            nu=nu,
+            hyper_r=hyper_r,
+            hyper_n=hyper_n,
+            force_amplitude=force_amplitude,
+            v_A=v_A,
+            dt=dt,
+            n_force_min=n_force_min,
+            n_force_max=n_force_max,
+            description=f'Final checkpoint at t={state.time:.2f} τ_A (end of run)',
+            total_time=float(total_time),
+        )
+        save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True)
+        print(f"\n💾 Saved final checkpoint: {checkpoint_filename}")
+
     # Final summary
     if averaging_started:
-        recent_energy = energy_values[averaging_start_step:]
-        energy_variation = (max(recent_energy) - min(recent_energy)) / np.mean(recent_energy) * 100
-        print(f"\n  *** EVOLUTION COMPLETE: {len(spectrum_kinetic_list)} spectra collected ***")
-        print(f"  *** Energy range during averaging: [{min(recent_energy):.2e}, {max(recent_energy):.2e}] ***")
-        print(f"  *** Relative variation: {energy_variation:.1f}% (target: <10% for good statistics) ***\n")
+        # Extract energy values from averaging window using array index
+        if averaging_start_array_idx is not None and averaging_start_array_idx < len(energy_values):
+            recent_energy = energy_values[averaging_start_array_idx:]
+        else:
+            # Fallback: use last 20% of data if index is invalid
+            print(f"  WARNING: Invalid averaging_start_array_idx={averaging_start_array_idx}, len(energy_values)={len(energy_values)}")
+            print(f"           Using fallback: last 20% of energy history for statistics")
+            fallback_idx = max(0, len(energy_values) - len(energy_values) // 5)
+            recent_energy = energy_values[fallback_idx:]
+
+        if len(recent_energy) > 0:
+            energy_variation = (max(recent_energy) - min(recent_energy)) / np.mean(recent_energy) * 100
+            print(f"\n  *** EVOLUTION COMPLETE: {len(spectrum_kinetic_list)} spectra collected ***")
+            print(f"  *** Energy range during averaging: [{min(recent_energy):.2e}, {max(recent_energy):.2e}] ***")
+            print(f"  *** Relative variation: {energy_variation:.1f}% (target: <10% for good statistics) ***\n")
+        else:
+            print(f"\n  *** EVOLUTION COMPLETE: {len(spectrum_kinetic_list)} spectra collected ***")
+            print(f"  *** WARNING: No energy data in averaging window - cannot compute statistics ***\n")
 
     elapsed = time.time() - start_time
 
@@ -650,12 +1018,21 @@ def main():
     print(f"  Average injection rate (late time): ⟨ε_inj⟩ = {avg_injection:.3e}")
 
     # Analyze spectrum slope
-    # Fit k⊥^(-5/3) in inertial range (k⊥ ~ 5-20)
-    mask = (k_perp >= 5) & (k_perp <= 20)
-    if np.sum(mask) > 5:
-        k_fit = k_perp[mask]
-        E_kin_fit = E_kin_avg[mask]
-        E_mag_fit = E_mag_avg[mask]
+    # Fit k⊥^(-5/3) over a MODE-NUMBER inertial range n⊥ ∈ [n_min, n_max]
+    # This avoids confusion with 2π factors and matches thesis convention (L=1 ⇒ k=2πn).
+    n_perp = k_perp * Lx / (2 * np.pi)
+    if args.resolution == 32:
+        n_fit_min, n_fit_max = 3.0, 8.0
+    elif args.resolution == 64:
+        n_fit_min, n_fit_max = 3.0, 12.0
+    else:
+        n_fit_min, n_fit_max = 3.0, 20.0
+
+    n_mask = (n_perp >= n_fit_min) & (n_perp <= n_fit_max)
+    if np.sum(n_mask) > 5:
+        k_fit = k_perp[n_mask]
+        E_kin_fit = E_kin_avg[n_mask]
+        E_mag_fit = E_mag_avg[n_mask]
 
         # Log-log linear fit (use relative floor for numerical stability)
         log_k = np.log10(k_fit)
@@ -667,7 +1044,7 @@ def main():
         slope_kin = np.polyfit(log_k, log_E_kin, 1)[0]
         slope_mag = np.polyfit(log_k, log_E_mag, 1)[0]
 
-        print(f"\n  Inertial range slopes (k⊥ ∈ [5, 20]):")
+        print(f"\n  Inertial range slopes (n⊥ ∈ [{n_fit_min:.0f}, {n_fit_max:.0f}]):")
         print(f"    Kinetic:  k⊥^({slope_kin:.2f})  (expected: -5/3 = -1.67)")
         print(f"    Magnetic: k⊥^({slope_mag:.2f})  (expected: -5/3 = -1.67)")
 
@@ -678,16 +1055,9 @@ def main():
     print("\n" + "-" * 70)
     print("Creating visualizations...")
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Output directory prepared earlier; re-announce for clarity
     print(f"Output directory: {output_dir}")
-
-    # Create timestamped snapshot subdirectory if snapshots are enabled
-    snapshot_dir = None
-    if args.snapshot_interval > 0:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        snapshot_dir = output_dir / f"snapshots_{args.resolution}cubed_{timestamp}"
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
+    if snapshot_dir is not None:
         print(f"Snapshot directory: {snapshot_dir}")
         print(f"Snapshots will be saved every {args.snapshot_interval} steps during averaging")
 
@@ -730,8 +1100,13 @@ def main():
     ax2.fill_between(n_perp, E_kin_avg - E_kin_std, E_kin_avg + E_kin_std,
                      color='b', alpha=0.2)
 
-    # Reference slope n^(-5/3)
-    n_ref = np.array([1.0, 5.0])
+    # Reference slope n^(-5/3) starting at inertial-range minimum
+    if args.resolution == 32:
+        n_ref = np.array([2.0, 8.0])
+    elif args.resolution == 64:
+        n_ref = np.array([3.0, 12.0])
+    else:
+        n_ref = np.array([3.0, 20.0])
     E_ref = 0.5 * n_ref**(-5.0/3.0)
     ax2.loglog(n_ref, E_ref, 'k--', linewidth=1.5, label='n^(-5/3)')
 
@@ -745,6 +1120,7 @@ def main():
     ax2.grid(True, alpha=0.3, which='both')
     ax2.legend(fontsize=10)
     ax2.set_xlim(0.5, n_perp[-1])
+    ax2.set_ylim(1e-3, None)
 
     # -------------------------------------------------------------------------
     # Panel 3: Time-Averaged Magnetic Spectrum
@@ -769,6 +1145,7 @@ def main():
     ax3.grid(True, alpha=0.3, which='both')
     ax3.legend(fontsize=10)
     ax3.set_xlim(0.5, n_perp[-1])
+    ax3.set_ylim(1e-3, None)
 
     plt.tight_layout()
 
@@ -794,6 +1171,7 @@ def main():
     ax_left.grid(True, alpha=0.3, which='both')
     ax_left.legend(fontsize=12)
     ax_left.set_xlim(0.5, n_perp[-1])
+    ax_left.set_ylim(1e-3, None)
 
     # Magnetic
     ax_right.loglog(n_perp, E_mag_avg, 'r-', linewidth=2.5,
@@ -807,6 +1185,7 @@ def main():
     ax_right.grid(True, alpha=0.3, which='both')
     ax_right.legend(fontsize=12)
     ax_right.set_xlim(0.5, n_perp[-1])
+    ax_right.set_ylim(1e-3, None)
 
     plt.tight_layout()
 
@@ -898,8 +1277,11 @@ def main():
             f.attrs['n_spectra'] = len(spectrum_kinetic_list)
             f.attrs['description'] = f'Turbulent cascade spectral data N={args.resolution}³'
 
-            # Wavenumber grid
+            # Wavenumber and mode-number grids
             f.create_dataset('k_perp', data=k_perp)
+            # Save mode-number axis to avoid any 2π conversions in analysis/plots
+            n_perp = k_perp * Lx / (2 * np.pi)
+            f.create_dataset('n_perp', data=n_perp)
 
             # Time-averaged spectra
             f.create_dataset('E_kinetic_avg', data=E_kin_avg)

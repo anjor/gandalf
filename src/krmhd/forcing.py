@@ -68,7 +68,76 @@ def _mode_to_wavenumber(n: int, L: float) -> float:
     return 2.0 * jnp.pi * n / L
 
 
-@jax.jit
+@partial(jax.jit, static_argnums=(9,))
+def _gaussian_white_noise_fourier_perp_lowkz_jit(
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    amplitude: float,
+    kperp_min: float,
+    kperp_max: float,
+    kz_allowed: Array,
+    dt: float,
+    real_part: Array,
+    imag_part: Array,
+    Nx_full: int,
+) -> Array:
+    """
+    JIT core for Gaussian white noise forcing restricted to a perpendicular band
+    and a low-|kz| set, to respect RMHD ordering (k_perp >> k_parallel).
+
+    Args:
+        kx, ky, kz: 1D wavenumber arrays
+        amplitude: Forcing amplitude (energy injection ~ amplitude²)
+        kperp_min, kperp_max: Perpendicular band limits
+        kz_allowed: Boolean mask over kz (shape [Nz]) selecting allowed kz planes
+        dt: Timestep
+        real_part, imag_part: Random normal arrays [Nz, Ny, Nx//2+1]
+        Nx_full: Full grid size in x-direction (needed to determine if Nyquist mode exists)
+
+    Returns:
+        Complex forcing field [Nz, Ny, Nx//2+1]
+    """
+    # Broadcast to grids
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
+
+    # Perpendicular magnitude
+    k_perp = jnp.sqrt(kx_3d**2 + ky_3d**2)
+
+    # Masks
+    perp_mask = (k_perp >= kperp_min) & (k_perp <= kperp_max)
+    kz_mask = kz_allowed[:, jnp.newaxis, jnp.newaxis]
+    mask = perp_mask & kz_mask
+
+    # White noise scaling
+    scale = amplitude / jnp.sqrt(dt)
+    noise = (real_part + 1j * imag_part) * scale
+
+    forced_field = noise * mask.astype(noise.dtype)
+
+    # Enforce rfft reality on kx=0 plane (always required)
+    forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
+
+    # Enforce reality on kx=Nyquist plane ONLY if Nx is even
+    # For rfft: shape is [Nz, Ny, Nx//2+1]
+    # - If Nx even (e.g., 32): Nyquist mode exists at index Nx//2 = 16
+    # - If Nx odd (e.g., 33): NO Nyquist mode; max mode is at index Nx//2 = 16 (not Nyquist!)
+    # Incorrectly setting odd-Nx highest mode to real corrupts physics at high-k
+    if Nx_full % 2 == 0:
+        Nx_rfft = forced_field.shape[2]
+        nyquist_idx = Nx_rfft - 1  # This is Nx//2 for even Nx
+        forced_field = forced_field.at[:, :, nyquist_idx].set(
+            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
+        )
+
+    # Zero DC
+    forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
+    return forced_field
+
+
+@partial(jax.jit, static_argnums=(9,))
 def _gaussian_white_noise_fourier_jit(
     kx: Array,
     ky: Array,
@@ -79,6 +148,7 @@ def _gaussian_white_noise_fourier_jit(
     dt: float,
     real_part: Array,
     imag_part: Array,
+    Nx_full: int,
 ) -> Array:
     """
     JIT-compiled core function for generating Gaussian white noise in Fourier space.
@@ -91,6 +161,7 @@ def _gaussian_white_noise_fourier_jit(
         dt: Timestep (for proper dimensional scaling)
         real_part: Random normal samples for real part [Nz, Ny, Nx//2+1]
         imag_part: Random normal samples for imaginary part [Nz, Ny, Nx//2+1]
+        Nx_full: Full grid size in x-direction (needed to determine if Nyquist mode exists)
 
     Returns:
         Complex Fourier field with forcing at k ∈ [k_min, k_max]
@@ -138,15 +209,17 @@ def _gaussian_white_noise_fourier_jit(
     # Without this enforcement, direct Fourier-space operations (like forcing)
     # can create non-Hermitian fields that violate reality condition.
 
-    # Enforce reality on kx=0 plane (all ky, kz)
+    # Enforce reality on kx=0 plane (always required)
     forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
 
-    # Enforce reality on kx=Nyquist plane (if Nx is even)
+    # Enforce reality on kx=Nyquist plane ONLY if Nx is even
     # For rfft: shape is [Nz, Ny, Nx//2+1]
-    # Nyquist is at index Nx//2 if Nx is even
-    Nx_rfft = forced_field.shape[2]  # This is Nx//2+1
-    if Nx_rfft > 1:  # Have more than just kx=0 mode
-        nyquist_idx = Nx_rfft - 1
+    # - If Nx even (e.g., 32): Nyquist mode exists at index Nx//2 = 16
+    # - If Nx odd (e.g., 33): NO Nyquist mode; max mode is at index Nx//2 = 16 (not Nyquist!)
+    # Incorrectly setting odd-Nx highest mode to real corrupts physics at high-k
+    if Nx_full % 2 == 0:
+        Nx_rfft = forced_field.shape[2]  # This is Nx//2+1
+        nyquist_idx = Nx_rfft - 1  # This is Nx//2 for even Nx
         forced_field = forced_field.at[:, :, nyquist_idx].set(
             forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
         )
@@ -154,7 +227,7 @@ def _gaussian_white_noise_fourier_jit(
     return forced_field
 
 
-@jax.jit
+@partial(jax.jit, static_argnums=(9,))
 def _gandalf_forcing_fourier_jit(
     kx: Array,
     ky: Array,
@@ -165,6 +238,7 @@ def _gandalf_forcing_fourier_jit(
     dt: float,
     random_amplitude: Array,
     random_phase: Array,
+    Nx_full: int,
 ) -> Array:
     """
     JIT-compiled core function for original GANDALF forcing (forcing.cu).
@@ -179,6 +253,7 @@ def _gandalf_forcing_fourier_jit(
         dt: Timestep
         random_amplitude: Random uniform samples in (0,1] for amplitude [Nz, Ny, Nx//2+1]
         random_phase: Random uniform samples in [0, 2π] for phase [Nz, Ny, Nx//2+1]
+        Nx_full: Full grid size in x-direction (needed to determine if Nyquist mode exists)
 
     Returns:
         Complex Fourier field with GANDALF forcing at k ∈ [k_min, k_max]
@@ -221,11 +296,17 @@ def _gandalf_forcing_fourier_jit(
     forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
 
     # Enforce Hermitian symmetry for rfft format
+    # Enforce reality on kx=0 plane (always required)
     forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
 
-    Nx_rfft = forced_field.shape[2]
-    if Nx_rfft > 1:
-        nyquist_idx = Nx_rfft - 1
+    # Enforce reality on kx=Nyquist plane ONLY if Nx is even
+    # For rfft: shape is [Nz, Ny, Nx//2+1]
+    # - If Nx even (e.g., 32): Nyquist mode exists at index Nx//2 = 16
+    # - If Nx odd (e.g., 33): NO Nyquist mode; max mode is at index Nx//2 = 16 (not Nyquist!)
+    # Incorrectly setting odd-Nx highest mode to real corrupts physics at high-k
+    if Nx_full % 2 == 0:
+        Nx_rfft = forced_field.shape[2]
+        nyquist_idx = Nx_rfft - 1  # This is Nx//2 for even Nx
         forced_field = forced_field.at[:, :, nyquist_idx].set(
             forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
         )
@@ -294,10 +375,145 @@ def gandalf_forcing_fourier(
     forced_field = _gandalf_forcing_fourier_jit(
         grid.kx, grid.ky, grid.kz,
         fampl, k_min, k_max, dt,
-        random_amplitude, random_phase
+        random_amplitude, random_phase,
+        grid.Nx,
     )
 
     return forced_field, key
+
+
+def gaussian_white_noise_fourier_perp_lowkz(
+    grid: SpectralGrid3D,
+    amplitude: float,
+    n_min: int,
+    n_max: int,
+    max_nz: int,
+    include_nz0: bool,
+    dt: float,
+    key: Array,
+) -> Tuple[Array, Array]:
+    """
+    Generate Gaussian white noise forcing restricted to a perpendicular band
+    n_perp ∈ [n_min, n_max] and low-|nz| planes (|nz| ≤ max_nz, optionally excluding nz=0).
+
+    This respects RMHD ordering by avoiding injection at high k_parallel and
+    is useful for robust Alfvénic cascade development.
+
+    Args:
+        grid: SpectralGrid3D
+        amplitude: Forcing amplitude
+        n_min, n_max: Perpendicular mode-number band (integers)
+        max_nz: Maximum |nz| allowed (e.g., 1)
+        include_nz0: Whether to include kz=0 plane
+        dt: Timestep
+        key: JAX PRNG key
+
+    Returns:
+        (forced_field, new_key)
+    """
+    if amplitude <= 0:
+        raise ValueError(f"amplitude must be positive, got {amplitude}")
+    if n_min <= 0 or n_max < n_min:
+        raise ValueError(f"Invalid band: n_min={n_min}, n_max={n_max}")
+    if max_nz < 0:
+        raise ValueError(f"max_nz must be ≥ 0, got {max_nz}")
+
+    # Perpendicular band limits
+    kperp_min = _mode_to_wavenumber(n_min, grid.Lx)
+    kperp_max = _mode_to_wavenumber(n_max, grid.Lx)
+
+    # Allowed kz planes: |nz| ≤ max_nz and optionally nz=0 excluded
+    k1 = 2.0 * jnp.pi / grid.Lz
+    kz = grid.kz
+    # Build boolean mask over kz by nearest-integer test on |kz|/k1
+    nz_float = jnp.round(jnp.abs(kz) / k1)
+    nz_int = nz_float.astype(jnp.int32)
+    kz_allowed = nz_int <= max_nz
+    if not include_nz0:
+        kz_allowed = kz_allowed & (nz_int != 0)
+
+    # Random fields
+    key, k1a, k1b = jax.random.split(key, 3)
+    real_part = jax.random.normal(k1a, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1))
+    imag_part = jax.random.normal(k1b, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1))
+
+    forced_field = _gaussian_white_noise_fourier_perp_lowkz_jit(
+        grid.kx, grid.ky, grid.kz,
+        amplitude,
+        float(kperp_min), float(kperp_max),
+        kz_allowed,
+        float(dt),
+        real_part, imag_part,
+        grid.Nx,
+    )
+    return forced_field, key
+
+
+def force_alfven_modes_balanced(
+    state: KRMHDState,
+    amplitude: float,
+    n_min: int,
+    n_max: int,
+    dt: float,
+    key: Array,
+    max_nz: int = 1,
+    include_nz0: bool = False,
+    correlation: float = 0.0,
+) -> Tuple[KRMHDState, Array]:
+    """
+    Force Alfvén modes with independent z⁺/z⁻ forcing to sustain strong
+    counter-propagating interactions. Restricts to low-|nz| to respect RMHD.
+
+    Args:
+        state: KRMHD state
+        amplitude: Forcing amplitude (per field)
+        n_min, n_max: Perpendicular band (mode numbers)
+        dt: Timestep
+        key: JAX key
+        max_nz: Allowed |nz| (default 1)
+        include_nz0: Include kz=0 plane (default False)
+        correlation: Correlation coefficient between z⁺ and z⁻ forcing in [0,1)
+                     0 → independent (recommended), 0.5 → partially correlated.
+
+    Returns:
+        (new_state, new_key)
+    """
+    if not (0.0 <= correlation < 1.0):
+        raise ValueError(f"correlation must be in [0,1), got {correlation}")
+
+    # Draw two independent fields
+    key, kA, kB, kMix = jax.random.split(key, 4)
+    Fp, kA = gaussian_white_noise_fourier_perp_lowkz(
+        state.grid, amplitude, n_min, n_max, max_nz, include_nz0, dt, kA
+    )
+    Fm, kB = gaussian_white_noise_fourier_perp_lowkz(
+        state.grid, amplitude, n_min, n_max, max_nz, include_nz0, dt, kB
+    )
+
+    if correlation > 0.0:
+        # Mix fields to achieve desired correlation approximately
+        # z− forcing ← sqrt(1-ρ²)·Fm + ρ·Fp
+        rho = jnp.float32(correlation)
+        alpha = jnp.sqrt(jnp.maximum(0.0, 1.0 - rho * rho))
+        Fm = alpha * Fm + rho * Fp
+
+    z_plus_new = state.z_plus + Fp
+    z_minus_new = state.z_minus + Fm
+
+    new_state = KRMHDState(
+        z_plus=z_plus_new,
+        z_minus=z_minus_new,
+        B_parallel=state.B_parallel,
+        g=state.g,
+        M=state.M,
+        beta_i=state.beta_i,
+        v_th=state.v_th,
+        nu=state.nu,
+        Lambda=state.Lambda,
+        time=state.time,
+        grid=state.grid,
+    )
+    return new_state, key
 
 
 def gaussian_white_noise_fourier(
@@ -402,6 +618,7 @@ def gaussian_white_noise_fourier(
         dt,
         real_part,
         imag_part,
+        grid.Nx,
     )
 
     return noise_field.astype(jnp.complex64), key
@@ -888,6 +1105,285 @@ def force_slow_modes(
         z_minus=state.z_minus,
         B_parallel=B_parallel_new,  # Forced slow mode
         g=state.g,  # Kinetic moments unchanged
+        M=state.M,
+        beta_i=state.beta_i,
+        v_th=state.v_th,
+        nu=state.nu,
+        Lambda=state.Lambda,
+        time=state.time,
+        grid=state.grid,
+    )
+
+    return new_state, key
+
+
+def force_hermite_moments(
+    state: KRMHDState,
+    amplitude: float,
+    n_min: int,
+    n_max: int,
+    dt: float,
+    key: Array,
+    forced_moments: Tuple[int, ...] = (0,),
+) -> Tuple[KRMHDState, Array]:
+    """
+    Apply Gaussian white noise forcing to Hermite moments (kinetic distribution).
+
+    **CRITICAL FOR KINETIC FDT VALIDATION**: This function forces the Hermite
+    moments g_m directly, which is required for proper fluctuation-dissipation
+    theorem (FDT) validation in velocity space (Thesis Chapter 3, Eq 3.26).
+
+    Unlike force_alfven_modes() which forces z± and excites g_m indirectly through
+    nonlinear coupling, this function adds stochastic forcing directly to the
+    specified Hermite moments. For FDT validation, typically only g₀ (density) is
+    forced, matching the kinetic Langevin equation:
+
+        ∂g₀/∂t + ∂(g₁/√2)/∂z = χ(t)
+
+    where χ(t) is Gaussian white noise forcing in velocity space.
+
+    The forcing is additive: g_m → g_m + F for each m ∈ forced_moments.
+
+    Args:
+        state: Current KRMHD state with Hermite moments
+        amplitude: Forcing amplitude (energy injection ~ amplitude²)
+        n_min: Minimum mode number for forcing band (typically n=1 or n=2)
+        n_max: Maximum mode number for forcing band (typically n=2 to n=5)
+        dt: Timestep size (for white noise scaling)
+        key: JAX random key
+        forced_moments: Tuple of Hermite moment indices to force (default: (0,) for g₀ only)
+            Examples:
+            - (0,): Force density g₀ only (standard FDT validation)
+            - (0, 1): Force both g₀ and g₁ (density + parallel velocity)
+            - (0, 1, 2): Force g₀, g₁, g₂ (including parallel pressure)
+
+    Returns:
+        new_state: State with forcing applied to specified Hermite moments
+        new_key: Updated random key
+
+    Example:
+        >>> key = jax.random.PRNGKey(42)
+        >>> # Force g₀ at mode n=1 (fundamental mode) for FDT validation
+        >>> state_forced, key = force_hermite_moments(
+        ...     state, amplitude=0.15, n_min=1, n_max=1, dt=0.01, key=key,
+        ...     forced_moments=(0,)
+        ... )
+
+    Physics:
+        For kinetic FDT validation (Thesis §3.2.1):
+        - Drive a single k-mode with white noise: χ(k,t)
+        - Measure time-averaged Hermite spectrum: ⟨|g_m(k)|²⟩
+        - Compare with analytical prediction from fluctuation-dissipation theorem
+
+        The steady-state spectrum decays with m due to:
+        - Landau damping: Parallel streaming drives energy to higher moments
+        - Collisional damping: Lenard-Bernstein operator damps high-m modes
+        - m_crit ~ k∥v_th/ν: Collisional cutoff where damping dominates
+
+        Mode number convention (same as force_alfven_modes):
+        - n=1: Fundamental mode (largest wavelength λ = L)
+        - n=2: Second harmonic (λ = L/2), etc.
+
+    References:
+        - Thesis Chapter 3: "Fluctuation-dissipation relations for a kinetic Langevin equation"
+        - Thesis Eq 3.26: Forcing term in g₀ equation
+        - Thesis Eq 3.37: Analytical phase mixing spectrum
+        - Kanekar et al. (2015) J. Plasma Phys. 81: Kinetic FDT validation
+    """
+    from typing import Tuple as TupleType  # Import for type hint
+
+    # Input validation (gaussian_white_noise_fourier validates n_min, n_max, dt)
+    if amplitude <= 0:
+        raise ValueError(f"amplitude must be positive, got {amplitude}")
+    if not forced_moments:
+        raise ValueError("forced_moments cannot be empty")
+    if not isinstance(forced_moments, (tuple, list)):
+        raise TypeError(f"forced_moments must be tuple or list, got {type(forced_moments)}")
+
+    # Validate moment indices
+    for m in forced_moments:
+        if not isinstance(m, int):
+            raise TypeError(f"Moment indices must be integers, got {type(m).__name__} for m={m}")
+        if m < 0:
+            raise ValueError(f"Moment indices must be non-negative, got m={m}")
+        if m > state.M:
+            raise ValueError(f"Moment index m={m} exceeds M={state.M}")
+
+    # Generate forcing field (same noise for all specified moments)
+    forcing, key = gaussian_white_noise_fourier(
+        state.grid, amplitude, n_min, n_max, dt, key
+    )
+
+    # Apply forcing to specified Hermite moments
+    # g has shape [Nz, Ny, Nx//2+1, M+1], forcing has shape [Nz, Ny, Nx//2+1]
+    g_new = jnp.array(state.g)  # Create mutable copy
+
+    for m in forced_moments:
+        g_new = g_new.at[:, :, :, m].add(forcing)
+
+    # Create new state
+    new_state = KRMHDState(
+        z_plus=state.z_plus,  # Alfvén modes unchanged
+        z_minus=state.z_minus,
+        B_parallel=state.B_parallel,  # Slow modes unchanged
+        g=g_new,  # Forced Hermite moments
+        M=state.M,
+        beta_i=state.beta_i,
+        v_th=state.v_th,
+        nu=state.nu,
+        Lambda=state.Lambda,
+        time=state.time,
+        grid=state.grid,
+    )
+
+    return new_state, key
+
+
+def force_hermite_moments_specific(
+    state: KRMHDState,
+    mode_triplets: list,
+    amplitude: float,
+    dt: float,
+    key: Array,
+    forced_moments: Tuple[int, ...] = (0,),
+) -> Tuple[KRMHDState, Array]:
+    """
+    Force specific (kx, ky, kz) mode triplets in Hermite moments with Gaussian white noise.
+
+    This enables single-mode or few-mode forcing for Hermite cascade validation,
+    following the kinetic Langevin equation (Thesis Chapter 3, Eq 3.26):
+
+        ∂g₀/∂t + ∂(g₁/√2)/∂z = χ(k,t)
+
+    where χ(k,t) is Gaussian white noise applied to specific k-modes.
+
+    Key differences from force_hermite_moments():
+    - Shell forcing: Forces ~50-100 modes with k_min ≤ |k| ≤ k_max
+    - Specific forcing: Forces only specified (kx,ky,kz) modes (typically 1-6)
+    - Result: Clean single-mode Hermite cascade test
+
+    Each mode is forced with Gaussian white noise amplitude:
+        amp = amplitude / sqrt(dt)
+
+    This ensures time-independent energy injection rate: dE/dt ~ amplitude²
+
+    Args:
+        state: Current KRMHD state
+        mode_triplets: List of (nx, ny, nz) integer mode number triplets to force
+            Example: [(0, 0, 1)] for single fundamental k_z mode
+        amplitude: Forcing amplitude (sets energy injection rate ~ amplitude²)
+        dt: Timestep
+        key: JAX random key
+        forced_moments: Tuple of Hermite moment indices to force (default: (0,) for g₀ only)
+            Examples:
+            - (0,): Force density g₀ only (standard FDT validation)
+            - (0, 1): Force both g₀ and g₁ (density + parallel velocity)
+
+    Returns:
+        new_state: State with forcing applied to specified Hermite moments
+        new_key: Updated random key
+
+    Example:
+        >>> # Force single k_z mode for Hermite cascade
+        >>> state, key = force_hermite_moments_specific(
+        ...     state,
+        ...     mode_triplets=[(0, 0, 1)],  # Fundamental parallel mode
+        ...     amplitude=0.1,
+        ...     dt=0.01,
+        ...     key=key,
+        ...     forced_moments=(0,)  # Force g₀ only
+        ... )
+
+    Physics:
+        For Hermite cascade validation:
+        - Force single k_z ≠ 0 mode (e.g., (0,0,1)) to drive cascade via parallel streaming
+        - Parallel streaming: ∂g₀/∂z couples g₀ → g₁ → g₂ → ... (energy to high m)
+        - Collisions: Lenard-Bernstein operator damps high-m modes
+        - Steady state: Balance between streaming (injection) and collisions (dissipation)
+        - Expected spectrum: E_m ~ m^(-1/2) (phase mixing/unmixing balance)
+
+    Reference:
+        - Thesis Chapter 3: "Fluctuation-dissipation relations for a kinetic Langevin equation"
+        - Thesis Eq 3.26-3.28: Linear kinetic equations
+        - Thesis Eq 3.37: Analytical phase mixing spectrum
+    """
+    from typing import Tuple as TupleType  # Import for type hint
+
+    # Input validation
+    if amplitude <= 0:
+        raise ValueError(f"amplitude must be positive, got {amplitude}")
+    if dt <= 0:
+        raise ValueError(f"dt must be positive, got {dt}")
+    if not mode_triplets:
+        raise ValueError("mode_triplets cannot be empty")
+    if not forced_moments:
+        raise ValueError("forced_moments cannot be empty")
+    if not isinstance(forced_moments, (tuple, list)):
+        raise TypeError(f"forced_moments must be tuple or list, got {type(forced_moments)}")
+
+    # Validate moment indices
+    for m in forced_moments:
+        if not isinstance(m, int):
+            raise TypeError(f"Moment indices must be integers, got {type(m).__name__} for m={m}")
+        if m < 0:
+            raise ValueError(f"Moment indices must be non-negative, got m={m}")
+        if m > state.M:
+            raise ValueError(f"Moment index m={m} exceeds M={state.M}")
+
+    grid = state.grid
+    Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
+
+    # Convert mode triplets to rfft-compatible format
+    rfft_modes = _get_rfft_compatible_modes(mode_triplets)
+    n_modes = len(rfft_modes)
+
+    # Generate random phase for each mode
+    key, subkey = jax.random.split(key)
+    random_phase = jax.random.uniform(subkey, shape=(n_modes,),
+                                     minval=0.0, maxval=2.0*jnp.pi)
+
+    # Compute amplitude and phase for each mode
+    mode_indices = []
+    conjugate_flags = []
+    amplitudes = []
+
+    # Gaussian white noise amplitude (time-independent energy injection)
+    amp_scale = amplitude / jnp.sqrt(dt)
+
+    for i, (nx_stored, ny_stored, nz_stored, conjugate) in enumerate(rfft_modes):
+        # Convert to array indices
+        ix, iy, iz = _mode_triplet_to_indices(nx_stored, ny_stored, nz_stored,
+                                              Nx, Ny, Nz)
+
+        # Complex amplitude with random phase (Gaussian white noise)
+        amplitude_complex = amp_scale * jnp.exp(1j * random_phase[i])
+
+        mode_indices.append([iz, iy, ix])  # Note: [Nz, Ny, Nx] order
+        conjugate_flags.append(conjugate)
+        amplitudes.append(amplitude_complex)
+
+    # Convert to JAX arrays
+    mode_indices = jnp.array(mode_indices, dtype=jnp.int32)
+    conjugate_flags = jnp.array(conjugate_flags, dtype=jnp.bool_)
+    amplitudes = jnp.array(amplitudes, dtype=jnp.complex64)
+
+    # Apply forcing via JIT kernel (reuse GANDALF kernel - works for any amplitude formula)
+    shape = (Nz, Ny, Nx // 2 + 1)
+    forcing = _gandalf_forcing_specific_jit(shape, mode_indices,
+                                            conjugate_flags, amplitudes)
+
+    # Apply forcing to specified Hermite moments
+    # g has shape [Nz, Ny, Nx//2+1, M+1], forcing has shape [Nz, Ny, Nx//2+1]
+    g_new = jnp.array(state.g)  # Create mutable copy
+    for m in forced_moments:
+        g_new = g_new.at[:, :, :, m].add(forcing)
+
+    # Create new state
+    new_state = KRMHDState(
+        z_plus=state.z_plus,
+        z_minus=state.z_minus,
+        B_parallel=state.B_parallel,
+        g=g_new,
         M=state.M,
         beta_i=state.beta_i,
         v_th=state.v_th,

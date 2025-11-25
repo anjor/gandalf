@@ -9,13 +9,12 @@ GANDALF solves the **Kinetic Reduced MHD (KRMHD)** equations, which are valid fo
 RMHD is an asymptotic expansion in the small parameter:
 
 ```
-ε ~ δB⊥/B₀ ~ ρᵢ/L << 1
+ε ~ δB⊥/B₀ << 1
 ```
 
 where:
 - `δB⊥` = perpendicular magnetic field perturbation amplitude
 - `B₀` = guide field strength (assumed constant and aligned with ẑ)
-- `ρᵢ` = ion gyroradius
 - `L` = characteristic perpendicular scale length
 
 **Physical meaning:** Magnetic field lines are only slightly perturbed from straight. The perpendicular magnetic field is much weaker than the guide field.
@@ -170,17 +169,7 @@ where:
 - `v_te` = electron thermal speed
 - `ω` = wave frequency (~ k∥v_A for Alfvén waves)
 
-Landau damping is significant when:
-```
-k∥ρₑ ~ k∥v_te/Ωₑ ~ 1
-```
-
-For typical KRMHD:
-- `k∥ ~ 1-5` (low mode numbers in parallel direction)
-- `ρₑ ~ 0.01-0.1` (electron gyroradius in code units)
-- Product k∥ρₑ ~ 0.01-0.5 (marginal to significant damping)
-
-**In simulations:** Hermite moment hierarchy captures this automatically. Higher moments (m > 2) are needed for strong Landau damping.
+**In simulations:** Landau damping emerges from the Hermite moment hierarchy via parallel streaming (∇∥ coupling). Higher moments (m > 2) are needed for strong Landau damping.
 
 ### Phase Mixing
 
@@ -286,23 +275,6 @@ Spectral methods require resolving the **inertial range** and **dissipation rang
 - Inertial range: k ~ 2-32 (>10 modes)
 - Dissipation range: k ~ 32-85
 
-**Constraint:** Must have `k_max ρᵢ << 1` (spectral method valid only at scales larger than ion gyroradius).
-
-For box size L = 2π and N points:
-```
-k_max = N/3 × (2π/L) = N/3   (after 2/3 dealiasing)
-```
-
-If ρᵢ ~ 0.01 in code units:
-```
-k_max ρᵢ = (N/3) × 0.01 ~ N/300
-```
-
-For N=128: k_max ρᵢ ~ 0.4 (marginal, KRMHD still valid)
-For N=256: k_max ρᵢ ~ 0.8 (approaching breakdown, ion-scale effects)
-
-**Rule of thumb:** Stay below 128³ unless you're sure ρᵢ is small enough.
-
 ### Dissipation Parameters
 
 **Hyper-resistivity (η):**
@@ -337,18 +309,7 @@ See [Running Simulations](running_simulations.md) for parameter selection guidel
 
 **What to do:** Reduce initial energy or forcing amplitude to keep ε < 0.3.
 
-### 2. Ion Gyroscale Physics (k ρᵢ ~ 1)
-
-**Symptom:** Resolution approaching ion gyroradius scales
-
-**Why invalid:** RMHD assumes k⊥ρᵢ << 1. At ion scales, need:
-- Full gyrokinetic equations
-- Finite Larmor radius (FLR) effects
-- Gyro-averaging operators
-
-**What to do:** Reduce k_max (lower resolution) or increase box size L (fewer modes).
-
-### 3. Extreme Anisotropy (k∥ >> k⊥)
+### 2. Extreme Anisotropy (k∥ >> k⊥)
 
 **Symptom:** Parallel gradients dominate
 
@@ -358,7 +319,7 @@ See [Running Simulations](running_simulations.md) for parameter selection guidel
 
 **What to do:** This is rare in turbulence (critical balance prevents it). If seen, check initial conditions for numerical artifacts.
 
-### 4. No Guide Field (B₀ → 0)
+### 3. No Guide Field (B₀ → 0)
 
 **Symptom:** Guide field too weak compared to perturbations
 
@@ -369,7 +330,7 @@ See [Running Simulations](running_simulations.md) for parameter selection guidel
 
 **What to do:** GANDALF is not designed for this regime. Use standard MHD code.
 
-### 5. Compressibility (δρ/ρ ~ 1)
+### 4. Compressibility (δρ/ρ ~ 1)
 
 **Symptom:** Large density fluctuations
 
@@ -399,15 +360,7 @@ k_perp_typical = ...
 assert k_parallel < k_perp, "Anisotropy violated"
 ```
 
-### 3. Check Resolution
-```python
-# Ensure k_max ρᵢ << 1
-k_max = (grid.Nx // 3)  # After dealiasing
-rho_i = 0.01  # Example value in code units
-assert k_max * rho_i < 1.0, "Approaching ion scales"
-```
-
-### 4. Check Hermite Convergence
+### 3. Check Hermite Convergence
 ```python
 # Energy should decay exponentially with m
 E_m = hermite_moment_energy(state, grid)
@@ -415,14 +368,14 @@ ratio = E_m[-1] / E_m[0]  # Highest / lowest moment
 assert ratio < 0.1, "Need more Hermite moments"
 ```
 
-### 5. Check Energy Conservation (Inviscid)
+### 4. Check Energy Conservation (Inviscid)
 ```python
 # For eta=0, nu=0, energy should be conserved
 relative_error = abs(E_final - E_initial) / E_initial
 assert relative_error < 0.01, "Energy not conserved (numerical error)"
 ```
 
-### 6. Check Spectrum Slope
+### 5. Check Spectrum Slope
 ```python
 # Should have k⊥^(-5/3) in inertial range
 # Fit spectrum between k=2 and k=10
@@ -464,7 +417,6 @@ assert -1.8 < slope < -1.5, f"Slope {slope:.2f} not k^(-5/3)"
 - Weak turbulence: ε ~ 0.01-0.3
 - Strong guide field: B₀ >> δB⊥
 - Anisotropic cascade: k⊥ >> k∥
-- Sub-gyroradius scales: kρᵢ << 1
 - Nearly incompressible: δρ/ρ << 1
 
 **Check validity by:**
@@ -475,8 +427,8 @@ assert -1.8 < slope < -1.5, f"Slope {slope:.2f} not k^(-5/3)"
 
 **If invalid:**
 - Reduce energy or forcing (lower ε)
-- Change resolution (stay above ion scales)
-- Use different model (full MHD or gyrokinetics)
+- Adjust dissipation parameters (η, ν)
+- Use different model (full MHD for strong turbulence)
 
 ## Further Reading
 

@@ -53,7 +53,7 @@ about:
 
     Key features:
     - Spectral methods with FFT-based operations
-    - Kinetic effects (Landau damping, finite Larmor radius corrections)
+    - Kinetic effects (Landau damping via Hermite velocity-space representation)
     - GPU acceleration via JAX (Metal for Apple Silicon, CUDA for NVIDIA)
     - Hermite moment expansion for velocity space
     - Forced and decaying turbulence simulations

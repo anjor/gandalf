@@ -4,7 +4,7 @@ A modern Python implementation of a Kinetic Reduced Magnetohydrodynamics (KRMHD)
 
 ## Overview
 
-KRMHD is a spectral code designed to simulate turbulence in weakly collisional magnetized plasmas, incorporating kinetic effects such as Landau damping and finite Larmor radius corrections. This is a modern rewrite of the legacy [GANDALF](https://github.com/anjor/gandalf) Fortran+CUDA implementation, leveraging JAX for automatic differentiation and GPU acceleration via Apple's Metal backend.
+KRMHD is a spectral code designed to simulate turbulence in weakly collisional magnetized plasmas, incorporating kinetic effects such as Landau damping via Hermite velocity-space representation. This is a modern rewrite of the legacy [GANDALF](https://github.com/anjor/gandalf) Fortran+CUDA implementation, leveraging JAX for automatic differentiation and GPU acceleration via Apple's Metal backend.
 
 ## Physics Model
 
@@ -703,6 +703,48 @@ plot_energy_history(history, filename='energy.png')
 plot_state(state, filename='final_state.png')
 ```
 
+### Post-Processing: Analyzing Checkpoint Files
+
+The `plot_checkpoint_spectrum.py` script analyzes saved checkpoints without rerunning simulations:
+
+```bash
+# Plot spectra from a checkpoint file
+uv run python examples/plot_checkpoint_spectrum.py examples/output/checkpoints/checkpoint_t0300.0.h5
+
+# Thesis-style formatting (for papers/presentations)
+uv run python examples/plot_checkpoint_spectrum.py --thesis-style checkpoint.h5
+
+# Custom output filename
+uv run python examples/plot_checkpoint_spectrum.py --output fig_spectrum.png checkpoint.h5
+
+# Interactive display
+uv run python examples/plot_checkpoint_spectrum.py --show checkpoint.h5
+
+# Batch process multiple checkpoints
+for f in examples/output/checkpoints/checkpoint_*.h5; do
+    uv run python examples/plot_checkpoint_spectrum.py "$f"
+done
+```
+
+**What it does:**
+- Loads checkpoint data (state, grid, metadata) from HDF5 file
+- Computes perpendicular energy spectra: E_kin(k⊥) and E_mag(k⊥)
+- Separates kinetic (from φ) and magnetic (from A∥) contributions
+- Generates publication-quality plots with k⊥^(-5/3) reference lines
+- Prints energy summary (total energy, magnetic fraction, time)
+
+**Output formats:**
+1. **Standard style** (default): Total spectrum + kinetic/magnetic comparison
+2. **Thesis style** (`--thesis-style`): Side-by-side kinetic and magnetic panels with clean formatting
+
+**Physics interpretation:**
+- **Good k⊥^(-5/3) match** (n ~ 3-10): Healthy turbulent cascade in inertial range
+- **High magnetic fraction** (f_mag > 0.5): Selective decay underway (normal)
+- **Exponential cutoff at high-k**: Hyper-dissipation working correctly
+- **Flat/rising spectrum at high-k**: Under-dissipated, increase η
+
+The script automatically provides interpretation guidance in the console output.
+
 ### Generating Custom Plots
 
 ```python
@@ -791,6 +833,131 @@ This launches 8 simulations in parallel (4 η values × 2 resolutions).
 
 For detailed instructions, see [docs/MODAL_GUIDE.md](docs/MODAL_GUIDE.md).
 
+## Interactive Tutorials
+
+For hands-on learning, we provide Jupyter notebooks covering key concepts:
+
+### Getting Started
+
+**`notebooks/01_getting_started.ipynb`** - Your first GANDALF simulation (~10 min)
+- Setting up a spectral grid
+- Initializing turbulent states
+- Running forced turbulence with energy injection
+- Monitoring energy evolution
+- Basic visualization
+
+**Runtime:** ~2 seconds for full notebook
+
+```bash
+# Launch Jupyter
+uv run jupyter notebook notebooks/01_getting_started.ipynb
+```
+
+### Advanced Topics
+
+**`notebooks/02_driven_turbulence.ipynb`** - Comprehensive forced turbulence (~30 min)
+- Computing energy spectra: E(k), E(k⊥), E(k∥)
+- Identifying inertial range scaling (k⁻⁵/³)
+- Understanding energy balance: injection vs dissipation
+- Parameter scanning for different forcing amplitudes
+- Steady-state detection
+
+**Runtime:** ~20 seconds for full notebook
+
+**`notebooks/03_analyzing_decay.ipynb`** - Decaying turbulence analysis (~20 min)
+- Exponential energy decay E(t) = E₀ exp(-γt)
+- Selective decay: magnetic energy dominance
+- Spectral slope evolution
+- Measuring decay rates and characteristic timescales
+
+**Runtime:** ~1-2 minutes for full notebook
+
+### Tips for Using Notebooks
+
+- **Start with Tutorial 01** - builds foundation for later tutorials
+- **Modify parameters** - notebooks encourage experimentation
+- **Export plots** - all visualizations can be saved for publications
+- **Add your own cells** - extend analyses with custom diagnostics
+
+## Parameter Validation Tool
+
+To avoid common pitfalls and numerical instabilities, use the built-in parameter validation CLI:
+
+### Quick Parameter Check
+
+```bash
+# Validate parameters for a simulation
+python -m krmhd check --dt 0.01 --eta 0.5 --nu 0.5 --Nx 64 --Ny 64 --Nz 32 --force_amplitude 0.3
+```
+
+**Output:**
+```
+✓ All parameters valid
+
+💡 SUGGESTIONS:
+  • CFL = 0.192 is safe (< 1.0)
+```
+
+### Validate Config Files
+
+```bash
+# Check a YAML config before running
+python -m krmhd validate configs/driven_turbulence.yaml
+```
+
+**Checks performed:**
+1. **Overflow safety**: η·dt < 50, ν·dt < 50 (independent of resolution!)
+2. **CFL condition**: dt < CFL_limit × dx / v_A
+3. **Forcing stability**: Energy injection vs dissipation balance (Issue #82)
+4. **Resolution constraints**: Amplitude limits for high-resolution runs
+
+### Automated Parameter Suggestions
+
+```bash
+# Get recommended parameters for 64³ forced turbulence
+python -m krmhd suggest --resolution 64 64 32 --type forced
+
+# For decaying turbulence
+python -m krmhd suggest --resolution 128 128 64 --type decaying --cfl 0.3
+```
+
+**Output:**
+```
+Recommended parameters:
+  dt:              0.0052
+  eta:             0.020
+  nu:              0.020
+  force_amplitude: 0.30
+  n_force_min:     1
+  n_force_max:     2
+```
+
+### Use in Python Scripts
+
+```python
+from krmhd import validate_parameters, suggest_parameters
+
+# Validate your parameters
+result = validate_parameters(
+    dt=0.01, eta=0.5, nu=0.5,
+    Nx=64, Ny=64, Nz=32,
+    force_amplitude=0.3
+)
+
+if not result.valid:
+    result.print_report()  # Shows errors and suggestions
+    raise ValueError("Invalid parameters")
+
+# Or get suggestions
+params = suggest_parameters(Nx=64, Ny=64, Nz=32, simulation_type="forced")
+print(f"Suggested η: {params['eta']:.3f}")
+```
+
+**References:**
+- `docs/recommended_parameters.md` - Parameter selection guide
+- `docs/ISSUE82_SUMMARY.md` - Forced turbulence stability analysis
+- CLAUDE.md - Hyper-dissipation implementation details
+
 ## Development
 
 ### Running Tests
@@ -867,6 +1034,8 @@ uv run mypy src/krmhd
 ## Forced Turbulence: Parameter Selection Guide
 
 **CRITICAL for forced turbulence simulations**: Energy injection (forcing) must balance energy removal (dissipation) to avoid instabilities.
+
+**🔧 NEW: Automated parameter validation** - Use `python -m krmhd validate` or `python -m krmhd suggest` to check parameters before running. See [Parameter Validation Tool](#parameter-validation-tool) section.
 
 ### Quick Start Parameters (Validated Stable)
 
@@ -970,7 +1139,6 @@ Reference values for astrophysical plasmas:
 - **Plasma beta**: 0.01 - 100 (ratio of thermal to magnetic pressure)
 - **Temperature ratio tau**: 1 - 10 (T_i/T_e)
 - **Resolution**: 128³ to 512³ grid points (3D spectral)
-- **Scale range**: k_max rho_s << 1 (KRMHD valid only at scales larger than ion gyroradius)
 
 ## Validation Tests
 
@@ -980,8 +1148,7 @@ The code includes validation against:
 2. **Orszag-Tang vortex**: Standard MHD benchmark - `examples/orszag_tang.py` ✅
 3. **Decaying turbulence**: k^(-5/3) inertial range spectrum - `examples/decaying_turbulence.py` ✅
 4. **Energy conservation**: 0.0086% error in inviscid runs (Issue #44 resolved)
-5. **Kinetic Alfven waves**: FLR corrections (planned - Issue #10)
-6. **Landau damping**: Analytical damping rates (planned - Issue #27)
+5. **Landau damping**: Emerges from parallel streaming in Hermite moment evolution
 
 ## Current Status
 

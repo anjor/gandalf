@@ -59,7 +59,6 @@ from krmhd.physics import (
     z_minus_rhs,
     initialize_hermite_moments,
     initialize_alfven_wave,
-    initialize_kinetic_alfven_wave,
     initialize_random_spectrum,
     initialize_orszag_tang,
     energy,
@@ -88,6 +87,8 @@ from krmhd.forcing import (
     force_alfven_modes_gandalf,
     force_alfven_modes_specific,
     force_slow_modes,
+    force_hermite_moments,
+    force_hermite_moments_specific,
     compute_energy_injection_rate,
 )
 
@@ -109,6 +110,16 @@ from krmhd.io import (
     load_checkpoint,
     save_timeseries,
     load_timeseries,
+)
+
+from krmhd.validation import (
+    ValidationResult,
+    validate_overflow_safety,
+    validate_cfl_condition,
+    validate_forcing_stability,
+    validate_parameters,
+    validate_config_dict,
+    suggest_parameters,
 )
 
 __all__ = [
@@ -141,7 +152,6 @@ __all__ = [
     "z_minus_rhs",
     "initialize_hermite_moments",
     "initialize_alfven_wave",
-    "initialize_kinetic_alfven_wave",
     "initialize_random_spectrum",
     "initialize_orszag_tang",
     "energy",
@@ -161,6 +171,8 @@ __all__ = [
     "gaussian_white_noise_fourier",
     "force_alfven_modes",
     "force_slow_modes",
+    "force_hermite_moments",
+    "force_hermite_moments_specific",
     "compute_energy_injection_rate",
     # Configuration
     "GridConfig",
@@ -178,4 +190,12 @@ __all__ = [
     "load_checkpoint",
     "save_timeseries",
     "load_timeseries",
+    # Validation
+    "ValidationResult",
+    "validate_overflow_safety",
+    "validate_cfl_condition",
+    "validate_forcing_stability",
+    "validate_parameters",
+    "validate_config_dict",
+    "suggest_parameters",
 ]
