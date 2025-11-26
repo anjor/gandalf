@@ -1,6 +1,6 @@
 [project]
 name = "gandalf-krmhd"
-version = "0.2.0"
+version = "0.3.0"
 description = "Kinetic Reduced MHD (KRMHD) spectral solver for magnetized plasma turbulence"
 readme = "README.md"
 authors = [
