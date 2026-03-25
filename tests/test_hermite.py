@@ -714,6 +714,14 @@ class TestStreamingMatrix:
                 f"M={M}: max eigenvalue {max_eval} not near sqrt(2M)={expected}"
 
 
+    def test_lambda_less_than_one_raises(self):
+        """Lambda < 1 should raise ValueError due to complex eigenvalues."""
+        from krmhd.hermite import compute_streaming_eigensystem
+
+        with pytest.raises(ValueError, match="complex eigenvalues"):
+            compute_streaming_eigensystem(5, Lambda=0.5)
+
+
 if __name__ == "__main__":
     # Allow running tests directly
     pytest.main([__file__, "-v"])
