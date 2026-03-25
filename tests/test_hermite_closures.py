@@ -323,7 +323,7 @@ class TestClosurePhysicsValidation:
         # Compute RHS for highest moment with implicit zero closure
         rhs_M = gm_rhs(
             g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-            grid.dealias_mask, M, beta_i, nu, grid.Nz, grid.Ny, grid.Nx
+            grid.dealias_mask, M, beta_i, grid.Nz, grid.Ny, grid.Nx
         )
 
         # With ν=0 and different closures (implicit in gm_rhs vs explicit),
@@ -333,68 +333,35 @@ class TestClosurePhysicsValidation:
         # Just verify RHS is computed
         assert rhs_M.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
 
-    def test_closure_convergence_with_strong_collisions(self):
-        """Test that collision damping in gm_rhs scales correctly with moment index.
+    def test_gm_rhs_no_collision_term(self):
+        """Test that gm_rhs does NOT include collision damping.
 
-        This test isolates the collision term -νm·gₘ by setting:
-        - z_plus = z_minus = 0 (no perpendicular advection, field line coupling)
-        - gₘ = 1 with all neighbors zero (no parallel streaming coupling)
-
-        This makes gm_rhs return purely the collision damping term -νm·gₘ.
-        The test verifies the damping scales correctly: RHS(m=5) / RHS(m=2) = 5/2.
+        Collisions are now handled exclusively by the exponential step in the
+        timestepper (not in the RHS). This test verifies that with isolated
+        moments (gₘ = 1, all neighbors = 0, zero z±), gm_rhs returns zero.
         """
         from krmhd.physics import gm_rhs
 
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         M = 10
 
-        # Isolate collision damping: set gₘ = 1 with all neighbors = 0
-        # This makes RHS = -νm·gₘ purely (no other coupling terms)
         z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
         z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
 
         beta_i = 1.0
-        nu = 1.0  # Strong collisions
 
-        # Test isolation: set only one moment at a time, neighbors zero
-        # For m=2: set only g[2] = 1, g[1] = g[3] = 0
+        # Set only g[2] = 1, all neighbors zero → no streaming coupling
         g_m2 = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64)
         g_m2 = g_m2.at[4, 5, 6, 2].set(1.0 + 0.0j)
 
-        # For m=5: set only g[5] = 1, g[4] = g[6] = 0
-        g_m5 = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64)
-        g_m5 = g_m5.at[4, 5, 6, 5].set(1.0 + 0.0j)
-
-        # Compute RHS (should be purely collision damping)
         rhs_m2 = gm_rhs(
             g_m2, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-            grid.dealias_mask, 2, beta_i, nu, grid.Nz, grid.Ny, grid.Nx
+            grid.dealias_mask, 2, beta_i, grid.Nz, grid.Ny, grid.Nx
         )
 
-        rhs_m5 = gm_rhs(
-            g_m5, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-            grid.dealias_mask, 5, beta_i, nu, grid.Nz, grid.Ny, grid.Nx
-        )
-
-        # Extract magnitude at the mode location
-        damping_m2 = jnp.abs(rhs_m2[4, 5, 6])
-        damping_m5 = jnp.abs(rhs_m5[4, 5, 6])
-
-        # Expected: |RHS| = νm for unit amplitude
-        expected_m2 = nu * 2
-        expected_m5 = nu * 5
-
-        # Check collision scaling
-        assert jnp.abs(damping_m2 - expected_m2) < 1e-5, \
-            f"m=2 damping should be {expected_m2}, got {damping_m2}"
-        assert jnp.abs(damping_m5 - expected_m5) < 1e-5, \
-            f"m=5 damping should be {expected_m5}, got {damping_m5}"
-
-        # Verify ratio is correct
-        ratio = damping_m5 / damping_m2
-        expected_ratio = 5.0 / 2.0
-        assert jnp.abs(ratio - expected_ratio) < 0.01, \
-            f"Collision ratio should be {expected_ratio}, got {ratio}"
+        # With no neighbors and no z±, RHS should be zero (no collision term)
+        assert jnp.allclose(rhs_m2[4, 5, 6], 0.0, atol=1e-6), \
+            f"gm_rhs should be zero for isolated moment (no collision term), got {rhs_m2[4, 5, 6]}"
 
 
 # ============================================================================

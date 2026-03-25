@@ -628,3 +628,85 @@ def check_hermite_convergence(
         'energy_total': float(energy_total),
         'recommendation': recommendation
     }
+
+
+# =============================================================================
+# Hermite Streaming Matrix (for integrating factor timestepping)
+# =============================================================================
+
+
+def compute_streaming_matrix(M: int, Lambda: float = 1.0) -> Array:
+    """
+    Build the (M+1)x(M+1) parallel streaming coupling matrix T.
+
+    The linear streaming term in the Hermite hierarchy is:
+        dg/dt = ... - sqrt(beta_i) * ikz * T @ g + ...
+
+    Matrix elements follow from the Hermite recurrence (Thesis Eq. 2.7-2.9):
+        T[0, 1] = sqrt(1/2)                    (g0 couples to g1)
+        T[1, 0] = (1 - 1/Lambda) / sqrt(2)     (g1 kinetic correction)
+        T[1, 2] = sqrt(2/2) = 1                (g1 couples to g2)
+        T[m, m+1] = sqrt((m+1)/2)  for m >= 2  (standard recurrence)
+        T[m, m-1] = sqrt(m/2)      for m >= 2  (standard recurrence)
+
+    Note: T is NOT symmetric when Lambda != infinity due to the kinetic
+    correction in the g1 equation.
+
+    Args:
+        M: Maximum Hermite moment index (array has M+1 moments: g0..gM)
+        Lambda: Kinetic closure parameter (default 1.0)
+
+    Returns:
+        T: (M+1, M+1) coupling matrix (numpy, not JAX — used for precomputation)
+    """
+    import numpy as np
+
+    size = M + 1
+    T = np.zeros((size, size), dtype=np.float64)
+
+    if M >= 1:
+        # g0 equation: couples to g1 with coefficient sqrt(1/2)
+        T[0, 1] = np.sqrt(1.0 / 2.0)
+        # g1 equation: couples to g0 with kinetic correction
+        T[1, 0] = (1.0 - 1.0 / Lambda) / np.sqrt(2.0)
+
+    if M >= 2:
+        # g1 equation: couples to g2
+        T[1, 2] = np.sqrt(2.0 / 2.0)  # = 1.0
+
+    # Standard Hermite recurrence for m >= 2
+    for m in range(2, M + 1):
+        if m + 1 <= M:
+            T[m, m + 1] = np.sqrt((m + 1) / 2.0)
+        T[m, m - 1] = np.sqrt(m / 2.0)
+
+    return jnp.array(T)
+
+
+def compute_streaming_eigensystem(
+    M: int, Lambda: float = 1.0
+) -> tuple[Array, Array, Array]:
+    """
+    Precompute eigendecomposition of the streaming matrix T = P @ diag(evals) @ P_inv.
+
+    Used by the integrating factor timestepper to apply exact phase rotation
+    for the linear streaming operator exp(-i * sqrt(beta_i) * kz * T * dt).
+
+    Args:
+        M: Maximum Hermite moment index
+        Lambda: Kinetic closure parameter
+
+    Returns:
+        eigenvalues: (M+1,) array of eigenvalues (may be complex if T non-symmetric)
+        P: (M+1, M+1) matrix of right eigenvectors
+        P_inv: (M+1, M+1) inverse of P
+    """
+    import numpy as np
+
+    T = compute_streaming_matrix(M, Lambda)
+    T_np = np.array(T)
+
+    eigenvalues, P = np.linalg.eig(T_np)
+    P_inv = np.linalg.inv(P)
+
+    return jnp.array(eigenvalues), jnp.array(P), jnp.array(P_inv)
