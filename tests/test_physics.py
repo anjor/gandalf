@@ -812,6 +812,32 @@ class TestKRMHDState:
         )
         assert jnp.allclose(state.phi, state2.phi), "Same seed should give same result"
 
+    def test_initialize_random_spectrum_with_g_perturbation(self):
+        """Test that g_perturbation_amplitude seeds Hermite moments."""
+        from krmhd.physics import initialize_random_spectrum
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_random_spectrum(
+            grid, M=10, amplitude=1.0, g_perturbation_amplitude=0.01, seed=42,
+        )
+
+        # g should not be all zeros
+        assert jnp.any(state.g != 0.0), "g should have perturbations"
+
+    def test_initialize_random_spectrum_g_reproducibility(self):
+        """Test that same seed produces same g perturbations."""
+        from krmhd.physics import initialize_random_spectrum
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state1 = initialize_random_spectrum(
+            grid, M=10, amplitude=1.0, g_perturbation_amplitude=0.01, seed=42,
+        )
+        state2 = initialize_random_spectrum(
+            grid, M=10, amplitude=1.0, g_perturbation_amplitude=0.01, seed=42,
+        )
+
+        assert jnp.allclose(state1.g, state2.g), "Same seed should give same g"
+
     def test_energy_alfven_wave(self):
         """Test energy calculation for Alfvén wave."""
         from krmhd.physics import initialize_alfven_wave, energy

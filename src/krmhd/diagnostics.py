@@ -1104,6 +1104,101 @@ def compute_turbulence_diagnostics(
 
 
 # =============================================================================
+# Dissipation Rate Diagnostics
+# =============================================================================
+
+
+def compute_dissipation_rate(
+    state: KRMHDState,
+    eta: float,
+    nu: float,
+    hyper_r: int = 1,
+    hyper_n: int = 1,
+) -> Dict[str, float]:
+    """
+    Compute instantaneous collisional and resistive dissipation rates.
+
+    Returns the rate of energy dissipation from resistive (eta) and collisional (nu)
+    operators, matching the exact formulas in timestepping.py.
+
+    Args:
+        state: KRMHD state with Elsasser fields and Hermite moments
+        eta: Resistivity (hyper-resistivity coefficient)
+        nu: Collision frequency (hyper-collision coefficient)
+        hyper_r: Resistive hyper-dissipation order (default: 1)
+        hyper_n: Collisional hyper-dissipation order (default: 1)
+
+    Returns:
+        Dictionary with keys:
+        - 'resistive': Elsasser energy dissipation rate from eta operator
+        - 'collisional': Hermite moment dissipation rate from nu operator (m>=2)
+        - 'total': resistive + collisional
+
+    Note:
+        The eta operator also damps g moments (timestepping.py:486), but this
+        function separates resistive (Elsasser) from collisional (Hermite) for
+        clean decomposition in collisionality scan studies.
+    """
+    grid = state.grid
+    Nx, Ny = grid.Nx, grid.Ny
+    M = state.M
+    N_perp = Nx * Ny
+
+    # --- Resistive dissipation on Elsasser fields ---
+
+    kx_3d = grid.kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = grid.ky[jnp.newaxis, :, jnp.newaxis]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+
+    # Match timestepping.py:367-372 exactly
+    idx_max = (Nx - 1) // 3
+    idy_max = (Ny - 1) // 3
+    k_perp_max_squared = grid.kx[idx_max]**2 + grid.ky[idy_max]**2
+
+    # Normalized dissipation rate per mode: eta * (k_perp^2 / k_max^2)^r
+    k_perp_2r_normalized = (k_perp_squared / k_perp_max_squared) ** hyper_r
+    gamma_k = eta * k_perp_2r_normalized
+
+    # Elsasser energy per mode (same pattern as energy() in physics.py)
+    phi = 0.5 * (state.z_plus + state.z_minus)
+    A_par = 0.5 * (state.z_plus - state.z_minus)
+    energy_per_mode = k_perp_squared * (jnp.abs(phi)**2 + jnp.abs(A_par)**2)
+
+    # Weighted dissipation: 2 * gamma_k * (0.5 / N_perp) * rfft_weight * E_mode
+    dissipation_per_mode = 2.0 * gamma_k * energy_per_mode
+
+    # rfft weighting (matching physics.py:1500-1502)
+    kx_zero = (kx_3d == 0.0)
+    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_middle = ~(kx_zero | kx_nyquist)
+
+    resistive = float(
+        (0.5 / N_perp) * jnp.sum(
+            jnp.where(kx_middle, 2.0 * dissipation_per_mode, dissipation_per_mode)
+        ).real
+    )
+
+    # --- Collisional dissipation on Hermite moments ---
+
+    # Energy per moment E_m (rfft-weighted, from hermite_moment_energy)
+    E_m = hermite_moment_energy(state)  # Shape: [M+1], no 1/N_perp normalization
+
+    # Collision rate per moment (matching timestepping.py:474-481)
+    moment_indices = jnp.arange(M + 1)
+    collision_rate = nu * ((moment_indices / M) ** hyper_n)
+    collision_rate = jnp.where(moment_indices >= 2, collision_rate, 0.0)
+
+    # Total collisional dissipation with 1/N_perp normalization for consistency
+    collisional = float(jnp.sum(2.0 * collision_rate * E_m).real / N_perp)
+
+    return {
+        'collisional': collisional,
+        'resistive': resistive,
+        'total': collisional + resistive,
+    }
+
+
+# =============================================================================
 # Field Line Following and Spectral Interpolation
 # =============================================================================
 

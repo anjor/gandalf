@@ -141,6 +141,10 @@ class InitialConditionConfig(BaseModel):
 
     # Hermite moment configuration
     M: int = Field(20, ge=0, description="Number of Hermite moments")
+    g_perturbation_amplitude: float = Field(
+        0.0, ge=0,
+        description="Amplitude of Hermite moment perturbations for kinetic physics seeding"
+    )
 
     @field_validator('k_wave')
     @classmethod
@@ -416,7 +420,8 @@ class SimulationConfig(BaseModel):
                 k_max=ic.k_max,
                 beta_i=self.physics.beta_i,
                 nu=self.physics.nu,
-                Lambda=self.physics.Lambda
+                Lambda=self.physics.Lambda,
+                g_perturbation_amplitude=ic.g_perturbation_amplitude,
             )
 
         elif ic.type == "alfven_wave":
