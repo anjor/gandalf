@@ -696,7 +696,7 @@ def gandalf_step(
     fields = _fields_from_state(state)
 
     # Precompute Hermite streaming eigensystem for integrating factor
-    streaming_T = compute_streaming_matrix(state.M, state.Lambda)
+    streaming_T = jnp.array(compute_streaming_matrix(state.M, state.Lambda))
     eigenvalues, P, P_inv = compute_streaming_eigensystem(state.M, state.Lambda)
 
     # Call JIT-compiled GANDALF kernel
@@ -792,14 +792,7 @@ def compute_cfl_timestep(
     # CFL timestep
     dt_cfl = cfl_safety * min_spacing / v_max
 
-    # Hermite phase-mixing constraint (safety net for streaming oscillations)
-    # Maximum frequency: omega = sqrt(2*M) * max(|kz|) * sqrt(beta_i)
-    # Scales with cfl_safety like the advection CFL (both are wave-speed constraints)
-    if state.M > 0:
-        kz_max = float(jnp.max(jnp.abs(state.grid.kz)))
-        omega_hermite = float(jnp.sqrt(2.0 * state.M) * kz_max * jnp.sqrt(state.beta_i))
-        if omega_hermite > 0:
-            dt_hermite = cfl_safety / (3.0 * omega_hermite)
-            dt_cfl = min(dt_cfl, dt_hermite)
+    # Note: No Hermite streaming constraint needed — the integrating factor
+    # handles oscillatory streaming terms exactly (unitary propagator).
 
     return float(dt_cfl)

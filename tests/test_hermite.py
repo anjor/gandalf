@@ -684,6 +684,22 @@ class TestStreamingMatrix:
         eigenvalues, _, _ = compute_streaming_eigensystem(10, Lambda=1e10)
         assert np.allclose(np.imag(eigenvalues), 0.0, atol=1e-10)
 
+    def test_eigenvalues_real_for_physical_lambda(self):
+        """Eigenvalues should be real for Lambda >= 1.
+
+        For Lambda=1 (default), T[1,0]=0 making T block-diagonal with real eigenvalues.
+        For Lambda>1, the asymmetry is mild enough that eigenvalues remain real.
+        For Lambda<1, complex eigenvalues can appear (known limitation).
+        """
+        import numpy as np
+        from krmhd.hermite import compute_streaming_eigensystem
+
+        for Lambda in [1.0, 2.0, 5.0, 10.0]:
+            for M in [2, 5, 10, 20]:
+                eigenvalues, _, _ = compute_streaming_eigensystem(M, Lambda)
+                assert np.allclose(np.imag(eigenvalues), 0.0, atol=1e-8), \
+                    f"Complex eigenvalues for M={M}, Lambda={Lambda}: {eigenvalues}"
+
     def test_eigenvalue_magnitude_scales_with_sqrt_M(self):
         """Max eigenvalue should scale as ~sqrt(2M) for large M."""
         import numpy as np

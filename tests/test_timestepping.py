@@ -269,18 +269,12 @@ class TestCFLCalculator:
 
         dt = compute_cfl_timestep(state, v_A, cfl_safety)
 
-        # dt should be min of advection CFL and Hermite streaming constraint
+        # dt should be cfl_safety * min_spacing / v_A
         dx = grid.Lx / grid.Nx
         dy = grid.Ly / grid.Ny
         dz = grid.Lz / grid.Nz
         min_spacing = min(dx, dy, dz)
-        dt_advection = cfl_safety * min_spacing / v_A
-
-        # Hermite streaming constraint: dt_hermite = cfl_safety / (3 * omega_hermite)
-        kz_max = float(jnp.max(jnp.abs(grid.kz)))
-        omega_hermite = float(jnp.sqrt(2.0 * 20) * kz_max * jnp.sqrt(1.0))
-        dt_hermite = cfl_safety / (3.0 * omega_hermite)
-        expected_dt = min(dt_advection, dt_hermite)
+        expected_dt = cfl_safety * min_spacing / v_A
 
         assert jnp.isclose(dt, expected_dt, rtol=1e-6)
 
@@ -1277,11 +1271,13 @@ class TestHermiteIntegratingFactor:
 
         E_g_final = float(jnp.sum(jnp.abs(current.g) ** 2))
 
-        # Energy should NOT blow up (old code would give ~10^42 amplification)
-        # Allow some growth from float32 rounding but not exponential
+        # With pure streaming (no NL terms, no dissipation), the integrating factor
+        # is unitary. Energy growth comes only from float32 residual in the
+        # streaming subtraction (RHS computes per-moment, subtraction uses matrix T).
+        # At float32, residual ~ 1e-8 per mode per step, accumulating over 100 steps.
         ratio = E_g_final / E_g_initial
-        assert ratio < 2.0, \
-            f"g energy grew by factor {ratio:.2e} — integrating factor not working"
+        assert ratio < 1.5, \
+            f"g energy grew by factor {ratio:.4f} — possible instability"
         assert jnp.all(jnp.isfinite(current.g)), "g contains NaN/Inf"
 
     def test_streaming_stability_high_beta(self):
@@ -1313,6 +1309,6 @@ class TestHermiteIntegratingFactor:
         E_final = float(jnp.sum(jnp.abs(current.g) ** 2))
         ratio = E_final / E_initial
 
-        assert ratio < 2.0, \
-            f"g energy grew by {ratio:.2e}x at beta={beta_i} — instability"
+        assert ratio < 1.5, \
+            f"g energy grew by {ratio:.4f}x at beta={beta_i} — possible instability"
         assert jnp.all(jnp.isfinite(current.g))

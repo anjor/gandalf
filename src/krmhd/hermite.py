@@ -32,7 +32,7 @@ with Maxwellian weight exp(-v²/2) ensures proper treatment of the thermal
 distribution and enables efficient moment truncation.
 """
 
-from functools import partial
+from functools import lru_cache, partial
 from typing import Optional, Any
 import jax
 import jax.numpy as jnp
@@ -635,6 +635,7 @@ def check_hermite_convergence(
 # =============================================================================
 
 
+@lru_cache(maxsize=None)
 def compute_streaming_matrix(M: int, Lambda: float = 1.0) -> Array:
     """
     Build the (M+1)x(M+1) parallel streaming coupling matrix T.
@@ -680,9 +681,10 @@ def compute_streaming_matrix(M: int, Lambda: float = 1.0) -> Array:
             T[m, m + 1] = np.sqrt((m + 1) / 2.0)
         T[m, m - 1] = np.sqrt(m / 2.0)
 
-    return jnp.array(T)
+    return T
 
 
+@lru_cache(maxsize=None)
 def compute_streaming_eigensystem(
     M: int, Lambda: float = 1.0
 ) -> tuple[Array, Array, Array]:
@@ -704,9 +706,8 @@ def compute_streaming_eigensystem(
     import numpy as np
 
     T = compute_streaming_matrix(M, Lambda)
-    T_np = np.array(T)
 
-    eigenvalues, P = np.linalg.eig(T_np)
+    eigenvalues, P = np.linalg.eig(T)
     P_inv = np.linalg.inv(P)
 
     return jnp.array(eigenvalues), jnp.array(P), jnp.array(P_inv)
