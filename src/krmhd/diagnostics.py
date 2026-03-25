@@ -1127,14 +1127,16 @@ def compute_dissipation_rate(
 
     Returns:
         Dictionary with keys:
-        - 'resistive': Elsasser energy dissipation rate from eta operator
-        - 'collisional': Hermite moment dissipation rate from nu operator (m>=2)
-        - 'total': resistive + collisional
+        - 'resistive': Elsasser (z±) energy dissipation rate from eta operator
+        - 'collisional': Hermite moment energy dissipation rate from nu operator (m>=2)
+        - 'total': resistive + collisional (Elsasser + Hermite collisional only)
 
     Note:
         The eta operator also damps g moments (timestepping.py:486), but this
         function separates resistive (Elsasser) from collisional (Hermite) for
-        clean decomposition in collisionality scan studies.
+        clean decomposition in collisionality scan studies. The 'total' key
+        therefore excludes eta damping of g moments — it represents the sum of
+        Elsasser resistive dissipation and Hermite collisional dissipation only.
     """
     grid = state.grid
     Nx, Ny = grid.Nx, grid.Ny
@@ -1161,7 +1163,9 @@ def compute_dissipation_rate(
     A_par = 0.5 * (state.z_plus - state.z_minus)
     energy_per_mode = k_perp_squared * (jnp.abs(phi)**2 + jnp.abs(A_par)**2)
 
-    # Weighted dissipation: 2 * gamma_k * (0.5 / N_perp) * rfft_weight * E_mode
+    # dE/dt = -2*gamma_k*E_k where E_k = (1/2)*k_perp^2*(|phi|^2+|A_par|^2)/N_perp
+    # energy_per_mode already carries the k_perp^2*|field|^2 factor (without the 1/2),
+    # so we multiply by 0.5/N_perp below to get properly normalized energy units.
     dissipation_per_mode = 2.0 * gamma_k * energy_per_mode
 
     # rfft weighting (matching physics.py:1500-1502)
@@ -1177,15 +1181,16 @@ def compute_dissipation_rate(
 
     # --- Collisional dissipation on Hermite moments ---
 
-    # Energy per moment E_m (rfft-weighted, from hermite_moment_energy)
-    E_m = hermite_moment_energy(state)  # Shape: [M+1], no 1/N_perp normalization
+    # hermite_moment_energy returns E_m = sum_k |g_m,k|^2 with rfft weighting
+    # but without the 1/N_perp Parseval normalization (unlike energy() in physics.py
+    # which includes 0.5/N_perp). We divide by N_perp below for consistent units.
+    E_m = hermite_moment_energy(state)  # Shape: [M+1]
 
     # Collision rate per moment (matching timestepping.py:474-481)
     moment_indices = jnp.arange(M + 1)
     collision_rate = nu * ((moment_indices / M) ** hyper_n)
     collision_rate = jnp.where(moment_indices >= 2, collision_rate, 0.0)
 
-    # Total collisional dissipation with 1/N_perp normalization for consistency
     collisional = float(jnp.sum(2.0 * collision_rate * E_m).real / N_perp)
 
     return {

@@ -2010,3 +2010,20 @@ class TestComputeDissipationRate:
                 f"Energy change {dE:.6e} doesn't match predicted {predicted_dE:.6e} "
                 f"(rel error {rel_error:.2%})"
             )
+
+    def test_dissipation_scales_linearly(self):
+        """Dissipation rate should scale linearly with eta and nu."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        state = initialize_random_spectrum(grid, M=10, amplitude=0.1, seed=42)
+        # Seed m=2 for collisional dissipation
+        g_with_energy = state.g.at[:, :, :, 2].set(0.01 + 0j)
+        state = state.model_copy(update={'g': g_with_energy})
+
+        r1 = compute_dissipation_rate(state, eta=0.1, nu=0.1)
+        r2 = compute_dissipation_rate(state, eta=0.2, nu=0.1)
+        r3 = compute_dissipation_rate(state, eta=0.1, nu=0.2)
+
+        # Resistive should scale linearly with eta
+        assert abs(r2['resistive'] / r1['resistive'] - 2.0) < 1e-6
+        # Collisional should scale linearly with nu
+        assert abs(r3['collisional'] / r1['collisional'] - 2.0) < 1e-6

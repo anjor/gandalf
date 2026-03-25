@@ -1414,10 +1414,13 @@ def initialize_random_spectrum(
     B_parallel = jnp.zeros_like(phi)
 
     # Initialize Hermite moments (equilibrium, or with small perturbations for kinetic physics)
+    # Use fold_in to derive an independent seed for g, avoiding collisions with other seeds
+    g_key = jax.random.fold_in(jax.random.PRNGKey(seed), 1)
+    g_seed = int(jax.random.randint(g_key, (), 0, 2**31 - 1))
     g = initialize_hermite_moments(
         grid, M, v_th,
         perturbation_amplitude=g_perturbation_amplitude,
-        seed=seed + 1000,
+        seed=g_seed,
     )
 
     return KRMHDState(
