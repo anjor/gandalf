@@ -318,9 +318,9 @@ def _gandalf_step_jit(
     Nx: int,
     hyper_r: int = 1,
     hyper_n: int = 1,
-    streaming_eigenvalues: Array = None,  # Required: eigenvalues from compute_streaming_eigensystem
-    streaming_P_T: Array = None,  # Required: P.T from compute_streaming_eigensystem
-    streaming_P_inv_T: Array = None,  # Required: P_inv.T from compute_streaming_eigensystem
+    streaming_eigenvalues: Array = None,
+    streaming_P_T: Array = None,
+    streaming_P_inv_T: Array = None,
 ) -> KRMHDFields:
     """
     JIT-compiled GANDALF integrating factor + RK2 timestepper.
@@ -357,9 +357,18 @@ def _gandalf_step_jit(
             - n=2: Moderate hyper-collision -νm² (recommended for most cases)
             - n=3: Strong hyper-collision -νm³ (matches original GANDALF alpha_m=3)
             - n=4: Very strong hyper-collision -νm⁴ (expert use, requires small nu)
+        streaming_eigenvalues: Eigenvalues of streaming matrix T (from compute_streaming_eigensystem).
+            Must be provided — None default is only for Python syntax (keyword after default args).
+        streaming_P_T: Transposed right eigenvector matrix P.T (from compute_streaming_eigensystem).
+        streaming_P_inv_T: Transposed inverse eigenvector matrix P_inv.T.
 
     Returns:
         Updated KRMHDFields after full timestep
+
+    Note:
+        This function evaluates _krmhd_rhs_jit 3x per step (vs 2x pre-IF):
+        1x with real kz (z± NL extraction), 2x with kz=0 (g NL-only, avoids
+        float32 cancellation from streaming subtraction).
     """
     # Build 3D arrays
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
@@ -417,7 +426,12 @@ def _gandalf_step_jit(
     g_phase_full = g_phase_half ** 2
 
     def apply_streaming_if(g_arr, phase):
-        """Apply streaming integrating factor: rotate to eigenspace, phase, rotate back."""
+        """Apply streaming integrating factor: rotate to eigenspace, phase, rotate back.
+
+        Note: At float32, P_inv @ P != I exactly (error ~6e-8), causing ~0.3% energy
+        drift per application. This is acceptable for physics runs where collisional
+        damping dominates the error. For precision-critical work, use float64 arrays.
+        """
         g_eigen = g_arr @ streaming_P_inv_T  # project to eigenspace
         g_eigen = g_eigen * phase             # apply per-kz, per-eigenvalue phase
         return g_eigen @ streaming_P_T        # project back
@@ -699,7 +713,7 @@ def gandalf_step(
     fields = _fields_from_state(state)
 
     # Precompute Hermite streaming eigensystem for integrating factor (cached)
-    streaming_T, eigenvalues, P, P_inv = compute_streaming_eigensystem(
+    _, eigenvalues, P, P_inv = compute_streaming_eigensystem(
         state.M, state.Lambda
     )
 

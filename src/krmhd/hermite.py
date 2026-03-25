@@ -716,7 +716,16 @@ def compute_streaming_eigensystem(
         eigenvalues, P = np.linalg.eigh(T)
         P_inv = P.T  # Orthogonal for symmetric T
     else:
+        import warnings
         eigenvalues, P = np.linalg.eig(T)
         P_inv = np.linalg.inv(P)
+        if np.any(np.abs(np.imag(eigenvalues)) > 1e-10):
+            warnings.warn(
+                f"Streaming matrix has complex eigenvalues for Lambda={Lambda}. "
+                f"The integrating factor will not be unitary, causing energy drift. "
+                f"This occurs for Lambda < 1. Max |Im(eigenvalue)| = "
+                f"{np.max(np.abs(np.imag(eigenvalues))):.2e}",
+                RuntimeWarning,
+            )
 
     return jnp.array(T), jnp.array(eigenvalues), jnp.array(P), jnp.array(P_inv)
