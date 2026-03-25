@@ -1021,7 +1021,7 @@ def g1_rhs(
     return rhs
 
 
-@partial(jax.jit, static_argnums=(7, 10, 11, 12))
+@partial(jax.jit, static_argnums=(7, 9, 10, 11))
 def gm_rhs(
     g: Array,
     z_plus: Array,
@@ -1032,27 +1032,25 @@ def gm_rhs(
     dealias_mask: Array,
     m: int,
     beta_i: float,
-    nu: float,
     Nz: int,
     Ny: int,
     Nx: int,
 ) -> Array:
     """
     Compute RHS for higher Hermite moments (m ≥ 2):
-        dgₘ/dt + √βᵢ∇∥[√((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁] = -νmgₘ
+        dgₘ/dt + √βᵢ∇∥[√((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁] = 0
 
     This implements thesis Eq. 2.9 for the kinetic cascade in velocity space.
     The parallel streaming couples each moment to its neighbors (m-1 and m+1),
     representing phase mixing in the parallel velocity coordinate.
 
-    The collision term -νmgₘ damps high moments (large m), regularizing the
-    cascade at small velocity-space scales.
+    Note: Collisions are handled by the exponential step in the timestepper
+    (not in the RHS), matching the treatment of resistive dissipation.
 
     The full equation is:
         ∂gₘ/∂t = -{Φ, gₘ}
                  - √βᵢ·∂/∂z[√((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁]
                  - √βᵢ·{Ψ, √((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁}
-                 - νmgₘ
 
     Args:
         g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
@@ -1064,7 +1062,6 @@ def gm_rhs(
         dealias_mask: 2/3 dealiasing mask
         m: Moment index (2 ≤ m < M for interior moments, m = M requires closure)
         beta_i: Ion plasma beta
-        nu: Collision frequency ν (Lenard-Bernstein operator)
         Nz, Ny, Nx: Grid dimensions (static)
 
     Returns:
@@ -1118,11 +1115,8 @@ def gm_rhs(
     bracket_psi_coupled = poisson_bracket_3d(psi, coupled_term, kx, ky, Nz, Ny, Nx, dealias_mask)
     term3 = jnp.sqrt(beta_i) * bracket_psi_coupled
 
-    # Term 4: -νmgₘ (Lenard-Bernstein collision operator)
-    collision_term = nu * m * gm
-
-    # Assemble RHS
-    rhs = -bracket_phi_gm - term2 - term3 - collision_term
+    # Assemble RHS (collisions handled by exponential step in timestepper)
+    rhs = -bracket_phi_gm - term2 - term3
 
     # Zero out k=0 mode
     rhs = zero_k0_mode(rhs)

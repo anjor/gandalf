@@ -1949,7 +1949,7 @@ class TestHermiteMomentRHS:
         nu = 0.01
         
         rhs = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-                     grid.dealias_mask, m, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+                     grid.dealias_mask, m, beta_i, grid.Nz, grid.Ny, grid.Nx)
         
         assert rhs.shape == (grid.Nz, grid.Ny, grid.Nx//2+1)
         assert jnp.iscomplexobj(rhs)
@@ -1972,89 +1972,33 @@ class TestHermiteMomentRHS:
         nu = 0.0  # No collisions for this test
         
         rhs = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-                     grid.dealias_mask, m, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+                     grid.dealias_mask, m, beta_i, grid.Nz, grid.Ny, grid.Nx)
         
         # RHS should be non-zero due to coupling with neighboring moments
         assert jnp.sum(jnp.abs(rhs)) > 0, "gm_rhs should couple to adjacent moments"
 
-    def test_gm_rhs_collision_operator(self):
-        """Test gm_rhs collision term -νmgₘ works correctly."""
+    def test_gm_rhs_no_collision_term(self):
+        """Test gm_rhs does NOT include collision damping (handled by exponential step)."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
         M = 10
         m = 5
-        
+
         # Set only gₘ, with gₘ₋₁ = gₘ₊₁ = 0 and z± = 0
-        # This isolates the collision term
+        # With no coupling neighbors and no advection, RHS should be zero
         g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
         g = g.at[4, 5, 6, m].set(1.0 + 0.0j)
-        
+
         z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
         z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
-        
+
         beta_i = 1.0
-        nu = 0.01
-        
+
         rhs = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-                     grid.dealias_mask, m, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
-        
-        # The RHS should be -νm·gₘ at the mode location
-        expected_rhs = -nu * m * g[:, :, :, m]
-        
-        # Check at the mode location
-        rhs_at_mode = rhs[4, 5, 6]
-        expected_at_mode = expected_rhs[4, 5, 6]
-        
-        assert jnp.abs(rhs_at_mode - expected_at_mode) < 1e-6, \
-            f"Collision term mismatch: got {rhs_at_mode}, expected {expected_at_mode}"
+                     grid.dealias_mask, m, beta_i, grid.Nz, grid.Ny, grid.Nx)
 
-    def test_gm_rhs_collision_scaling(self):
-        """Test collision damping scales correctly with moment index m."""
-        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
-        M = 10
-
-        # Initialize only target moments (isolate collision term)
-        # Set gₘ = 1 for m=2 and m=5, all others zero (including neighbors)
-        # This isolates the collision term -νmgₘ
-        g_m2 = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
-        g_m2 = g_m2.at[4, 5, 6, 2].set(1.0 + 0.0j)  # Only g₂
-
-        g_m5 = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64)
-        g_m5 = g_m5.at[4, 5, 6, 5].set(1.0 + 0.0j)  # Only g₅
-
-        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
-        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64)
-
-        beta_i = 1.0
-        nu = 0.01
-
-        # Compute collision damping for m=2 and m=5
-        rhs_m2 = gm_rhs(g_m2, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-                        grid.dealias_mask, 2, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
-        rhs_m5 = gm_rhs(g_m5, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-                        grid.dealias_mask, 5, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
-
-        # Extract collision contribution at the mode
-        # With neighbors zero and z± = 0, RHS = -νmgₘ exactly
-        damping_m2 = jnp.abs(rhs_m2[4, 5, 6])
-        damping_m5 = jnp.abs(rhs_m5[4, 5, 6])
-
-        # Expected values: |RHS| = νm for unit amplitude
-        expected_m2 = nu * 2
-        expected_m5 = nu * 5
-
-        # Check absolute values match expected
-        assert jnp.abs(damping_m2 - expected_m2) < 1e-6, \
-            f"m=2 damping should be {expected_m2}, got {damping_m2}"
-        assert jnp.abs(damping_m5 - expected_m5) < 1e-6, \
-            f"m=5 damping should be {expected_m5}, got {damping_m5}"
-
-        # Check ratio is exactly 5/2 = 2.5
-        ratio = damping_m5 / damping_m2
-        expected_ratio = 5.0 / 2.0
-
-        print(f"Collision damping ratio (m=5)/(m=2) = {ratio}, expected = {expected_ratio}")
-        assert jnp.abs(ratio - expected_ratio) < 0.01, \
-            f"Collision ratio should be {expected_ratio}, got {ratio}"
+        # With isolated moment (no neighbors, no z±), RHS should be zero
+        assert jnp.allclose(rhs[4, 5, 6], 0.0, atol=1e-6), \
+            f"gm_rhs should be zero for isolated moment, got {rhs[4, 5, 6]}"
 
     def test_all_rhs_zero_for_zero_fields(self):
         """Test all RHS functions return zero for zero input fields."""
@@ -2081,7 +2025,7 @@ class TestHermiteMomentRHS:
         
         # Test gm_rhs
         rhs_gm = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-                        grid.dealias_mask, 5, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+                        grid.dealias_mask, 5, beta_i, grid.Nz, grid.Ny, grid.Nx)
         assert jnp.allclose(rhs_gm, 0.0), "gm_rhs should be zero for zero fields"
 
     def test_rhs_k0_mode_is_zero(self):
@@ -2113,7 +2057,7 @@ class TestHermiteMomentRHS:
         
         # Test gm_rhs
         rhs_gm = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-                        grid.dealias_mask, 5, beta_i, nu, grid.Nz, grid.Ny, grid.Nx)
+                        grid.dealias_mask, 5, beta_i, grid.Nz, grid.Ny, grid.Nx)
         assert jnp.allclose(rhs_gm[0, 0, 0], 0.0), "gm_rhs k=0 mode should be zero"
 
 

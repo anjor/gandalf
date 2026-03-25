@@ -603,6 +603,125 @@ def test_moment_physical_meaning(velocity_grid_fine):
     assert 0.1 < moment_energy < 1.0, f"Moment energy = {moment_energy} out of range"
 
 
+# ============================================================================
+# Test: Streaming Matrix and Eigensystem
+# ============================================================================
+
+
+class TestStreamingMatrix:
+    """Test Hermite streaming matrix construction and eigendecomposition."""
+
+    def test_streaming_matrix_shape(self):
+        """Streaming matrix should be (M+1) x (M+1)."""
+        from krmhd.hermite import compute_streaming_matrix
+        for M in [2, 5, 10, 20]:
+            T = compute_streaming_matrix(M)
+            assert T.shape == (M + 1, M + 1)
+
+    def test_streaming_matrix_elements(self):
+        """Verify specific matrix elements match Hermite recurrence."""
+        import numpy as np
+        from krmhd.hermite import compute_streaming_matrix
+
+        M = 5
+        T = np.array(compute_streaming_matrix(M, Lambda=1.0))
+
+        # T[0,1] = sqrt(1/2)
+        assert np.isclose(T[0, 1], np.sqrt(0.5))
+        # T[1,0] = (1 - 1/Lambda) / sqrt(2) = 0 for Lambda=1
+        assert np.isclose(T[1, 0], 0.0)
+        # T[1,2] = sqrt(2/2) = 1
+        assert np.isclose(T[1, 2], 1.0)
+        # T[2,1] = sqrt(2/2) = 1
+        assert np.isclose(T[2, 1], 1.0)
+        # T[2,3] = sqrt(3/2)
+        assert np.isclose(T[2, 3], np.sqrt(1.5))
+        # T[3,2] = sqrt(3/2)
+        assert np.isclose(T[3, 2], np.sqrt(1.5))
+        # Off-tridiagonal elements should be zero
+        assert T[0, 2] == 0.0
+        assert T[3, 5] == 0.0
+
+    def test_streaming_matrix_symmetric_for_large_lambda(self):
+        """T should be symmetric when Lambda -> infinity (no kinetic correction)."""
+        import numpy as np
+        from krmhd.hermite import compute_streaming_matrix
+
+        T = np.array(compute_streaming_matrix(10, Lambda=1e10))
+        assert np.allclose(T, T.T, atol=1e-8)
+
+    def test_streaming_matrix_asymmetric_for_lambda_1(self):
+        """T should be asymmetric when Lambda = 1 (T[1,0] = 0 != T[0,1])."""
+        import numpy as np
+        from krmhd.hermite import compute_streaming_matrix
+
+        T = np.array(compute_streaming_matrix(5, Lambda=1.0))
+        # T[0,1] = sqrt(1/2) != T[1,0] = 0
+        assert not np.isclose(T[0, 1], T[1, 0])
+
+    def test_eigensystem_reconstruction(self):
+        """P @ diag(eigenvalues) @ P_inv should reconstruct T."""
+        import numpy as np
+        from krmhd.hermite import compute_streaming_matrix, compute_streaming_eigensystem
+
+        for M in [2, 5, 10, 20]:
+            for Lambda in [1.0, 2.0, 1e10]:
+                T = np.array(compute_streaming_matrix(M, Lambda))
+                _, eigenvalues, P, P_inv = compute_streaming_eigensystem(M, Lambda)
+                eigenvalues = np.array(eigenvalues)
+                P = np.array(P)
+                P_inv = np.array(P_inv)
+
+                T_reconstructed = P @ np.diag(eigenvalues) @ P_inv
+                assert np.allclose(T_reconstructed, T, atol=1e-6), \
+                    f"Eigensystem reconstruction failed for M={M}, Lambda={Lambda}"
+
+    def test_eigenvalues_real_for_symmetric_case(self):
+        """Eigenvalues should be real when T is symmetric (Lambda -> inf)."""
+        import numpy as np
+        from krmhd.hermite import compute_streaming_eigensystem
+
+        _, eigenvalues, _, _ = compute_streaming_eigensystem(10, Lambda=1e10)
+        assert np.allclose(np.imag(eigenvalues), 0.0, atol=1e-10)
+
+    def test_eigenvalues_real_for_physical_lambda(self):
+        """Eigenvalues should be real for Lambda >= 1.
+
+        For Lambda=1 (default), T[1,0]=0 making T block-diagonal with real eigenvalues.
+        For Lambda>1, the asymmetry is mild enough that eigenvalues remain real.
+        For Lambda<1, complex eigenvalues can appear (known limitation).
+        """
+        import numpy as np
+        from krmhd.hermite import compute_streaming_eigensystem
+
+        for Lambda in [1.0, 2.0, 5.0, 10.0]:
+            for M in [2, 5, 10, 20]:
+                _, eigenvalues, _, _ = compute_streaming_eigensystem(M, Lambda)
+                assert np.allclose(np.imag(eigenvalues), 0.0, atol=1e-8), \
+                    f"Complex eigenvalues for M={M}, Lambda={Lambda}: {eigenvalues}"
+
+    def test_eigenvalue_magnitude_scales_with_sqrt_M(self):
+        """Max eigenvalue should scale as ~sqrt(2M) for large M."""
+        import numpy as np
+        from krmhd.hermite import compute_streaming_eigensystem
+
+        for M in [10, 20, 50]:
+            _, eigenvalues, _, _ = compute_streaming_eigensystem(M, Lambda=1e10)
+            max_eval = np.max(np.abs(eigenvalues))
+            expected = np.sqrt(2 * M)
+            # Should be within 20% of sqrt(2M)
+            assert 0.8 * expected < max_eval < 1.2 * expected, \
+                f"M={M}: max eigenvalue {max_eval} not near sqrt(2M)={expected}"
+
+
+    def test_lambda_less_than_one_raises(self):
+        """Lambda < 1 should raise ValueError due to complex eigenvalues."""
+        from krmhd.hermite import compute_streaming_eigensystem
+
+        with pytest.raises(ValueError, match="complex eigenvalues"):
+            compute_streaming_eigensystem(5, Lambda=0.5)
+
+
 if __name__ == "__main__":
     # Allow running tests directly
     pytest.main([__file__, "-v"])

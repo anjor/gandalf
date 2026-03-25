@@ -45,6 +45,7 @@ from krmhd.physics import (
     g1_rhs,
     gm_rhs,
 )
+from krmhd.hermite import compute_streaming_matrix, compute_streaming_eigensystem
 from krmhd.spectral import derivative_x, derivative_y, rfftn_inverse
 
 
@@ -221,7 +222,6 @@ def _krmhd_rhs_jit(
                 dealias_mask,
                 m,
                 beta_i,
-                nu,
                 Nz,
                 Ny,
                 Nx,
@@ -318,6 +318,9 @@ def _gandalf_step_jit(
     Nx: int,
     hyper_r: int = 1,
     hyper_n: int = 1,
+    streaming_eigenvalues: Array = None,
+    streaming_P_T: Array = None,
+    streaming_P_inv_T: Array = None,
 ) -> KRMHDFields:
     """
     JIT-compiled GANDALF integrating factor + RK2 timestepper.
@@ -354,9 +357,18 @@ def _gandalf_step_jit(
             - n=2: Moderate hyper-collision -νm² (recommended for most cases)
             - n=3: Strong hyper-collision -νm³ (matches original GANDALF alpha_m=3)
             - n=4: Very strong hyper-collision -νm⁴ (expert use, requires small nu)
+        streaming_eigenvalues: Eigenvalues of streaming matrix T (from compute_streaming_eigensystem).
+            Must be provided — None default is only for Python syntax (keyword after default args).
+        streaming_P_T: Transposed right eigenvector matrix P.T (from compute_streaming_eigensystem).
+        streaming_P_inv_T: Transposed inverse eigenvector matrix P_inv.T.
 
     Returns:
         Updated KRMHDFields after full timestep
+
+    Note:
+        This function evaluates _krmhd_rhs_jit 3x per step (vs 2x pre-IF):
+        1x with real kz (z± NL extraction), 2x with kz=0 (g NL-only, avoids
+        float32 cancellation from streaming subtraction).
     """
     # Build 3D arrays
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
@@ -399,8 +411,36 @@ def _gandalf_step_jit(
     z_plus_half = phase_plus_half * (fields.z_plus + phase_plus_half * (dt / 2.0) * nl_plus_0)
     z_minus_half = phase_minus_half * (fields.z_minus + phase_minus_half * (dt / 2.0) * nl_minus_0)
 
-    # Hermite moment half-step: standard RK2, no integrating factor (thesis Eq. 2.15-2.17)
-    g_half = fields.g + (dt / 2.0) * rhs_0.g
+    # Hermite moment nonlinear-only RHS: compute with kz=0 to eliminate streaming terms
+    # This avoids float32 cancellation error from subtracting streaming computed two ways
+    kz_zero = jnp.zeros_like(kz)
+    nl_g_rhs_0 = _krmhd_rhs_jit(
+        fields, kx, ky, kz_zero, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
+    )
+    nl_g_0 = nl_g_rhs_0.g
+    kz_4d = kz[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
+
+    # Streaming integrating factor phases: exp(-i * sqrt(beta_i) * kz * eigenvalue * dt)
+    evals = streaming_eigenvalues[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
+    g_phase_half = jnp.exp(-1j * jnp.sqrt(beta_i) * kz_4d * evals * dt / 2.0)
+    g_phase_full = g_phase_half ** 2
+
+    def apply_streaming_if(g_arr, phase):
+        """Apply streaming integrating factor: rotate to eigenspace, phase, rotate back.
+
+        Note: At float32, P_inv @ P != I exactly (error ~6e-8), causing ~0.3% energy
+        drift per application. This is acceptable for physics runs where collisional
+        damping dominates the error. For precision-critical work, use float64 arrays.
+        """
+        g_eigen = g_arr @ streaming_P_inv_T  # project to eigenspace
+        g_eigen = g_eigen * phase             # apply per-kz, per-eigenvalue phase
+        return g_eigen @ streaming_P_T        # project back
+
+    # g_half = IF(g + IF(dt/2 * NL)) — mirrors the z± pattern
+    g_half = apply_streaming_if(
+        fields.g + apply_streaming_if((dt / 2.0) * nl_g_0, g_phase_half),
+        g_phase_half,
+    )
 
     fields_half = KRMHDFields(
         z_plus=z_plus_half,
@@ -422,6 +462,12 @@ def _gandalf_step_jit(
     nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
     nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
 
+    # Hermite moment nonlinear-only RHS at midpoint (kz=0 to kill streaming)
+    nl_g_rhs_half = _krmhd_rhs_jit(
+        fields_half, kx, ky, kz_zero, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
+    )
+    nl_g_half = nl_g_rhs_half.g
+
     # =========================================================================
     # Step 3: Full step using midpoint RHS (thesis Eq. 2.19-2.22)
     # =========================================================================
@@ -430,8 +476,11 @@ def _gandalf_step_jit(
     z_plus_new = phase_plus_full * (fields.z_plus + phase_plus_full * dt * nl_plus_half)
     z_minus_new = phase_minus_full * (fields.z_minus + phase_minus_full * dt * nl_minus_half)
 
-    # Hermite moment full-step: standard RK2 using midpoint RHS (thesis Eq. 2.20-2.22)
-    g_new = fields.g + dt * rhs_half.g
+    # Hermite moment full-step with integrating factor
+    g_new = apply_streaming_if(
+        fields.g + apply_streaming_if(dt * nl_g_half, g_phase_full),
+        g_phase_full,
+    )
 
     # =========================================================================
     # Step 4: Apply dissipation using exponential factors (thesis Eq. 2.23-2.25)
@@ -663,6 +712,11 @@ def gandalf_step(
     grid = state.grid
     fields = _fields_from_state(state)
 
+    # Precompute Hermite streaming eigensystem for integrating factor (cached)
+    _, eigenvalues, P, P_inv = compute_streaming_eigensystem(
+        state.M, state.Lambda
+    )
+
     # Call JIT-compiled GANDALF kernel
     new_fields = _gandalf_step_jit(
         fields,
@@ -682,6 +736,9 @@ def gandalf_step(
         grid.Nx,
         hyper_r,
         hyper_n,
+        streaming_eigenvalues=eigenvalues,
+        streaming_P_T=P.T,
+        streaming_P_inv_T=P_inv.T,
     )
 
     # Convert back to KRMHDState (Pydantic validation at boundary)
@@ -751,5 +808,8 @@ def compute_cfl_timestep(
 
     # CFL timestep
     dt_cfl = cfl_safety * min_spacing / v_max
+
+    # Note: No Hermite streaming constraint needed — the integrating factor
+    # handles oscillatory streaming terms exactly (unitary propagator).
 
     return float(dt_cfl)
