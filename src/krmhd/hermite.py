@@ -636,7 +636,7 @@ def check_hermite_convergence(
 
 
 @lru_cache(maxsize=None)
-def compute_streaming_matrix(M: int, Lambda: float = 1.0) -> Array:
+def compute_streaming_matrix(M: int, Lambda: float = 1.0):
     """
     Build the (M+1)x(M+1) parallel streaming coupling matrix T.
 
@@ -658,7 +658,7 @@ def compute_streaming_matrix(M: int, Lambda: float = 1.0) -> Array:
         Lambda: Kinetic closure parameter (default 1.0)
 
     Returns:
-        T: (M+1, M+1) coupling matrix (numpy, not JAX — used for precomputation)
+        numpy.ndarray: (M+1, M+1) coupling matrix
     """
     import numpy as np
 
@@ -687,19 +687,23 @@ def compute_streaming_matrix(M: int, Lambda: float = 1.0) -> Array:
 @lru_cache(maxsize=None)
 def compute_streaming_eigensystem(
     M: int, Lambda: float = 1.0
-) -> tuple[Array, Array, Array]:
+) -> tuple[Array, Array, Array, Array]:
     """
     Precompute eigendecomposition of the streaming matrix T = P @ diag(evals) @ P_inv.
 
     Used by the integrating factor timestepper to apply exact phase rotation
     for the linear streaming operator exp(-i * sqrt(beta_i) * kz * T * dt).
 
+    Uses eigh (symmetric solver) when T is symmetric (guaranteed real eigenvalues,
+    better conditioned), falling back to eig (general solver) for asymmetric T.
+
     Args:
         M: Maximum Hermite moment index
         Lambda: Kinetic closure parameter
 
     Returns:
-        eigenvalues: (M+1,) array of eigenvalues (may be complex if T non-symmetric)
+        T_jax: (M+1, M+1) JAX array of the streaming matrix
+        eigenvalues: (M+1,) array of eigenvalues
         P: (M+1, M+1) matrix of right eigenvectors
         P_inv: (M+1, M+1) inverse of P
     """
@@ -707,7 +711,12 @@ def compute_streaming_eigensystem(
 
     T = compute_streaming_matrix(M, Lambda)
 
-    eigenvalues, P = np.linalg.eig(T)
-    P_inv = np.linalg.inv(P)
+    # Use symmetric solver when T is symmetric (real eigenvalues guaranteed)
+    if np.allclose(T, T.T, atol=1e-14):
+        eigenvalues, P = np.linalg.eigh(T)
+        P_inv = P.T  # Orthogonal for symmetric T
+    else:
+        eigenvalues, P = np.linalg.eig(T)
+        P_inv = np.linalg.inv(P)
 
-    return jnp.array(eigenvalues), jnp.array(P), jnp.array(P_inv)
+    return jnp.array(T), jnp.array(eigenvalues), jnp.array(P), jnp.array(P_inv)

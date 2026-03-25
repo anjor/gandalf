@@ -318,10 +318,9 @@ def _gandalf_step_jit(
     Nx: int,
     hyper_r: int = 1,
     hyper_n: int = 1,
-    streaming_T_T: Array | None = None,
-    streaming_eigenvalues: Array | None = None,
-    streaming_P_T: Array | None = None,
-    streaming_P_inv_T: Array | None = None,
+    streaming_eigenvalues: Array = None,  # Required: eigenvalues from compute_streaming_eigensystem
+    streaming_P_T: Array = None,  # Required: P.T from compute_streaming_eigensystem
+    streaming_P_inv_T: Array = None,  # Required: P_inv.T from compute_streaming_eigensystem
 ) -> KRMHDFields:
     """
     JIT-compiled GANDALF integrating factor + RK2 timestepper.
@@ -403,12 +402,14 @@ def _gandalf_step_jit(
     z_plus_half = phase_plus_half * (fields.z_plus + phase_plus_half * (dt / 2.0) * nl_plus_0)
     z_minus_half = phase_minus_half * (fields.z_minus + phase_minus_half * (dt / 2.0) * nl_minus_0)
 
-    # Hermite moment half-step with integrating factor for streaming
-    # Linear streaming: -sqrt(beta_i) * ikz * T @ g (analogous to ±ikz for z±)
-    # Extract nonlinear-only g RHS by subtracting the linear streaming term
+    # Hermite moment nonlinear-only RHS: compute with kz=0 to eliminate streaming terms
+    # This avoids float32 cancellation error from subtracting streaming computed two ways
+    kz_zero = jnp.zeros_like(kz)
+    nl_g_rhs_0 = _krmhd_rhs_jit(
+        fields, kx, ky, kz_zero, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
+    )
+    nl_g_0 = nl_g_rhs_0.g
     kz_4d = kz[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
-    streaming_linear_0 = -jnp.sqrt(beta_i) * (1j * kz_4d) * (fields.g @ streaming_T_T)
-    nl_g_0 = rhs_0.g - streaming_linear_0
 
     # Streaming integrating factor phases: exp(-i * sqrt(beta_i) * kz * eigenvalue * dt)
     evals = streaming_eigenvalues[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
@@ -447,9 +448,11 @@ def _gandalf_step_jit(
     nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
     nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
 
-    # Extract nonlinear-only g RHS at midpoint
-    streaming_linear_half = -jnp.sqrt(beta_i) * (1j * kz_4d) * (g_half @ streaming_T_T)
-    nl_g_half = rhs_half.g - streaming_linear_half
+    # Hermite moment nonlinear-only RHS at midpoint (kz=0 to kill streaming)
+    nl_g_rhs_half = _krmhd_rhs_jit(
+        fields_half, kx, ky, kz_zero, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
+    )
+    nl_g_half = nl_g_rhs_half.g
 
     # =========================================================================
     # Step 3: Full step using midpoint RHS (thesis Eq. 2.19-2.22)
@@ -695,9 +698,10 @@ def gandalf_step(
     grid = state.grid
     fields = _fields_from_state(state)
 
-    # Precompute Hermite streaming eigensystem for integrating factor
-    streaming_T = jnp.array(compute_streaming_matrix(state.M, state.Lambda))
-    eigenvalues, P, P_inv = compute_streaming_eigensystem(state.M, state.Lambda)
+    # Precompute Hermite streaming eigensystem for integrating factor (cached)
+    streaming_T, eigenvalues, P, P_inv = compute_streaming_eigensystem(
+        state.M, state.Lambda
+    )
 
     # Call JIT-compiled GANDALF kernel
     new_fields = _gandalf_step_jit(
@@ -718,7 +722,6 @@ def gandalf_step(
         grid.Nx,
         hyper_r,
         hyper_n,
-        streaming_T_T=streaming_T.T,
         streaming_eigenvalues=eigenvalues,
         streaming_P_T=P.T,
         streaming_P_inv_T=P_inv.T,

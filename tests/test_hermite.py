@@ -667,7 +667,7 @@ class TestStreamingMatrix:
         for M in [2, 5, 10, 20]:
             for Lambda in [1.0, 2.0, 1e10]:
                 T = np.array(compute_streaming_matrix(M, Lambda))
-                eigenvalues, P, P_inv = compute_streaming_eigensystem(M, Lambda)
+                _, eigenvalues, P, P_inv = compute_streaming_eigensystem(M, Lambda)
                 eigenvalues = np.array(eigenvalues)
                 P = np.array(P)
                 P_inv = np.array(P_inv)
@@ -681,7 +681,7 @@ class TestStreamingMatrix:
         import numpy as np
         from krmhd.hermite import compute_streaming_eigensystem
 
-        eigenvalues, _, _ = compute_streaming_eigensystem(10, Lambda=1e10)
+        _, eigenvalues, _, _ = compute_streaming_eigensystem(10, Lambda=1e10)
         assert np.allclose(np.imag(eigenvalues), 0.0, atol=1e-10)
 
     def test_eigenvalues_real_for_physical_lambda(self):
@@ -696,7 +696,7 @@ class TestStreamingMatrix:
 
         for Lambda in [1.0, 2.0, 5.0, 10.0]:
             for M in [2, 5, 10, 20]:
-                eigenvalues, _, _ = compute_streaming_eigensystem(M, Lambda)
+                _, eigenvalues, _, _ = compute_streaming_eigensystem(M, Lambda)
                 assert np.allclose(np.imag(eigenvalues), 0.0, atol=1e-8), \
                     f"Complex eigenvalues for M={M}, Lambda={Lambda}: {eigenvalues}"
 
@@ -706,7 +706,7 @@ class TestStreamingMatrix:
         from krmhd.hermite import compute_streaming_eigensystem
 
         for M in [10, 20, 50]:
-            eigenvalues, _, _ = compute_streaming_eigensystem(M, Lambda=1e10)
+            _, eigenvalues, _, _ = compute_streaming_eigensystem(M, Lambda=1e10)
             max_eval = np.max(np.abs(eigenvalues))
             expected = np.sqrt(2 * M)
             # Should be within 20% of sqrt(2M)
