@@ -1276,8 +1276,8 @@ class TestHermiteIntegratingFactor:
         # this compounds to ~1.5x. Without the IF fix, growth would be ~10^42.
         # Key validation: energy stays bounded (no exponential blowup).
         ratio = E_g_final / E_g_initial
-        assert ratio < 1.5, \
-            f"g energy grew by factor {ratio:.4f} — exceeds float32 precision budget"
+        assert 0.5 < ratio < 1.5, \
+            f"g energy ratio {ratio:.4f} outside [0.5, 1.5] — IF not approximately unitary"
         assert jnp.all(jnp.isfinite(current.g)), "g contains NaN/Inf"
 
     def test_streaming_stability_high_beta(self):
@@ -1309,6 +1309,6 @@ class TestHermiteIntegratingFactor:
         E_final = float(jnp.sum(jnp.abs(current.g) ** 2))
         ratio = E_final / E_initial
 
-        assert ratio < 1.5, \
-            f"g energy grew by {ratio:.4f}x at beta={beta_i} — exceeds float32 precision budget"
+        assert 0.5 < ratio < 1.5, \
+            f"g energy ratio {ratio:.4f}x at beta={beta_i} outside [0.5, 1.5]"
         assert jnp.all(jnp.isfinite(current.g))
