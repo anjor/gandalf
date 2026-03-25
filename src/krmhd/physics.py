@@ -1319,6 +1319,7 @@ def initialize_random_spectrum(
     nu: float = 0.01,
     Lambda: float = 1.0,
     seed: int = 42,
+    g_perturbation_amplitude: float = 0.0,
 ) -> KRMHDState:
     """
     Initialize turbulent spectrum with power law k^(-α) for decaying turbulence.
@@ -1346,6 +1347,11 @@ def initialize_random_spectrum(
         beta_i: Ion plasma beta (default: 1.0)
         nu: Collision frequency (default: 0.01)
         seed: Random seed for reproducibility (default: 42)
+        g_perturbation_amplitude: Amplitude of Hermite moment perturbations (default: 0.0).
+            For kinetic simulations (Landau damping, phase mixing), set to a small
+            non-zero value (e.g., 1e-3). If g starts at zero, the kinetic equations
+            are self-referential and g remains exactly zero, preventing kinetic
+            physics from developing.
 
     Returns:
         KRMHDState with random turbulent spectrum
@@ -1407,8 +1413,15 @@ def initialize_random_spectrum(
     # Passive scalar B_parallel (initially zero, will be excited by cascade)
     B_parallel = jnp.zeros_like(phi)
 
-    # Initialize Hermite moments (equilibrium)
-    g = initialize_hermite_moments(grid, M, v_th, perturbation_amplitude=0.0)
+    # Initialize Hermite moments (equilibrium, or with small perturbations for kinetic physics)
+    # Use fold_in to derive an independent seed for g, avoiding collisions with other seeds
+    g_key = jax.random.fold_in(jax.random.PRNGKey(seed), 1)
+    g_seed = int(jax.random.randint(g_key, (), 0, 2**31 - 1))
+    g = initialize_hermite_moments(
+        grid, M, v_th,
+        perturbation_amplitude=g_perturbation_amplitude,
+        seed=g_seed,
+    )
 
     return KRMHDState(
         z_plus=z_plus,

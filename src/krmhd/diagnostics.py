@@ -70,6 +70,7 @@ import jax.numpy as jnp
 from jax import Array
 from jax.ops import segment_sum
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 import numpy as np
 
 from krmhd.physics import KRMHDState, energy as compute_energy
@@ -196,7 +197,7 @@ def energy_spectrum_1d(
 
     # Handle rfft doubling for reality condition
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -327,7 +328,7 @@ def energy_spectrum_perpendicular(
     
     # Handle rfft doubling
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -453,7 +454,7 @@ def energy_spectrum_perpendicular_kinetic(
 
     # Handle rfft doubling for reality condition
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -579,7 +580,7 @@ def energy_spectrum_perpendicular_magnetic(
 
     # Handle rfft doubling for reality condition
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -679,7 +680,7 @@ def energy_spectrum_2d(
 
     # rfft doubling: kx=0 and kx=Nyquist count once, others twice
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -695,13 +696,9 @@ def energy_spectrum_2d(
     k_par_values = jnp.abs(kz[:n_kpar])
 
     # Map each kz index to its folded |kz| index
-    # kz from fftfreq: [0, 1, ..., Nz//2-1, -Nz//2, ..., -1] * dkz
-    # Indices 0..Nz//2 map to 0..Nz//2
-    # Indices Nz//2+1..Nz-1 map to Nz//2-1..1
-    kz_to_kpar = jnp.concatenate([
-        jnp.arange(n_kpar),
-        jnp.arange(Nz // 2 - 1, 0, -1),
-    ])  # shape [Nz]
+    # Works for both even and odd Nz
+    kz_indices = jnp.arange(Nz)
+    kz_to_kpar = jnp.where(kz_indices <= Nz // 2, kz_indices, Nz - kz_indices)
 
     # 2D binning via flattened linear index
     k_perp_full = jnp.broadcast_to(k_perp, (Nz, Ny, Nx // 2 + 1))
@@ -804,7 +801,7 @@ def energy_spectrum_parallel(
     
     # Handle rfft doubling
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -1022,7 +1019,7 @@ def compute_turbulence_diagnostics(
 
     # rfft symmetry factors
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     rfft_factor = jnp.where(kx_middle, 2.0, 1.0)
 
@@ -1101,6 +1098,106 @@ def compute_turbulence_diagnostics(
         critical_balance_ratio=cb_ratio_value,  # Already converted to float and validated
         energy_total=float(energy_total_physical),  # Use physics.energy() for consistency
     )
+
+
+# =============================================================================
+# Dissipation Rate Diagnostics
+# =============================================================================
+
+
+def compute_dissipation_rate(
+    state: KRMHDState,
+    eta: float,
+    nu: float,
+    hyper_r: int = 1,
+    hyper_n: int = 1,
+) -> Dict[str, float]:
+    """
+    Compute instantaneous collisional and resistive dissipation rates.
+
+    Returns the rate of energy dissipation from resistive (eta) and collisional (nu)
+    operators, matching the exact formulas in timestepping.py.
+
+    Args:
+        state: KRMHD state with Elsasser fields and Hermite moments
+        eta: Resistivity (hyper-resistivity coefficient)
+        nu: Collision frequency (hyper-collision coefficient)
+        hyper_r: Resistive hyper-dissipation order (default: 1)
+        hyper_n: Collisional hyper-dissipation order (default: 1)
+
+    Returns:
+        Dictionary with keys:
+        - 'resistive': Elsasser (z±) energy dissipation rate from eta operator
+        - 'collisional': Hermite moment energy dissipation rate from nu operator (m>=2)
+        - 'total': resistive + collisional (Elsasser + Hermite collisional only)
+
+    Note:
+        The eta operator also damps g moments (timestepping.py:486), but this
+        function separates resistive (Elsasser) from collisional (Hermite) for
+        clean decomposition in collisionality scan studies. The 'total' key
+        therefore excludes eta damping of g moments — it represents the sum of
+        Elsasser resistive dissipation and Hermite collisional dissipation only.
+    """
+    grid = state.grid
+    Nx, Ny = grid.Nx, grid.Ny
+    M = state.M
+    N_perp = Nx * Ny
+
+    # --- Resistive dissipation on Elsasser fields ---
+
+    kx_3d = grid.kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = grid.ky[jnp.newaxis, :, jnp.newaxis]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+
+    # Match timestepping.py:367-372 exactly
+    idx_max = (Nx - 1) // 3
+    idy_max = (Ny - 1) // 3
+    k_perp_max_squared = grid.kx[idx_max]**2 + grid.ky[idy_max]**2
+
+    # Normalized dissipation rate per mode: eta * (k_perp^2 / k_max^2)^r
+    k_perp_2r_normalized = (k_perp_squared / k_perp_max_squared) ** hyper_r
+    gamma_k = eta * k_perp_2r_normalized
+
+    # Elsasser energy per mode (same pattern as energy() in physics.py)
+    phi = 0.5 * (state.z_plus + state.z_minus)
+    A_par = 0.5 * (state.z_plus - state.z_minus)
+    energy_per_mode = k_perp_squared * (jnp.abs(phi)**2 + jnp.abs(A_par)**2)
+
+    # dE/dt = -2*gamma_k*E_k where E_k = (1/2)*k_perp^2*(|phi|^2+|A_par|^2)/N_perp
+    # energy_per_mode already carries the k_perp^2*|field|^2 factor (without the 1/2),
+    # so we multiply by 0.5/N_perp below to get properly normalized energy units.
+    dissipation_per_mode = 2.0 * gamma_k * energy_per_mode
+
+    # rfft weighting (matching physics.py:1500-1502)
+    kx_zero = (kx_3d == 0.0)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_middle = ~(kx_zero | kx_nyquist)
+
+    resistive = float(
+        (0.5 / N_perp) * jnp.sum(
+            jnp.where(kx_middle, 2.0 * dissipation_per_mode, dissipation_per_mode)
+        ).real
+    )
+
+    # --- Collisional dissipation on Hermite moments ---
+
+    # hermite_moment_energy returns E_m = sum_k |g_m,k|^2 with rfft weighting
+    # but without the 1/N_perp Parseval normalization (unlike energy() in physics.py
+    # which includes 0.5/N_perp). We divide by N_perp below for consistent units.
+    E_m = hermite_moment_energy(state)  # Shape: [M+1]
+
+    # Collision rate per moment (matching timestepping.py:474-481)
+    moment_indices = jnp.arange(M + 1)
+    collision_rate = nu * ((moment_indices / M) ** hyper_n)
+    collision_rate = jnp.where(moment_indices >= 2, collision_rate, 0.0)
+
+    collisional = float(jnp.sum(2.0 * collision_rate * E_m).real / N_perp)
+
+    return {
+        'collisional': collisional,
+        'resistive': resistive,
+        'total': collisional + resistive,
+    }
 
 
 # =============================================================================
@@ -1990,7 +2087,6 @@ def plot_energy_spectrum_2d(
 
     fig, ax = plt.subplots(figsize=figsize)
 
-    from matplotlib.colors import LogNorm
     im = ax.pcolormesh(
         k_perp_plot, k_par_plot, E_plot.T,
         norm=LogNorm(vmin=finite.min(), vmax=finite.max()),

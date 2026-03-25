@@ -30,6 +30,7 @@ from krmhd.diagnostics import (
     energy_spectrum_perpendicular_magnetic,
     energy_spectrum_parallel,
     energy_spectrum_2d,
+    compute_dissipation_rate,
     EnergyHistory,
     plot_state,
     plot_energy_history,
@@ -1899,3 +1900,130 @@ class TestTurbulenceDiagnostics:
             "Critical balance ratio must be finite"
         assert diag.critical_balance_ratio >= 0.0, \
             "Critical balance ratio must be non-negative"
+
+
+class TestComputeDissipationRate:
+    """Test compute_dissipation_rate() for Issue #118."""
+
+    def test_return_structure(self):
+        """Test that return dict has correct keys."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        state = initialize_random_spectrum(grid, M=10, amplitude=0.1, seed=42)
+
+        result = compute_dissipation_rate(state, eta=0.1, nu=0.1)
+        assert 'collisional' in result
+        assert 'resistive' in result
+        assert 'total' in result
+
+    def test_total_equals_sum(self):
+        """Test that total = collisional + resistive."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        state = initialize_random_spectrum(grid, M=10, amplitude=0.1, seed=42)
+
+        result = compute_dissipation_rate(state, eta=0.1, nu=0.1, hyper_r=2, hyper_n=2)
+        assert abs(result['total'] - (result['collisional'] + result['resistive'])) < 1e-10
+
+    def test_zero_state_zero_dissipation(self):
+        """Zero state should give zero dissipation."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        state = KRMHDState(
+            z_plus=jnp.zeros((8, 16, 9), dtype=complex),
+            z_minus=jnp.zeros((8, 16, 9), dtype=complex),
+            B_parallel=jnp.zeros((8, 16, 9), dtype=complex),
+            g=jnp.zeros((8, 16, 9, 11), dtype=complex),
+            M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0,
+            time=0.0, grid=grid,
+        )
+
+        result = compute_dissipation_rate(state, eta=1.0, nu=1.0)
+        assert result['collisional'] == 0.0
+        assert result['resistive'] == 0.0
+        assert result['total'] == 0.0
+
+    def test_zero_g_zero_collisional(self):
+        """When g=0, collisional dissipation should be zero."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        state = initialize_random_spectrum(grid, M=10, amplitude=0.1, seed=42)
+        # g is zero by default in initialize_random_spectrum
+
+        result = compute_dissipation_rate(state, eta=0.1, nu=1.0)
+        assert result['collisional'] == 0.0
+        assert result['resistive'] > 0.0
+
+    def test_zero_elsasser_zero_resistive(self):
+        """When z+=z-=0, resistive dissipation should be zero."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        state = initialize_random_spectrum(grid, M=10, amplitude=0.1, seed=42)
+        # Put energy in g at m>=2, zero out Elsasser fields
+        g_with_energy = state.g.at[:, :, :, 2].set(0.01 + 0j)
+        state = state.model_copy(update={
+            'z_plus': jnp.zeros_like(state.z_plus),
+            'z_minus': jnp.zeros_like(state.z_minus),
+            'g': g_with_energy,
+        })
+
+        result = compute_dissipation_rate(state, eta=1.0, nu=0.1)
+        assert result['resistive'] == 0.0
+        assert result['collisional'] > 0.0
+
+    def test_positive_dissipation_with_high_moments(self):
+        """State with z± energy and g energy at m>=2 should give positive dissipation."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        state = initialize_random_spectrum(grid, M=10, amplitude=0.1, seed=42)
+        # Manually seed m=2 to get collisional dissipation (m=0,1 are exempt)
+        g_with_energy = state.g.at[:, :, :, 2].set(0.01 + 0j)
+        state = state.model_copy(update={'g': g_with_energy})
+
+        result = compute_dissipation_rate(state, eta=0.1, nu=0.1)
+        assert result['resistive'] > 0.0
+        assert result['collisional'] > 0.0
+        assert result['total'] > 0.0
+
+    def test_consistency_with_energy_decay(self):
+        """Dissipation rate should predict energy change from one dissipation-only step."""
+        from krmhd.timestepping import gandalf_step
+        from krmhd.physics import energy
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_random_spectrum(grid, M=10, amplitude=0.1, seed=42)
+
+        eta = 0.5
+        dt = 0.001
+        hyper_r = 1
+
+        # Compute predicted dissipation rate
+        diss = compute_dissipation_rate(state, eta=eta, nu=0.0, hyper_r=hyper_r, hyper_n=1)
+
+        # Take one timestep (v_A=0 to minimize nonlinear effects, small dt)
+        state_new = gandalf_step(state, dt=dt, eta=eta, v_A=0.0, hyper_r=hyper_r)
+
+        E_before = energy(state)['total']
+        E_after = energy(state_new)['total']
+        dE = E_after - E_before
+
+        # dE should be approximately -dissipation_rate * dt
+        predicted_dE = -diss['resistive'] * dt
+        # Allow 10% relative error (RK2 + nonlinear coupling introduce small errors)
+        if abs(predicted_dE) > 1e-15:
+            rel_error = abs(dE - predicted_dE) / abs(predicted_dE)
+            assert rel_error < 0.1, (
+                f"Energy change {dE:.6e} doesn't match predicted {predicted_dE:.6e} "
+                f"(rel error {rel_error:.2%})"
+            )
+
+    def test_dissipation_scales_linearly(self):
+        """Dissipation rate should scale linearly with eta and nu."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        state = initialize_random_spectrum(grid, M=10, amplitude=0.1, seed=42)
+        # Seed m=2 for collisional dissipation
+        g_with_energy = state.g.at[:, :, :, 2].set(0.01 + 0j)
+        state = state.model_copy(update={'g': g_with_energy})
+
+        r1 = compute_dissipation_rate(state, eta=0.1, nu=0.1)
+        r2 = compute_dissipation_rate(state, eta=0.2, nu=0.1)
+        r3 = compute_dissipation_rate(state, eta=0.1, nu=0.2)
+
+        # Resistive should scale linearly with eta
+        assert abs(r2['resistive'] / r1['resistive'] - 2.0) < 1e-6
+        # Collisional should scale linearly with nu
+        assert abs(r3['collisional'] / r1['collisional'] - 2.0) < 1e-6
