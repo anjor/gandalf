@@ -620,6 +620,115 @@ def energy_spectrum_perpendicular_magnetic(
     return k_perp_centers, E_mag_perp
 
 
+@partial(jax.jit, static_argnames=('n_perp_bins',))
+def energy_spectrum_2d(
+    state: KRMHDState,
+    n_perp_bins: Optional[int] = None,
+) -> Tuple[Array, Array, Array]:
+    """
+    Compute 2D anisotropic energy spectrum E(k⊥, k∥).
+
+    Bins energy into a 2D grid of (k⊥, |k∥|) to reveal the anisotropic
+    turbulent cascade. Critical balance predicts energy concentrated along
+    k∥ ~ k⊥^(2/3) in the inertial range.
+
+    Args:
+        state: KRMHD state containing z_plus, z_minus fields.
+        n_perp_bins: Number of k⊥ bins (default: Nx // 2).
+
+    Returns:
+        Tuple of (k_perp_centers, k_par_values, E_2d) where:
+        - k_perp_centers: Bin centers for k⊥ axis [n_perp_bins]
+        - k_par_values: Discrete |kz| values (folded) [Nz//2 + 1]
+        - E_2d: Energy spectral density [n_perp_bins, Nz//2 + 1]
+
+    Normalization:
+        - Spectral density in k⊥ (divided by dk⊥), discrete in k∥.
+        - Parseval: sum(E_2d) * dk⊥ ≈ E_total.
+        - Marginal over k∥: sum(E_2d, axis=1) ≈ energy_spectrum_perpendicular.
+        - Marginal over k⊥: sum(E_2d, axis=0) * dk⊥ ≈ folded parallel spectrum.
+
+    Physics:
+        RMHD turbulence is anisotropic with k⊥ >> k∥. The 2D spectrum
+        reveals critical balance (Goldreich & Sridhar 1995): energy
+        concentrates along k∥ ~ k⊥^(2/3) in the inertial range.
+    """
+    grid = state.grid
+    if n_perp_bins is None:
+        n_perp_bins = grid.Nx // 2
+
+    if n_perp_bins < 2:
+        raise ValueError(f"n_perp_bins must be >= 2, got {n_perp_bins}")
+
+    z_plus = state.z_plus
+    z_minus = state.z_minus
+    kx = grid.kx
+    ky = grid.ky
+    kz = grid.kz
+    Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
+
+    # Wavenumber arrays
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]  # [1, 1, Nx//2+1]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]  # [1, Ny, 1]
+
+    # Energy density: E(k) = (1/2) k⊥² (|φ̂|² + |Â∥|²)
+    k_perp_squared = kx_3d**2 + ky_3d**2
+    phi = (z_plus + z_minus) / 2.0
+    A_parallel = (z_plus - z_minus) / 2.0
+    energy_density = 0.5 * k_perp_squared * (jnp.abs(phi)**2 + jnp.abs(A_parallel)**2)
+
+    # rfft doubling: kx=0 and kx=Nyquist count once, others twice
+    kx_zero = (kx_3d == 0.0)
+    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_middle = ~(kx_zero | kx_nyquist)
+    doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
+    energy_density = energy_density * doubling_factor
+
+    # k⊥ bins (same as energy_spectrum_perpendicular)
+    k_perp = jnp.sqrt(kx_3d**2 + ky_3d**2)
+    k_perp_max = jnp.sqrt(kx[-1]**2 + ky[Ny // 2]**2)
+    k_perp_bins = jnp.linspace(0, k_perp_max, n_perp_bins + 1)
+    k_perp_centers = 0.5 * (k_perp_bins[:-1] + k_perp_bins[1:])
+
+    # Folded |kz| axis: Nz//2 + 1 unique values [0, dkz, ..., (Nz//2)*dkz]
+    n_kpar = Nz // 2 + 1
+    k_par_values = jnp.abs(kz[:n_kpar])
+
+    # Map each kz index to its folded |kz| index
+    # kz from fftfreq: [0, 1, ..., Nz//2-1, -Nz//2, ..., -1] * dkz
+    # Indices 0..Nz//2 map to 0..Nz//2
+    # Indices Nz//2+1..Nz-1 map to Nz//2-1..1
+    kz_to_kpar = jnp.concatenate([
+        jnp.arange(n_kpar),
+        jnp.arange(Nz // 2 - 1, 0, -1),
+    ])  # shape [Nz]
+
+    # 2D binning via flattened linear index
+    k_perp_full = jnp.broadcast_to(k_perp, (Nz, Ny, Nx // 2 + 1))
+    k_perp_idx = jnp.digitize(k_perp_full.flatten(), k_perp_bins) - 1
+    k_perp_idx = jnp.clip(k_perp_idx, 0, n_perp_bins - 1)
+
+    kpar_idx_3d = kz_to_kpar[:, jnp.newaxis, jnp.newaxis]  # [Nz, 1, 1]
+    kpar_idx_3d = jnp.broadcast_to(kpar_idx_3d, (Nz, Ny, Nx // 2 + 1))
+    kpar_idx = kpar_idx_3d.flatten()
+
+    linear_idx = k_perp_idx * n_kpar + kpar_idx
+
+    E_2d_flat = segment_sum(
+        energy_density.flatten(),
+        linear_idx,
+        num_segments=n_perp_bins * n_kpar,
+    )
+    E_2d = E_2d_flat.reshape(n_perp_bins, n_kpar)
+
+    # Normalize: divide by N_perp (DFT normalization) and dk⊥ (spectral density)
+    N_perp = Nx * Ny
+    dk_perp = jnp.maximum(k_perp_bins[1] - k_perp_bins[0], 1e-10)
+    E_2d = E_2d / (N_perp * dk_perp)
+
+    return k_perp_centers, k_par_values, E_2d
+
+
 @partial(jax.jit)
 def energy_spectrum_parallel(
     state: KRMHDState,
@@ -1827,6 +1936,96 @@ def plot_energy_spectrum(
     if show:
         plt.show()
         plt.close()  # Close figure after showing to prevent memory leak
+    else:
+        plt.close()
+
+
+def plot_energy_spectrum_2d(
+    k_perp: Array,
+    k_par: Array,
+    E_2d: Array,
+    critical_balance: bool = True,
+    figsize: Tuple[float, float] = (10, 8),
+    filename: Optional[str] = None,
+    show: bool = True,
+) -> None:
+    """
+    Plot 2D anisotropic energy spectrum E(k⊥, k∥) as a colormap.
+
+    Shows energy distribution in the (k⊥, k∥) plane on log-log axes
+    with optional critical balance reference line k∥ ~ k⊥^(2/3).
+
+    Args:
+        k_perp: Perpendicular wavenumber bin centers [n_perp_bins]
+        k_par: Parallel wavenumber values [n_kpar]
+        E_2d: 2D energy spectrum [n_perp_bins, n_kpar]
+        critical_balance: If True, overlay k∥ ~ k⊥^(2/3) reference line
+        figsize: Figure size in inches
+        filename: If provided, save figure to this path
+        show: If True, display figure interactively
+    """
+    k_perp = np.array(k_perp)
+    k_par = np.array(k_par)
+    E_2d = np.array(E_2d)
+
+    # Skip k∥=0 for log scale (keep in returned data but don't plot)
+    if k_par[0] == 0.0 and len(k_par) > 1:
+        k_par_plot = k_par[1:]
+        E_2d_plot = E_2d[:, 1:]
+    else:
+        k_par_plot = k_par
+        E_2d_plot = E_2d
+
+    # Filter positive k⊥ for log scale
+    kp_mask = k_perp > 0
+    k_perp_plot = k_perp[kp_mask]
+    E_2d_plot = E_2d_plot[kp_mask, :]
+
+    # Mask zeros for LogNorm
+    E_plot = np.where(E_2d_plot > 0, E_2d_plot, np.nan)
+    finite = E_plot[np.isfinite(E_plot)]
+    if len(finite) == 0:
+        warnings.warn("No positive energy values to plot")
+        return
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    from matplotlib.colors import LogNorm
+    im = ax.pcolormesh(
+        k_perp_plot, k_par_plot, E_plot.T,
+        norm=LogNorm(vmin=finite.min(), vmax=finite.max()),
+        cmap='viridis', shading='auto',
+    )
+    plt.colorbar(im, ax=ax, label='E(k⊥, k∥)')
+
+    if critical_balance and len(k_perp_plot) > 1 and len(k_par_plot) > 1:
+        kp_line = np.logspace(
+            np.log10(k_perp_plot[0]),
+            np.log10(k_perp_plot[-1]),
+            50,
+        )
+        # Normalize so line passes through middle of plot
+        kp_ref = k_perp_plot[len(k_perp_plot) // 2]
+        kpar_ref = k_par_plot[len(k_par_plot) // 3]
+        kpar_line = kpar_ref * (kp_line / kp_ref) ** (2.0 / 3.0)
+        ax.plot(kp_line, kpar_line, 'w--', linewidth=2,
+                label='k∥ ~ k⊥^(2/3)')
+        ax.legend(fontsize=10)
+
+    ax.set_xlabel('k⊥', fontsize=12)
+    ax.set_ylabel('k∥', fontsize=12)
+    ax.set_title('2D Energy Spectrum E(k⊥, k∥)', fontsize=14)
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+
+    plt.tight_layout()
+
+    if filename:
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+
+    if show:
+        plt.show()
+        plt.close()
     else:
         plt.close()
 
