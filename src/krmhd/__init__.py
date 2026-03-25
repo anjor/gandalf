@@ -74,10 +74,12 @@ from krmhd.diagnostics import (
     energy_spectrum_1d,
     energy_spectrum_perpendicular,
     energy_spectrum_parallel,
+    energy_spectrum_2d,
     EnergyHistory,
     plot_state,
     plot_energy_history,
     plot_energy_spectrum,
+    plot_energy_spectrum_2d,
 )
 
 from krmhd.forcing import (

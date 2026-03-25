@@ -29,10 +29,12 @@ from krmhd.diagnostics import (
     energy_spectrum_perpendicular_kinetic,
     energy_spectrum_perpendicular_magnetic,
     energy_spectrum_parallel,
+    energy_spectrum_2d,
     EnergyHistory,
     plot_state,
     plot_energy_history,
     plot_energy_spectrum,
+    plot_energy_spectrum_2d,
     spectral_pad_and_ifft,
     interpolate_on_fine_grid,
     compute_magnetic_field_components,
@@ -554,6 +556,103 @@ class TestEnergySpectrumParallel:
         kz, E_parallel = energy_spectrum_parallel(state)
 
         assert jnp.allclose(E_parallel, 0.0, atol=1e-10), "Zero state has non-zero parallel spectrum"
+
+
+class TestEnergySpectrum2D:
+    """Test 2D anisotropic energy spectrum E(k⊥, k∥)."""
+
+    def test_2d_spectrum_shape(self):
+        """Test output shapes match expected dimensions."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=1.0, seed=42)
+
+        n_perp_bins = 16
+        k_perp, k_par, E_2d = energy_spectrum_2d(state, n_perp_bins=n_perp_bins)
+
+        n_kpar = grid.Nz // 2 + 1
+        assert k_perp.shape == (n_perp_bins,), f"k_perp shape {k_perp.shape}"
+        assert k_par.shape == (n_kpar,), f"k_par shape {k_par.shape}"
+        assert E_2d.shape == (n_perp_bins, n_kpar), f"E_2d shape {E_2d.shape}"
+        assert jnp.all(E_2d >= 0), "E_2d has negative values"
+
+    def test_2d_spectrum_zero_state(self):
+        """Zero state should produce zero 2D spectrum."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        state = KRMHDState(
+            z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
+            M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0, time=0.0, grid=grid,
+        )
+
+        k_perp, k_par, E_2d = energy_spectrum_2d(state, n_perp_bins=16)
+        assert jnp.allclose(E_2d, 0.0, atol=1e-10), "Zero state has non-zero 2D spectrum"
+
+    def test_2d_spectrum_single_mode(self):
+        """Single Alfvén wave energy lands in correct (k⊥, k∥) bin."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        state = initialize_alfven_wave(grid, M=10, kx_mode=1.0, ky_mode=0.0, kz_mode=2.0, amplitude=0.1)
+
+        k_perp, k_par, E_2d = energy_spectrum_2d(state, n_perp_bins=32)
+
+        # Find peak location
+        peak_idx = jnp.unravel_index(jnp.argmax(E_2d), E_2d.shape)
+        k_perp_peak = k_perp[peak_idx[0]]
+        k_par_peak = k_par[peak_idx[1]]
+
+        # Expected: k⊥ = 1.0, |k∥| = 2.0
+        dk_perp = k_perp[1] - k_perp[0]
+        assert jnp.abs(k_perp_peak - 1.0) < 2 * dk_perp, \
+            f"k⊥ peak at {k_perp_peak:.2f}, expected 1.0"
+        assert jnp.abs(k_par_peak - 2.0) < 0.5, \
+            f"k∥ peak at {k_par_peak:.2f}, expected 2.0"
+
+    def test_2d_spectrum_parseval(self):
+        """Total integral of 2D spectrum should approximate E_total."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=1.0, seed=42)
+
+        k_perp, k_par, E_2d = energy_spectrum_2d(state, n_perp_bins=32)
+
+        dk_perp = k_perp[1] - k_perp[0]
+        E_from_2d = jnp.sum(E_2d) * dk_perp
+
+        energies = compute_energy(state)
+        E_total = energies['total']
+
+        rel_error = jnp.abs(E_from_2d - E_total) / E_total
+        assert rel_error < 0.15, \
+            f"2D spectrum integral {E_from_2d:.6f} != E_total {E_total:.6f} (error {rel_error:.2%})"
+
+    def test_2d_spectrum_marginal_matches_perpendicular(self):
+        """Summing 2D spectrum over k∥ should approximate E(k⊥)."""
+        grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=1.0, seed=42)
+
+        n_bins = 32
+        k_perp_2d, k_par, E_2d = energy_spectrum_2d(state, n_perp_bins=n_bins)
+        k_perp_1d, E_perp_1d = energy_spectrum_perpendicular(state, n_bins=n_bins)
+
+        # Marginal: sum over k∥ axis (no dk factor since k∥ is discrete)
+        E_perp_from_2d = jnp.sum(E_2d, axis=1)
+
+        # Should match within 10%
+        # Compare only bins with significant energy
+        max_E = jnp.max(E_perp_1d)
+        significant = E_perp_1d > 0.01 * max_E
+        if jnp.any(significant):
+            rel_errors = jnp.abs(E_perp_from_2d[significant] - E_perp_1d[significant]) / E_perp_1d[significant]
+            assert jnp.max(rel_errors) < 0.15, \
+                f"Marginal k∥ mismatch: max relative error {jnp.max(rel_errors):.2%}"
+
+    def test_2d_spectrum_plot_runs(self):
+        """Verify plot function runs without error."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_random_spectrum(grid, M=10, alpha=5/3, amplitude=1.0, seed=42)
+
+        k_perp, k_par, E_2d = energy_spectrum_2d(state, n_perp_bins=16)
+        plot_energy_spectrum_2d(k_perp, k_par, E_2d, show=False)
 
 
 class TestEnergyHistory:
