@@ -70,6 +70,7 @@ import jax.numpy as jnp
 from jax import Array
 from jax.ops import segment_sum
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 import numpy as np
 
 from krmhd.physics import KRMHDState, energy as compute_energy
@@ -196,7 +197,7 @@ def energy_spectrum_1d(
 
     # Handle rfft doubling for reality condition
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -327,7 +328,7 @@ def energy_spectrum_perpendicular(
     
     # Handle rfft doubling
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -453,7 +454,7 @@ def energy_spectrum_perpendicular_kinetic(
 
     # Handle rfft doubling for reality condition
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -579,7 +580,7 @@ def energy_spectrum_perpendicular_magnetic(
 
     # Handle rfft doubling for reality condition
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -679,7 +680,7 @@ def energy_spectrum_2d(
 
     # rfft doubling: kx=0 and kx=Nyquist count once, others twice
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -695,13 +696,9 @@ def energy_spectrum_2d(
     k_par_values = jnp.abs(kz[:n_kpar])
 
     # Map each kz index to its folded |kz| index
-    # kz from fftfreq: [0, 1, ..., Nz//2-1, -Nz//2, ..., -1] * dkz
-    # Indices 0..Nz//2 map to 0..Nz//2
-    # Indices Nz//2+1..Nz-1 map to Nz//2-1..1
-    kz_to_kpar = jnp.concatenate([
-        jnp.arange(n_kpar),
-        jnp.arange(Nz // 2 - 1, 0, -1),
-    ])  # shape [Nz]
+    # Works for both even and odd Nz
+    kz_indices = jnp.arange(Nz)
+    kz_to_kpar = jnp.where(kz_indices <= Nz // 2, kz_indices, Nz - kz_indices)
 
     # 2D binning via flattened linear index
     k_perp_full = jnp.broadcast_to(k_perp, (Nz, Ny, Nx // 2 + 1))
@@ -804,7 +801,7 @@ def energy_spectrum_parallel(
     
     # Handle rfft doubling
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     doubling_factor = jnp.where(kx_middle, 2.0, 1.0)
     energy_density = energy_density * doubling_factor
@@ -1022,7 +1019,7 @@ def compute_turbulence_diagnostics(
 
     # rfft symmetry factors
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
     rfft_factor = jnp.where(kx_middle, 2.0, 1.0)
 
@@ -1169,7 +1166,7 @@ def compute_dissipation_rate(
 
     # rfft weighting (matching physics.py:1500-1502)
     kx_zero = (kx_3d == 0.0)
-    kx_nyquist = (kx_3d == Nx // 2) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
+    kx_nyquist = (kx_3d == kx_3d[0, 0, -1]) if (Nx % 2 == 0) else jnp.zeros_like(kx_3d, dtype=bool)
     kx_middle = ~(kx_zero | kx_nyquist)
 
     resistive = float(
@@ -2085,7 +2082,6 @@ def plot_energy_spectrum_2d(
 
     fig, ax = plt.subplots(figsize=figsize)
 
-    from matplotlib.colors import LogNorm
     im = ax.pcolormesh(
         k_perp_plot, k_par_plot, E_plot.T,
         norm=LogNorm(vmin=finite.min(), vmax=finite.max()),
