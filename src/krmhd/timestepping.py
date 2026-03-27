@@ -1,14 +1,16 @@
 """
-Time integration for KRMHD simulations using GANDALF integrating factor + RK2.
+Time integration for KRMHD simulations using a mixed integrating-factor scheme.
 
 This module implements the original GANDALF time-stepping algorithm from the thesis
 Chapter 2, Equations 2.13-2.19:
 - Integrating factor for linear propagation term (analytically exact)
-- RK2 (midpoint method) for nonlinear terms
+- RK2 (midpoint method) for Elsasser nonlinear terms
+- RK4 (Lawson form) for Hermite nonlinear terms
 - Exponential integration for dissipation
 
-The integrating factor e^(±ikz*t) removes the stiff linear term, allowing the
-nonlinear terms to be integrated with RK2 (2nd-order accurate).
+The integrating factor e^(±ikz*t) removes the stiff linear term. The Elsasser
+sector retains the thesis midpoint RK2 update, while the passive Hermite
+sector uses a Lawson-form RK4 update for stable externally driven advection.
 
 Example usage:
     >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
@@ -323,17 +325,20 @@ def _gandalf_step_jit(
     streaming_P_inv_T: Array = None,
 ) -> KRMHDFields:
     """
-    JIT-compiled GANDALF integrating factor + RK2 timestepper.
+    JIT-compiled mixed integrating-factor timestepper.
 
     Implements thesis Equations 2.13-2.25:
-    1. Half-step: Apply integrating factor and advance with initial RHS
-    2. Compute midpoint nonlinear terms
-    3. Full step: Use midpoint RHS for final update
-    4. Apply dissipation exactly using exponential factors
+    1. Elsasser half-step: Apply integrating factor and advance with initial RHS
+    2. Elsasser midpoint: Compute midpoint nonlinear terms
+    3. Hermite RK4: Advance passive Hermite moments in Lawson form
+    4. Full step: Use midpoint/RK4 updates for final state
+    5. Apply dissipation exactly using exponential factors
 
     The integrating factor e^(±ikz*dt) handles the linear propagation term
-    ∓ikz*ξ∓ analytically, removing stiffness. RK2 (midpoint method) gives
-    2nd-order accuracy for the nonlinear terms.
+    ∓ikz*ξ∓ analytically, removing stiffness. The Elsasser sector keeps the
+    original midpoint RK2 update, while the passive Hermite sector uses a
+    classical RK4 update in the interaction picture to avoid the unconditional
+    midpoint-instability for externally advected Hermite modes.
 
     Args:
         fields: Current KRMHD fields
@@ -366,9 +371,10 @@ def _gandalf_step_jit(
         Updated KRMHDFields after full timestep
 
     Note:
-        This function evaluates _krmhd_rhs_jit 3x per step (vs 2x pre-IF):
-        1x with real kz (z± NL extraction), 2x with kz=0 (g NL-only, avoids
-        float32 cancellation from streaming subtraction).
+        This function evaluates _krmhd_rhs_jit 6x per step:
+        2x with real kz for the Elsasser midpoint update and 4x with kz=0 for
+        Hermite RK4 nonlinear stages. The kz=0 Hermite calls avoid float32
+        cancellation from subtracting streaming computed two different ways.
     """
     # Build 3D arrays
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
@@ -391,8 +397,48 @@ def _gandalf_step_jit(
     phase_plus_full = jnp.exp(+1j * kz_3d * dt)
     phase_minus_full = jnp.exp(-1j * kz_3d * dt)
 
+    # Hermite helper: evaluate nonlinear-only RHS with streaming removed exactly.
+    kz_zero = jnp.zeros_like(kz)
+
+    def compute_nl_g(stage_fields: KRMHDFields) -> Array:
+        """Evaluate the Hermite nonlinear RHS with kz forced to zero."""
+        return _krmhd_rhs_jit(
+            stage_fields,
+            kx,
+            ky,
+            kz_zero,
+            dealias_mask,
+            0.0,
+            v_A,
+            beta_i,
+            nu,
+            Lambda,
+            M,
+            Nz,
+            Ny,
+            Nx,
+        ).g
+
+    # Streaming integrating-factor phases for Hermite moments:
+    # exp(-i * sqrt(beta_i) * kz * eigenvalue * dt)
+    kz_4d = kz[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
+    evals = streaming_eigenvalues[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
+    g_phase_half = jnp.exp(-1j * jnp.sqrt(beta_i) * kz_4d * evals * dt / 2.0)
+    g_phase_full = g_phase_half ** 2
+
+    def apply_streaming_if(g_arr, phase):
+        """Apply streaming integrating factor: rotate to eigenspace, phase, rotate back.
+
+        Note: At float32, P_inv @ P != I exactly (error ~6e-8), causing ~0.3% energy
+        drift per application. This is acceptable for physics runs where collisional
+        damping dominates the error. For precision-critical work, use float64 arrays.
+        """
+        g_eigen = g_arr @ streaming_P_inv_T  # project to eigenspace
+        g_eigen = g_eigen * phase             # apply per-kz, per-eigenvalue phase
+        return g_eigen @ streaming_P_T        # project back
+
     # =========================================================================
-    # Step 1: Half-step (thesis Eq. 2.14-2.17)
+    # Step 1: Elsasser half-step (thesis Eq. 2.14-2.17)
     # =========================================================================
 
     # Compute initial RHS (with dissipation temporarily set to 0)
@@ -411,47 +457,24 @@ def _gandalf_step_jit(
     z_plus_half = phase_plus_half * (fields.z_plus + phase_plus_half * (dt / 2.0) * nl_plus_0)
     z_minus_half = phase_minus_half * (fields.z_minus + phase_minus_half * (dt / 2.0) * nl_minus_0)
 
-    # Hermite moment nonlinear-only RHS: compute with kz=0 to eliminate streaming terms
-    # This avoids float32 cancellation error from subtracting streaming computed two ways
-    kz_zero = jnp.zeros_like(kz)
-    nl_g_rhs_0 = _krmhd_rhs_jit(
-        fields, kx, ky, kz_zero, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
-    )
-    nl_g_0 = nl_g_rhs_0.g
-    kz_4d = kz[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
-
-    # Streaming integrating factor phases: exp(-i * sqrt(beta_i) * kz * eigenvalue * dt)
-    evals = streaming_eigenvalues[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
-    g_phase_half = jnp.exp(-1j * jnp.sqrt(beta_i) * kz_4d * evals * dt / 2.0)
-    g_phase_full = g_phase_half ** 2
-
-    def apply_streaming_if(g_arr, phase):
-        """Apply streaming integrating factor: rotate to eigenspace, phase, rotate back.
-
-        Note: At float32, P_inv @ P != I exactly (error ~6e-8), causing ~0.3% energy
-        drift per application. This is acceptable for physics runs where collisional
-        damping dominates the error. For precision-critical work, use float64 arrays.
-        """
-        g_eigen = g_arr @ streaming_P_inv_T  # project to eigenspace
-        g_eigen = g_eigen * phase             # apply per-kz, per-eigenvalue phase
-        return g_eigen @ streaming_P_T        # project back
-
-    # g_half = IF(g + IF(dt/2 * NL)) — mirrors the z± pattern
-    g_half = apply_streaming_if(
-        fields.g + apply_streaming_if((dt / 2.0) * nl_g_0, g_phase_half),
-        g_phase_half,
-    )
+    # Hermite RK4 stage 1: nonlinear-only RHS at t_n
+    nl_g_1 = compute_nl_g(fields)
+    g_base_half = apply_streaming_if(fields.g, g_phase_half)
+    g_base_full = apply_streaming_if(fields.g, g_phase_full)
+    nl_g_1_half = apply_streaming_if(nl_g_1, g_phase_half)
+    nl_g_1_full = apply_streaming_if(nl_g_1, g_phase_full)
+    g_stage_2 = g_base_half + (dt / 2.0) * nl_g_1_half
 
     fields_half = KRMHDFields(
         z_plus=z_plus_half,
         z_minus=z_minus_half,
         B_parallel=fields.B_parallel,
-        g=g_half,
+        g=g_stage_2,
         time=fields.time + dt / 2.0,
     )
 
     # =========================================================================
-    # Step 2: Compute midpoint RHS (thesis Eq. 2.18)
+    # Step 2: Compute midpoint RHS / Hermite RK4 stage 2
     # =========================================================================
 
     rhs_half = _krmhd_rhs_jit(
@@ -462,24 +485,44 @@ def _gandalf_step_jit(
     nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
     nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
 
-    # Hermite moment nonlinear-only RHS at midpoint (kz=0 to kill streaming)
-    nl_g_rhs_half = _krmhd_rhs_jit(
-        fields_half, kx, ky, kz_zero, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
-    )
-    nl_g_half = nl_g_rhs_half.g
+    # Hermite RK4 stage 2 at t_n + dt/2, using the Elsasser midpoint fields.
+    nl_g_2 = compute_nl_g(fields_half)
 
     # =========================================================================
-    # Step 3: Full step using midpoint RHS (thesis Eq. 2.19-2.22)
+    # Step 3: Full step using midpoint RHS (Elsasser) and RK4 stage assembly (Hermite)
     # =========================================================================
 
     # Elsasser full step: ξ±,n+1 = e^(±ikz·Δt) · [ξ±,n + e^(±ikz·Δt) · Δt · NL^(n+1/2)]
     z_plus_new = phase_plus_full * (fields.z_plus + phase_plus_full * dt * nl_plus_half)
     z_minus_new = phase_minus_full * (fields.z_minus + phase_minus_full * dt * nl_minus_half)
 
-    # Hermite moment full-step with integrating factor
-    g_new = apply_streaming_if(
-        fields.g + apply_streaming_if(dt * nl_g_half, g_phase_full),
-        g_phase_full,
+    # Hermite RK4 stage 3: same midpoint Elsasser fields, updated Hermite state.
+    g_stage_3 = g_base_half + (dt / 2.0) * nl_g_2
+    fields_half_rk4 = KRMHDFields(
+        z_plus=z_plus_half,
+        z_minus=z_minus_half,
+        B_parallel=fields.B_parallel,
+        g=g_stage_3,
+        time=fields.time + dt / 2.0,
+    )
+    nl_g_3 = compute_nl_g(fields_half_rk4)
+    nl_g_2_half = apply_streaming_if(nl_g_2, g_phase_half)
+    nl_g_3_half = apply_streaming_if(nl_g_3, g_phase_half)
+
+    # Hermite RK4 stage 4 uses the full-step Elsasser state.
+    g_stage_4 = g_base_full + dt * nl_g_3_half
+    fields_full_rk4 = KRMHDFields(
+        z_plus=z_plus_new,
+        z_minus=z_minus_new,
+        B_parallel=fields.B_parallel,
+        g=g_stage_4,
+        time=fields.time + dt,
+    )
+    nl_g_4 = compute_nl_g(fields_full_rk4)
+
+    # Lawson-form RK4 update in the interaction picture.
+    g_new = g_base_full + (dt / 6.0) * (
+        nl_g_1_full + 2.0 * nl_g_2_half + 2.0 * nl_g_3_half + nl_g_4
     )
 
     # =========================================================================
@@ -560,15 +603,17 @@ def gandalf_step(
     hyper_n: int = 1,
 ) -> KRMHDState:
     """
-    Advance KRMHD state using GANDALF integrating factor + RK2 method.
+    Advance KRMHD state using the mixed GANDALF integrating-factor method.
 
     This implements the original GANDALF algorithm from thesis Chapter 2:
     1. Integrating factor for linear propagation (analytically exact)
-    2. RK2 (midpoint method) for nonlinear terms (2nd-order accurate)
-    3. Exponential integration for dissipation (exact)
+    2. RK2 (midpoint method) for Elsasser nonlinear terms
+    3. RK4 (Lawson form) for passive Hermite nonlinear terms
+    4. Exponential integration for dissipation (exact)
 
     The integrating factor e^(±ikz*t) removes the stiff linear term ∓ikz*ξ∓,
-    allowing RK2 to integrate the nonlinear bracket terms efficiently.
+    allowing the Alfvénic sector to retain the original midpoint update while
+    the passive Hermite sector uses a stable higher-order advection update.
 
     Args:
         state: Current KRMHD state at time t
@@ -614,9 +659,9 @@ def gandalf_step(
 
     Physics:
         - Linear propagation: Handled exactly (unconditionally stable)
-        - Nonlinear terms: O(dt²) accurate (RK2)
+        - Nonlinear terms: Elsasser O(dt²), Hermite O(dt⁴) in Lawson form
         - Dissipation: Exact exponential decay
-        - Overall: O(dt²) convergence
+        - Overall: O(dt²) for the coupled mixed scheme
         - Energy conservation: Excellent in inviscid limit
 
         Hyper-dissipation (r>1) concentrates dissipation at small scales:
@@ -641,24 +686,18 @@ def gandalf_step(
 
     Reference:
         - Thesis Chapter 2, §2.4 - GANDALF Algorithm
-        - Eqs. 2.13-2.25 - Integrating factor + RK2 implementation
+        - Eqs. 2.13-2.25 - Integrating factor implementation
         - Thesis §2.5.2 - Hyper-dissipation for inertial range studies
     """
     # Use provided nu or fall back to state.nu
     nu_effective = nu if nu is not None else state.nu
 
     # Input validation for hyper parameters
-    if hyper_r < 1:
-        raise ValueError(
-            f"hyper_r must be >= 1 (got {hyper_r}). "
-            "Use r=1 for standard dissipation, r>1 for hyper-dissipation."
-        )
+    if hyper_r not in (1, 2, 4, 8):
+        raise ValueError("hyper_r must be 1, 2, 4, or 8")
 
-    if hyper_n < 1:
-        raise ValueError(
-            f"hyper_n must be >= 1 (got {hyper_n}). "
-            "Use n=1 for standard collisions, n>1 for hyper-collisions."
-        )
+    if hyper_n not in (1, 2, 4):
+        raise ValueError("hyper_n must be 1, 2, or 4")
 
     # Validate M for collision operator (prevents division by zero)
     # Collision damping rate = ν·(m/M)^n requires M >= 2 for well-defined rates
