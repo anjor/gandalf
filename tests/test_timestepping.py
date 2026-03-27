@@ -1316,7 +1316,7 @@ class TestHermiteIntegratingFactor:
         assert jnp.all(jnp.isfinite(current.g))
 
     def test_step_preserves_dealiased_hermite_support(self):
-        """A dealiased Hermite state should remain in-band after timestepping."""
+        """No-regression case: a clean Hermite state should stay in-band over repeated steps."""
         from krmhd.physics import KRMHDState, initialize_hermite_moments
 
         grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
@@ -1336,6 +1336,9 @@ class TestHermiteIntegratingFactor:
             grid=grid,
         )
 
+        # With z± = 0 there is no nonlinear Hermite drive; this checks that a
+        # clean state stays clean. The nonlinear-drive cleanup path is covered
+        # separately below.
         assert jnp.allclose(state.g * (~grid.dealias_mask)[..., jnp.newaxis], 0.0, atol=1e-6)
 
         current = state
