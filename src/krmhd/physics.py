@@ -1195,8 +1195,10 @@ def initialize_hermite_moments(
         key, shape=(grid.Nz, grid.Ny, grid.Nx), dtype=jnp.float32
     )
 
-    # Transform to Fourier space - rfftn automatically enforces reality condition
-    perturbation_fourier = rfftn_forward(perturbation_real)
+    # Transform to Fourier space and project into the resolved spectral band.
+    # This keeps seeded Hermite perturbations consistent with the 2/3-rule
+    # assumptions used by subsequent nonlinear bracket evaluations.
+    perturbation_fourier = dealias(rfftn_forward(perturbation_real), grid.dealias_mask)
 
     # Use jnp.where instead of if statement for vmap compatibility (Issue #83)
     # When perturbation_amplitude=0, this effectively sets g_1 to zero
