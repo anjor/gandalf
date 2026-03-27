@@ -634,30 +634,35 @@ class TestHyperdissipation:
         dt = 0.01
         eta = 1.0   # Stronger for normalized dissipation (eta·dt = 0.01 << 50)
         nu = 1.0    # Stronger collision frequency (nu·dt = 0.01 << 50)
-        state.nu = nu
         v_A = 1.0
         n_steps = 10  # Multiple steps to accumulate measurable dissipation
 
         # Evolve with BOTH hyper-resistivity (r=2) and hyper-collisions (n=2)
         state_dual = state
         for _ in range(n_steps):
-            state_dual = gandalf_step(state_dual, dt, eta=eta, v_A=v_A, hyper_r=2, hyper_n=2)
+            state_dual = gandalf_step(
+                state_dual, dt, eta=eta, v_A=v_A, nu=nu, hyper_r=2, hyper_n=2
+            )
 
-        # Also evolve with ONLY resistivity (n=1) for comparison
+        # Also evolve with ONLY resistivity for comparison.
         state_resist_only = state
         for _ in range(n_steps):
-            state_resist_only = gandalf_step(state_resist_only, dt, eta=eta, v_A=v_A, hyper_r=2, hyper_n=1)
+            state_resist_only = gandalf_step(
+                state_resist_only, dt, eta=eta, v_A=v_A, nu=0.0, hyper_r=2, hyper_n=1
+            )
 
-        # Also evolve with ONLY collisions (r=1) for comparison
+        # Also evolve with ONLY collisions for comparison.
         state_collide_only = state
         for _ in range(n_steps):
-            state_collide_only = gandalf_step(state_collide_only, dt, eta=eta, v_A=v_A, hyper_r=1, hyper_n=2)
+            state_collide_only = gandalf_step(
+                state_collide_only, dt, eta=0.0, v_A=v_A, nu=nu, hyper_r=1, hyper_n=2
+            )
 
         # Compute Hermite moment energy (excluding m=0,1 which are conserved by collisions)
         # Sum over m >= 2 to see the effect of collision damping
-        E_dual_high = jnp.sum(jnp.abs(state_dual.g[2:, :, :, :])**2)
-        E_resist_only_high = jnp.sum(jnp.abs(state_resist_only.g[2:, :, :, :])**2)
-        E_collide_only_high = jnp.sum(jnp.abs(state_collide_only.g[2:, :, :, :])**2)
+        E_dual_high = jnp.sum(jnp.abs(state_dual.g[:, :, :, 2:])**2)
+        E_resist_only_high = jnp.sum(jnp.abs(state_resist_only.g[:, :, :, 2:])**2)
+        E_collide_only_high = jnp.sum(jnp.abs(state_collide_only.g[:, :, :, 2:])**2)
 
         # With both mechanisms, high-m energy should be lower than either mechanism alone
         # Collision damping primarily affects m >= 2 moments
@@ -1427,3 +1432,48 @@ class TestHermiteIntegratingFactor:
             "In-band Hermite content should survive the nonlinear-drive cleanup step"
         assert jnp.allclose(high_k, 0.0, atol=1e-6), \
             "Nonlinear Hermite evolution should still project unresolved modes away"
+
+    def test_hermite_external_advection_remains_bounded(self):
+        """Low-collisionality Hermite advection should remain bounded under long integration."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        M = 8
+
+        x = jnp.linspace(0.0, 2.0 * jnp.pi, grid.Nx, endpoint=False)
+        y = jnp.linspace(0.0, 2.0 * jnp.pi, grid.Ny, endpoint=False)
+        z = jnp.linspace(0.0, 2.0 * jnp.pi, grid.Nz, endpoint=False)
+        Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
+
+        # Use identical z± so Psi = 0 and g is externally advected by Phi without
+        # passive-sector back reaction. The mixed kz dependence keeps Phi from
+        # being trivially steady, which is where the old midpoint Hermite update
+        # exhibited strong long-time growth.
+        phi_real = 0.2 * (jnp.sin(X + Y) + 0.5 * jnp.cos(Y - Z))
+        phi = rfftn_forward(phi_real).astype(jnp.complex64) * grid.dealias_mask
+
+        g1_real = 1e-3 * (jnp.cos(2.0 * X - Y + Z) + 0.5 * jnp.sin(X - 2.0 * Y + Z))
+        g1 = rfftn_forward(g1_real).astype(jnp.complex64) * grid.dealias_mask
+
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64)
+        g = g.at[:, :, :, 1].set(g1)
+
+        state = KRMHDState(
+            z_plus=phi,
+            z_minus=phi,
+            B_parallel=jnp.zeros_like(phi),
+            g=g,
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.0,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        current = state
+        for _ in range(200):
+            current = gandalf_step(current, dt=0.1, eta=0.0, v_A=1.0, nu=0.0)
+
+        ratio = float(jnp.sum(jnp.abs(current.g) ** 2) / jnp.sum(jnp.abs(state.g) ** 2))
+        assert ratio < 2.0, f"Hermite energy grew too much under external advection: {ratio:.3f}"
+        assert jnp.all(jnp.isfinite(current.g)), "Hermite moments contain NaN/Inf after long advection run"

@@ -936,8 +936,10 @@ def g0_rhs(
     bracket_psi_g1 = poisson_bracket_3d(psi, g1, kx, ky, Nz, Ny, Nx, dealias_mask)
     term3 = jnp.sqrt(beta_i / 2.0) * bracket_psi_g1
 
-    # Assemble RHS
-    rhs = -bracket_phi_g0 - term2 - term3
+    # Assemble RHS and defensively reproject after the linear combination.
+    # Each Poisson bracket is already dealiased individually, but the sum can
+    # pick up tiny out-of-band round-off that should not accumulate over long runs.
+    rhs = (-bracket_phi_g0 - term2 - term3) * dealias_mask
 
     # Zero out k=0 mode
     rhs = zero_k0_mode(rhs)
@@ -1012,8 +1014,8 @@ def g1_rhs(
     bracket_psi_combined = poisson_bracket_3d(psi, combined_term, kx, ky, Nz, Ny, Nx, dealias_mask)
     term3 = jnp.sqrt(beta_i) * bracket_psi_combined
 
-    # Assemble RHS
-    rhs = -bracket_phi_g1 - term2 - term3
+    # Assemble RHS and defensively reproject after the linear combination.
+    rhs = (-bracket_phi_g1 - term2 - term3) * dealias_mask
 
     # Zero out k=0 mode
     rhs = zero_k0_mode(rhs)
@@ -1115,8 +1117,9 @@ def gm_rhs(
     bracket_psi_coupled = poisson_bracket_3d(psi, coupled_term, kx, ky, Nz, Ny, Nx, dealias_mask)
     term3 = jnp.sqrt(beta_i) * bracket_psi_coupled
 
-    # Assemble RHS (collisions handled by exponential step in timestepper)
-    rhs = -bracket_phi_gm - term2 - term3
+    # Assemble RHS and defensively reproject after the linear combination.
+    # Collisions are handled by the exponential step in the timestepper.
+    rhs = (-bracket_phi_gm - term2 - term3) * dealias_mask
 
     # Zero out k=0 mode
     rhs = zero_k0_mode(rhs)

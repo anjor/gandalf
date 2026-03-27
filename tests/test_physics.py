@@ -2070,6 +2070,37 @@ class TestHermiteMomentRHS:
                         grid.dealias_mask, 5, beta_i, grid.Nz, grid.Ny, grid.Nx)
         assert jnp.allclose(rhs_gm[0, 0, 0], 0.0), "gm_rhs k=0 mode should be zero"
 
+    def test_rhs_projects_dirty_inputs_back_to_resolved_band(self):
+        """Hermite RHS assembly should defensively reproject unresolved support away."""
+        from krmhd.spectral import rfftn_forward
+
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        M = 6
+
+        key = jax.random.PRNGKey(7)
+        key_g, key_zp, key_zm = jax.random.split(key, 3)
+
+        g_real = jax.random.normal(key_g, (grid.Nz, grid.Ny, grid.Nx, M + 1), dtype=jnp.float32)
+        z_plus_real = jax.random.normal(key_zp, (grid.Nz, grid.Ny, grid.Nx), dtype=jnp.float32)
+        z_minus_real = jax.random.normal(key_zm, (grid.Nz, grid.Ny, grid.Nx), dtype=jnp.float32)
+
+        g = jnp.stack([rfftn_forward(g_real[:, :, :, m]) for m in range(M + 1)], axis=-1)
+        z_plus = rfftn_forward(z_plus_real)
+        z_minus = rfftn_forward(z_minus_real)
+
+        assert grid.dealias_mask.dtype == jnp.bool_, "dealias_mask must remain boolean for ~mask tests"
+
+        rhs_g0 = g0_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, 1.0, grid.Nz, grid.Ny, grid.Nx)
+        rhs_g1 = g1_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, 1.0, 1.5, grid.Nz, grid.Ny, grid.Nx)
+        rhs_gm = gm_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
+                        grid.dealias_mask, 3, 1.0, grid.Nz, grid.Ny, grid.Nx)
+
+        assert jnp.allclose(rhs_g0 * (~grid.dealias_mask), 0.0, atol=1e-6)
+        assert jnp.allclose(rhs_g1 * (~grid.dealias_mask), 0.0, atol=1e-6)
+        assert jnp.allclose(rhs_gm * (~grid.dealias_mask), 0.0, atol=1e-6)
+
 
 class TestHyperdiffusion:
     """Test suite for hyper-dissipation operators."""
