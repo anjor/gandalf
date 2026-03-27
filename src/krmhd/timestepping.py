@@ -442,6 +442,9 @@ def _gandalf_step_jit(
     # =========================================================================
 
     # Compute initial RHS (with dissipation temporarily set to 0)
+    # Note: rhs_0 and nl_g_1 both evaluate the same state, but nl_g_1 uses kz=0
+    # to remove the linear streaming term exactly. Reusing rhs_0.g here would
+    # reintroduce the float32 cancellation that motivated the split path.
     rhs_0 = _krmhd_rhs_jit(
         fields, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
     )
@@ -486,6 +489,9 @@ def _gandalf_step_jit(
     nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
 
     # Hermite RK4 stage 2 at t_n + dt/2, using the Elsasser midpoint fields.
+    # Stages 2 and 3 deliberately share the same midpoint Elsasser state because
+    # the Hermite hierarchy is passive: g samples Phi/Psi supplied by z±, but it
+    # does not feed back on the Alfvénic sector during the sub-stages.
     nl_g_2 = compute_nl_g(fields_half)
 
     # =========================================================================
@@ -694,10 +700,10 @@ def gandalf_step(
 
     # Input validation for hyper parameters
     if hyper_r not in (1, 2, 4, 8):
-        raise ValueError("hyper_r must be 1, 2, 4, or 8")
+        raise ValueError(f"hyper_r must be 1, 2, 4, or 8 (got {hyper_r})")
 
     if hyper_n not in (1, 2, 4):
-        raise ValueError("hyper_n must be 1, 2, or 4")
+        raise ValueError(f"hyper_n must be 1, 2, or 4 (got {hyper_n})")
 
     # Validate M for collision operator (prevents division by zero)
     # Collision damping rate = ν·(m/M)^n requires M >= 2 for well-defined rates

@@ -2088,6 +2088,8 @@ class TestHermiteMomentRHS:
         z_plus = rfftn_forward(z_plus_real)
         z_minus = rfftn_forward(z_minus_real)
 
+        assert grid.dealias_mask.dtype == jnp.bool_, "dealias_mask must remain boolean for ~mask tests"
+
         rhs_g0 = g0_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
                         grid.dealias_mask, 1.0, grid.Nz, grid.Ny, grid.Nx)
         rhs_g1 = g1_rhs(g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,

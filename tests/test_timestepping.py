@@ -1475,5 +1475,5 @@ class TestHermiteIntegratingFactor:
             current = gandalf_step(current, dt=0.1, eta=0.0, v_A=1.0, nu=0.0)
 
         ratio = float(jnp.sum(jnp.abs(current.g) ** 2) / jnp.sum(jnp.abs(state.g) ** 2))
-        assert ratio < 5.0, f"Hermite energy grew too much under external advection: {ratio:.3f}"
+        assert ratio < 2.0, f"Hermite energy grew too much under external advection: {ratio:.3f}"
         assert jnp.all(jnp.isfinite(current.g)), "Hermite moments contain NaN/Inf after long advection run"
