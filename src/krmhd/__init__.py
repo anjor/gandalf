@@ -23,7 +23,7 @@ Physical processes:
 This is a modern Python rewrite of the legacy GANDALF Fortran+CUDA code.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.4.1"
 __author__ = "anjor"
 __email__ = "anjor@umd.edu"
 
