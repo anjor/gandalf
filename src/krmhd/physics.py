@@ -1196,9 +1196,10 @@ def initialize_hermite_moments(
     )
 
     # Transform to Fourier space and project into the resolved spectral band.
-    # Only g_1 is seeded below, so this projection only changes the perturbation
-    # slot in the current implementation. If future changes seed multiple moments,
-    # each seeded slot should remain band-limited before entering nonlinear terms.
+    # Only g_1 is seeded below, so this projection only changes that slot in the
+    # current implementation. The projection is idempotent for already
+    # band-limited data, so callers do not need to special-case repeated
+    # dealiasing if future initializers seed multiple moments.
     perturbation_fourier = dealias(rfftn_forward(perturbation_real), grid.dealias_mask)
 
     # Use jnp.where instead of if statement for vmap compatibility (Issue #83)

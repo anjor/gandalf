@@ -1275,7 +1275,9 @@ class TestHermiteIntegratingFactor:
         # at float32 (error ~6e-8), causing ~0.3% energy drift per step. Over 100 steps
         # this compounds to roughly O(1) drift. Empirically, the dealiased seed used
         # here drifts to ~1.53x on CPU/complex64 while remaining finite and in-band.
-        # Without the IF fix, growth would be ~10^42.
+        # Dealiasing changes which modes carry the initial energy, so a different
+        # pattern of float32 IF round-trip error accumulates than in the old
+        # full-band seed. Without the IF fix, growth would be ~10^42.
         # Key validation: energy stays bounded (no exponential blowup).
         ratio = E_g_final / E_g_initial
         assert 0.5 < ratio < 1.6, \
@@ -1419,6 +1421,9 @@ class TestHermiteIntegratingFactor:
         )
 
         updated = gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.0)
+        in_band = updated.g * grid.dealias_mask[..., jnp.newaxis]
         high_k = updated.g * (~grid.dealias_mask)[..., jnp.newaxis]
+        assert jnp.any(jnp.abs(in_band) > 1e-10), \
+            "In-band Hermite content should survive the nonlinear-drive cleanup step"
         assert jnp.allclose(high_k, 0.0, atol=1e-6), \
             "Nonlinear Hermite evolution should still project unresolved modes away"
