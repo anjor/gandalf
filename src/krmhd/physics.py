@@ -1195,8 +1195,12 @@ def initialize_hermite_moments(
         key, shape=(grid.Nz, grid.Ny, grid.Nx), dtype=jnp.float32
     )
 
-    # Transform to Fourier space - rfftn automatically enforces reality condition
-    perturbation_fourier = rfftn_forward(perturbation_real)
+    # Transform to Fourier space and project into the resolved spectral band.
+    # Only g_1 is seeded below, so this projection only changes that slot in the
+    # current implementation. The projection is idempotent for already
+    # band-limited data, so callers do not need to special-case repeated
+    # dealiasing if future initializers seed multiple moments.
+    perturbation_fourier = dealias(rfftn_forward(perturbation_real), grid.dealias_mask)
 
     # Use jnp.where instead of if statement for vmap compatibility (Issue #83)
     # When perturbation_amplitude=0, this effectively sets g_1 to zero

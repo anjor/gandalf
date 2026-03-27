@@ -535,6 +535,12 @@ def _gandalf_step_jit(
     g_new = g_new * g_resistive_damp[:, :, :, jnp.newaxis]  # (1) Resistive dissipation
     g_new = g_new * collision_factors[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (2) Collisional damping
 
+    # Project Hermite moments back to the resolved 3D spectral band. The Hermite
+    # Poisson-bracket RHS is already dealiased in physics.py, so this is a
+    # defensive guarantee against externally injected or checkpointed out-of-band
+    # content rather than the primary nonlinear aliasing control.
+    g_new = g_new * dealias_mask[:, :, :, jnp.newaxis]
+
     return KRMHDFields(
         z_plus=z_plus_new,
         z_minus=z_minus_new,

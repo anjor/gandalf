@@ -722,6 +722,16 @@ class TestKRMHDState:
         assert jnp.allclose(results[:, :, :, :, 0], 0.0), \
             "All g_0 moments should be zero"
 
+    def test_initialize_hermite_moments_applies_dealiasing(self):
+        """Seeded Hermite perturbations should stay inside the resolved spectral band."""
+        from krmhd.physics import initialize_hermite_moments
+
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        g = initialize_hermite_moments(grid, M=6, perturbation_amplitude=0.1, seed=123)
+
+        high_k = g[:, :, :, 1] * (~grid.dealias_mask)
+        assert jnp.allclose(high_k, 0.0, atol=1e-6), "g_1 perturbation should be dealiased"
+
     def test_initialize_alfven_wave(self):
         """Test Alfvén wave initialization."""
         from krmhd.physics import initialize_alfven_wave
