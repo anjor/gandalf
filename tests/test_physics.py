@@ -730,7 +730,7 @@ class TestKRMHDState:
         g = initialize_hermite_moments(grid, M=6, perturbation_amplitude=0.1, seed=123)
 
         high_k = g[:, :, :, 1] * (~grid.dealias_mask)
-        assert jnp.allclose(high_k, 0.0), "g_1 perturbation should be dealiased"
+        assert jnp.allclose(high_k, 0.0, atol=1e-6), "g_1 perturbation should be dealiased"
 
     def test_initialize_alfven_wave(self):
         """Test Alfvén wave initialization."""

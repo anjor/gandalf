@@ -1196,8 +1196,9 @@ def initialize_hermite_moments(
     )
 
     # Transform to Fourier space and project into the resolved spectral band.
-    # This keeps seeded Hermite perturbations consistent with the 2/3-rule
-    # assumptions used by subsequent nonlinear bracket evaluations.
+    # Only g_1 is seeded below, so this projection only changes the perturbation
+    # slot in the current implementation. If future changes seed multiple moments,
+    # each seeded slot should remain band-limited before entering nonlinear terms.
     perturbation_fourier = dealias(rfftn_forward(perturbation_real), grid.dealias_mask)
 
     # Use jnp.where instead of if statement for vmap compatibility (Issue #83)

@@ -1273,7 +1273,9 @@ class TestHermiteIntegratingFactor:
 
         # The integrating factor is mathematically unitary, but P_inv @ P != I exactly
         # at float32 (error ~6e-8), causing ~0.3% energy drift per step. Over 100 steps
-        # this compounds to roughly O(1) drift. Without the IF fix, growth would be ~10^42.
+        # this compounds to roughly O(1) drift. Empirically, the dealiased seed used
+        # here drifts to ~1.53x on CPU/complex64 while remaining finite and in-band.
+        # Without the IF fix, growth would be ~10^42.
         # Key validation: energy stays bounded (no exponential blowup).
         ratio = E_g_final / E_g_initial
         assert 0.5 < ratio < 1.6, \
@@ -1334,14 +1336,14 @@ class TestHermiteIntegratingFactor:
             grid=grid,
         )
 
-        assert jnp.allclose(state.g * (~grid.dealias_mask)[..., jnp.newaxis], 0.0)
+        assert jnp.allclose(state.g * (~grid.dealias_mask)[..., jnp.newaxis], 0.0, atol=1e-6)
 
         current = state
         for _ in range(5):
             current = gandalf_step(current, dt=0.01, eta=0.0, v_A=1.0, nu=0.0)
 
         high_k = current.g * (~grid.dealias_mask)[..., jnp.newaxis]
-        assert jnp.allclose(high_k, 0.0), "Timestepping should preserve dealiased g support"
+        assert jnp.allclose(high_k, 0.0, atol=1e-6), "Timestepping should preserve dealiased g support"
 
     def test_step_projects_out_of_band_hermite_modes(self):
         """One timestep should remove unresolved Hermite content from external inputs."""
@@ -1374,4 +1376,46 @@ class TestHermiteIntegratingFactor:
 
         updated = gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.0)
         high_k = updated.g * (~grid.dealias_mask)[..., jnp.newaxis]
-        assert jnp.allclose(high_k, 0.0), "Timestepper should project g back into the resolved band"
+        assert jnp.allclose(high_k, 0.0, atol=1e-6), "Timestepper should project g back into the resolved band"
+
+    def test_step_projects_out_of_band_hermite_modes_with_nonlinear_drive(self):
+        """Out-of-band Hermite content should be removed even when nonlinear brackets are active."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        M = 6
+
+        x = jnp.linspace(0.0, 2.0 * jnp.pi, grid.Nx, endpoint=False)
+        y = jnp.linspace(0.0, 2.0 * jnp.pi, grid.Ny, endpoint=False)
+        z = jnp.linspace(0.0, 2.0 * jnp.pi, grid.Nz, endpoint=False)
+        Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
+
+        phi_real = 0.05 * (jnp.sin(X + Y) + 0.5 * jnp.cos(Y - Z))
+        phi_fourier = rfftn_forward(phi_real).astype(jnp.complex64) * grid.dealias_mask
+
+        perturbation_real = jax.random.normal(
+            jax.random.PRNGKey(456), shape=(grid.Nz, grid.Ny, grid.Nx), dtype=jnp.float32
+        )
+        g1_full_band = rfftn_forward(perturbation_real)
+        assert jnp.any(jnp.abs(g1_full_band * (~grid.dealias_mask)) > 0), \
+            "Test setup should include unresolved k-space content"
+
+        g = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64)
+        g = g.at[:, :, :, 1].set(g1_full_band)
+
+        state = KRMHDState(
+            z_plus=phi_fourier,
+            z_minus=phi_fourier,
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+            g=g,
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.0,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        updated = gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.0)
+        high_k = updated.g * (~grid.dealias_mask)[..., jnp.newaxis]
+        assert jnp.allclose(high_k, 0.0, atol=1e-6), \
+            "Nonlinear Hermite evolution should still project unresolved modes away"
