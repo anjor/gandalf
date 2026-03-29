@@ -15,7 +15,7 @@ def test_import_krmhd():
     import krmhd
     
     assert hasattr(krmhd, "__version__")
-    assert krmhd.__version__ == "0.4.1"
+    assert krmhd.__version__ == "0.4.3"
 
 
 def test_import_core_dependencies():
