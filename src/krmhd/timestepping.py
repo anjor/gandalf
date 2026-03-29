@@ -362,6 +362,7 @@ def _gandalf_step_jit(
             - n=2: Moderate hyper-collision -νm² (recommended for most cases)
             - n=3: Strong hyper-collision -νm³ (matches original GANDALF alpha_m=3)
             - n=4: Very strong hyper-collision -νm⁴ (expert use, requires small nu)
+            - n=6: Thesis Figure 3.3 benchmark value for strong high-m damping
         streaming_eigenvalues: Eigenvalues of streaming matrix T (from compute_streaming_eigensystem).
             Must be provided — None default is only for Python syntax (keyword after default args).
         streaming_P_T: Transposed right eigenvector matrix P.T (from compute_streaming_eigensystem).
@@ -647,7 +648,7 @@ def gandalf_step(
 
     Raises:
         ValueError: If hyper_r not in [1, 2, 4, 8]
-        ValueError: If hyper_n not in [1, 2, 4]
+        ValueError: If hyper_n not in [1, 2, 3, 4, 6]
         ValueError: If hyper-collision overflow risk detected (nu·dt >= 50, normalized)
         ValueError: If hyper-resistivity overflow risk detected (eta·dt >= 50, normalized)
 
@@ -684,6 +685,7 @@ def gandalf_step(
             * n=2: ν·dt < 50 (recommended, very safe)
             * n=3: ν·dt < 50 (matches GANDALF alpha_m=3, safe)
             * n=4: ν·dt < 50 (strong damping, safe with ν<1)
+            * n=6: ν·dt < 50 (thesis Figure 3.3 benchmark, same normalized bound)
 
         Hyper-resistivity overflow risk (r>1):
         - NORMALIZED formulation: exp(-η·(k⊥²/k⊥²_max)^r·dt)
@@ -702,8 +704,8 @@ def gandalf_step(
     if hyper_r not in (1, 2, 4, 8):
         raise ValueError(f"hyper_r must be 1, 2, 4, or 8 (got {hyper_r})")
 
-    if hyper_n not in (1, 2, 4):
-        raise ValueError(f"hyper_n must be 1, 2, or 4 (got {hyper_n})")
+    if hyper_n not in (1, 2, 3, 4, 6):
+        raise ValueError(f"hyper_n must be 1, 2, 3, 4, or 6 (got {hyper_n})")
 
     # Validate M for collision operator (prevents division by zero)
     # Collision damping rate = ν·(m/M)^n requires M >= 2 for well-defined rates

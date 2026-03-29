@@ -701,11 +701,21 @@ class TestHyperdissipationValidation:
         state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
 
         # Invalid hyper_n values
-        invalid_n_values = [0, 3, 5, 6, 8]
+        invalid_n_values = [0, 5, 7, 8]
 
         for n in invalid_n_values:
-            with pytest.raises(ValueError, match="hyper_n must be 1, 2, or 4"):
+            with pytest.raises(ValueError, match="hyper_n must be 1, 2, 3, 4, or 6"):
                 gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, hyper_n=n)
+
+    def test_hyper_n_thesis_value_6(self):
+        """hyper_n=6 should be accepted for the validated thesis benchmark."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
+
+        result = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, hyper_n=6)
+
+        assert result.time > state.time
+        assert jnp.isfinite(result.g).all()
 
     def test_hypercollision_overflow_error(self):
         """Hyper-collision overflow risk should raise ValueError."""
