@@ -188,6 +188,29 @@ uv run python examples/benchmarks/alfvenic_cascade_benchmark.py --save-diagnosti
 
 **Note:** See `CLAUDE.md` section "Forced Turbulence: Parameter Selection Guide" for discussion of stability constraints.
 
+---
+
+### `krmhd_lowkz_turbulence.py` - Low-k_z Kinetic Turbulence
+
+**Purpose:** RMHD-compatible forced kinetic turbulence using low-|k_z| balanced Elsasser forcing. Demonstrates proper kinetic energy accounting with both fluid and Hermite energy tracking.
+
+**Physics:** Uses `force_alfven_modes_balanced(max_nz=1)` to restrict forcing to low k_z, avoiding unphysical parallel phase mixing from high-k_z energy injection. Independent z+/z- forcing sustains counter-propagating Alfven interactions. Reports both fluid energy (`energy()`) and Hermite moment energy separately.
+
+**Runtime:** ~30 seconds (32³ resolution, M=8, 50 τ_A)
+
+**Usage:**
+```bash
+uv run python examples/benchmarks/krmhd_lowkz_turbulence.py
+```
+
+**What it demonstrates:**
+- Low-k_z RMHD-compatible forcing for kinetic runs
+- Separate fluid vs Hermite energy accounting
+- Hermite truncation adequacy via tail metric (R_tail)
+- ASCII Hermite spectrum visualization
+
+**Output:** Console: time evolution of fluid energy, Hermite energy, and R_tail; final Hermite moment spectrum.
+
 ## Parameter Selection Guidelines
 
 ### Resolution and Runtime

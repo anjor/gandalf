@@ -1446,7 +1446,13 @@ def initialize_random_spectrum(
 
 def energy(state: KRMHDState) -> Dict[str, float]:
     """
-    Compute total energy and components for KRMHD state.
+    Compute **fluid** energy and components for KRMHD state.
+
+    WARNING: This computes fluid energy only. Hermite moment energy
+    (velocity-space structure for m >= 2) is excluded. For kinetic runs
+    (M > 0), use ``diagnostics.hermite_moment_energy()`` for the full
+    energy budget. Steady-state in the fluid sector does NOT guarantee
+    steady-state in the kinetic sector.
 
     Calculates energy contributions from:
     - Magnetic energy: E_mag = (1/2) ∫ |B⊥|² dx = (1/2) ∫ |∇A∥|² dx
@@ -1464,7 +1470,7 @@ def energy(state: KRMHDState) -> Dict[str, float]:
         - 'magnetic': Magnetic energy from perpendicular field
         - 'kinetic': Kinetic energy from perpendicular flow
         - 'compressive': Compressive energy from parallel field
-        - 'total': Sum of all components
+        - 'total': Sum of fluid components (excludes Hermite energy)
 
     Example:
         >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)

@@ -68,7 +68,7 @@ def _mode_to_wavenumber(n: int, L: float) -> float:
     return 2.0 * jnp.pi * n / L
 
 
-@partial(jax.jit, static_argnums=(9,))
+@partial(jax.jit, static_argnums=(10,))
 def _gaussian_white_noise_fourier_perp_lowkz_jit(
     kx: Array,
     ky: Array,
@@ -728,6 +728,12 @@ def force_alfven_modes_gandalf(
 
     Like force_alfven_modes(), this forces z⁺ and z⁻ IDENTICALLY to drive
     velocity fluctuations only (φ forcing) without artificial magnetic reconnection.
+
+    WARNING: This is **full |k| shell forcing** — it forces ALL modes with
+    k_min <= |k| <= k_max where |k| = sqrt(kx² + ky² + kz²). High-k_z modes
+    with small k_perp are included. This is NOT low-k_z RMHD-style forcing.
+    For RMHD-compatible forcing restricted to low |k_z|, use
+    ``force_alfven_modes_balanced(max_nz=1)``.
 
     Args:
         state: Current KRMHD state with Elsasser variables

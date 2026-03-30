@@ -572,6 +572,7 @@ def _gandalf_step_jit(
     # (M<2 would cause degenerate normalized rates and is rejected at wrapper level)
     moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
     # For hyper-collisions: normalized by M to match original GANDALF (requires M>=2)
+    # Normalized by M: max damping rate at m=M is exactly ν·dt, independent of M
     collision_damping_rate = nu * ((moment_indices / M) ** hyper_n)
     collision_factors = jnp.where(
         moment_indices >= 2,

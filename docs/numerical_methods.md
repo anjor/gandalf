@@ -599,7 +599,7 @@ Evolution equations couple moments:
 
 **Closure:** Assume gₘ₊₁ = 0 (simplest) or use more sophisticated closures.
 
-### Collisions
+### Collisions and Normalized Collision Operator
 
 Lenard-Bernstein collision operator:
 
@@ -607,22 +607,46 @@ Lenard-Bernstein collision operator:
 C[gₘ] = -νₘ·gₘ
 ```
 
-with νₘ = ν·m (m-dependent damping rate).
-
 **Conservation:**
 - m=0 (particles): ν₀ = 0 (conserved)
 - m=1 (momentum): ν₁ = 0 (conserved)
 - m ≥ 2: Damped exponentially
 
-**Hyper-collisions:** Generalize to νₘ = ν·(m/M)^(2n) with n ≥ 1.
+**Hyper-collisions:** Generalize to νₘ = ν·(m/M)^n with `hyper_n` ≥ 1.
 
-**Implementation:** Applied as exponential factor (same as resistivity):
+> **Important:** The exponent is `n` (not `2n`). Unlike spatial hyper-dissipation which uses
+> k^(2r) because ∇² ~ k², moment collisions use m^n directly to match the original
+> GANDALF `alpha_m` parameter. See `timestepping.py` lines 560–586.
+
+**Normalized formulation (matching original GANDALF):**
+
+The collision operator is **normalized by M** (max moment index):
+
+```
+g_m(t+dt) = g_m(t) × exp(-ν·(m/M)^n·dt)    for m ≥ 2
+g_m(t+dt) = g_m(t)                            for m = 0, 1
+```
+
+This normalization is critical:
+- **Resolution-independent**: The maximum damping rate at m=M is exactly ν·dt, regardless of M.
+  The overflow constraint is simply ν·dt < 50, independent of resolution.
+- **Contrast with unnormalized**: An unnormalized scheme `ν·m^n·dt` would blow up as M increases,
+  requiring ν to be adjusted per resolution.
+- **Practical consequence**: For hyper_n=6, the damping rate at m/M = 0.8 is only 0.26·ν·dt.
+  Only the top ~20% of moments experience significant damping, giving a longer
+  "inertial range" in Hermite space than one might expect.
+
+**Implementation** (in `timestepping.py`):
 
 ```python
-# Only damp m ≥ 2
-for m in range(2, M+1):
-    damping_factor = jnp.exp(-nu * (m/M)**(2*hyper_n) * dt)
-    g_moments[m] = g_moments[m] * damping_factor
+moment_indices = jnp.arange(M + 1)
+collision_damping_rate = nu * ((moment_indices / M) ** hyper_n)
+collision_factors = jnp.where(
+    moment_indices >= 2,
+    jnp.exp(-collision_damping_rate * dt),
+    1.0,  # m=0,1 conserved
+)
+g_new = g_new * collision_factors
 ```
 
 ### Energy in Velocity Space
@@ -915,6 +939,32 @@ uv run pytest tests/test_diagnostics.py   # Spectra, energy
 - `orszag_tang.py`: Nonlinear MHD benchmark
 - `alfvenic_cascade_benchmark.py`: k⊥^(-5/3) turbulent spectrum
 - `kinetic_fdt_validation.py`: Landau damping rates
+
+## Forcing Schemes
+
+GANDALF provides several forcing functions for driving turbulence. The key distinction
+is whether forcing spans the full |k| shell (all k_z) or is restricted to low k_z:
+
+| Function | k-space selection | Amplitude scaling | z+/z- | Low-k_z only? |
+|----------|------------------|-------------------|-------|---------------|
+| `force_alfven_modes()` | full \|k\| shell | Gaussian white noise | identical | No |
+| `force_alfven_modes_gandalf()` | full \|k\| shell | `(1/k_perp) × sqrt(fampl/dt × \|log(rand)\|)` | identical | No |
+| `force_alfven_modes_balanced()` | k_perp band + \|nz\| ≤ max_nz | Gaussian white noise | independent | Yes |
+
+**Which to use:**
+
+- **`force_alfven_modes_gandalf()`**: Reproduces original GANDALF thesis results. Forces all
+  modes in `k_min ≤ |k| ≤ k_max` where `|k| = sqrt(kx² + ky² + kz²)`. High-k_z modes
+  with small k_perp are included. Identical z+/z- forcing drives velocity only.
+
+- **`force_alfven_modes_balanced()`**: RMHD-compatible forcing. Restricts to low |k_z|
+  (default `max_nz=1`) and uses independent z+/z- realizations. Preferred for kinetic
+  turbulence studies where spurious high-k_z energy injection would drive unphysical
+  parallel phase mixing.
+
+- **`force_alfven_modes()`**: Simpler Gaussian variant of the full-|k| shell forcing.
+
+See `src/krmhd/forcing.py` for implementation details.
 
 ## Summary
 
