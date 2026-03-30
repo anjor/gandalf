@@ -12,7 +12,8 @@ examples/
 │   ├── driven_turbulence.py
 │   ├── decaying_turbulence.py
 │   ├── orszag_tang.py
-│   └── alfvenic_cascade_benchmark.py
+│   ├── alfvenic_cascade_benchmark.py
+│   └── krmhd_lowkz_turbulence.py     ← Low-k_z kinetic turbulence
 ├── validation/         ← Physics verification tests
 │   ├── README.md
 │   ├── hyper_dissipation_demo.py

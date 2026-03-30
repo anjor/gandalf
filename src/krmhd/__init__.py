@@ -88,6 +88,7 @@ from krmhd.forcing import (
     gandalf_forcing_fourier,
     force_alfven_modes,
     force_alfven_modes_gandalf,
+    force_alfven_modes_balanced,
     force_alfven_modes_specific,
     force_slow_modes,
     force_hermite_moments,
@@ -174,6 +175,7 @@ __all__ = [
     # Forcing
     "gaussian_white_noise_fourier",
     "force_alfven_modes",
+    "force_alfven_modes_balanced",
     "force_slow_modes",
     "force_hermite_moments",
     "force_hermite_moments_specific",

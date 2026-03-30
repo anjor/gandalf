@@ -19,6 +19,19 @@ Step-by-step guide for getting started with GANDALF:
 
 **Start here if you're new to the code.**
 
+### 🧬 [Kinetic Turbulence Workflow](kinetic_turbulence_guide.md)
+Progressive guide for going from fluid-only to credible kinetic turbulence:
+- Fluid benchmark → coupled dev-grid → production smoke test → collisionality scan
+- Key gotchas: energy accounting, forcing semantics, collision normalization
+
+**Start here if you're running kinetic (Hermite) simulations.**
+
+### ✅ [Hermite Truncation Checklist](hermite_truncation_checklist.md)
+How to verify your Hermite truncation is adequate:
+- Tail metric (R_tail) computation and thresholds
+- Reference resolved cascade example
+- What to do when under-resolved
+
 ### 📊 [Parameter Scans](parameter_scans.md)
 Workflows for systematic parameter studies:
 - Scanning plasma parameters (β, temperature ratio)
