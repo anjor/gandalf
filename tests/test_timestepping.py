@@ -24,6 +24,7 @@ from krmhd.physics import (
     KRMHDState,
     initialize_alfven_wave,
     initialize_hermite_moments,
+    initialize_orszag_tang,
     energy,
 )
 from krmhd.timestepping import krmhd_rhs, gandalf_step, compute_cfl_timestep
@@ -1487,3 +1488,75 @@ class TestHermiteIntegratingFactor:
         ratio = float(jnp.sum(jnp.abs(current.g) ** 2) / jnp.sum(jnp.abs(state.g) ** 2))
         assert ratio < 2.0, f"Hermite energy grew too much under external advection: {ratio:.3f}"
         assert jnp.all(jnp.isfinite(current.g)), "Hermite moments contain NaN/Inf after long advection run"
+
+
+class TestM0RMHDOnly:
+    """Tests for pure fluid RMHD runs with M=0 (Issue #132)."""
+
+    def test_m0_gandalf_step_runs(self):
+        """gandalf_step should succeed with M=0 and nu=0."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=4, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_alfven_wave(grid, M=0, amplitude=0.1)
+        new_state = gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.0)
+        assert jnp.all(jnp.isfinite(new_state.z_plus))
+        assert jnp.all(jnp.isfinite(new_state.z_minus))
+
+    def test_m0_g_remains_zero(self):
+        """Hermite moments should remain identically zero for M=0 runs."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=4, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_alfven_wave(grid, M=0, amplitude=0.1)
+        new_state = gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.0)
+        assert jnp.allclose(new_state.g, 0.0), "g should remain zero for M=0"
+
+    def test_m0_energy_conservation(self):
+        """M=0 inviscid Orszag-Tang run should conserve energy."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=2, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_orszag_tang(grid, M=0)
+        E0 = energy(state)["total"]
+        assert E0 > 0, "Initial energy should be nonzero for Orszag-Tang"
+
+        current = state
+        for _ in range(10):
+            current = gandalf_step(current, dt=0.001, eta=0.0, v_A=1.0, nu=0.0)
+
+        E_final = energy(current)["total"]
+        rel_err = abs(float(E_final - E0)) / float(E0)
+        assert rel_err < 1e-2, f"Energy not conserved for M=0: relative error {rel_err:.2e}"
+
+    def test_m0_with_nu_raises(self):
+        """M=0 with nu > 0 should raise ValueError."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=4, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_alfven_wave(grid, M=0, amplitude=0.1)
+        with pytest.raises(ValueError, match="M must be >= 2 when collisions are enabled"):
+            gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.1)
+
+    def test_m0_with_resistivity(self):
+        """M=0 with eta > 0 (resistive fluid RMHD) should work."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=4, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_alfven_wave(grid, M=0, amplitude=0.1)
+        new_state = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, nu=0.0)
+        assert jnp.all(jnp.isfinite(new_state.z_plus))
+        assert jnp.all(jnp.isfinite(new_state.z_minus))
+
+    def test_m0_with_hyper_resistivity(self):
+        """M=0 with hyper-resistivity (r>1) should work."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=4, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_alfven_wave(grid, M=0, amplitude=0.1)
+        new_state = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, nu=0.0, hyper_r=2)
+        assert jnp.all(jnp.isfinite(new_state.z_plus))
+        assert jnp.all(jnp.isfinite(new_state.z_minus))
+
+    def test_m1_nu0_runs(self):
+        """M=1 with nu=0 should run (degenerate but allowed for fluid-only use)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=4, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_alfven_wave(grid, M=1, amplitude=0.1)
+        new_state = gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.0)
+        assert jnp.all(jnp.isfinite(new_state.z_plus))
+        assert jnp.all(jnp.isfinite(new_state.z_minus))
+
+    def test_m1_with_nu_raises(self):
+        """M=1 with nu > 0 should raise ValueError (same as M=0)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=4, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_alfven_wave(grid, M=1, amplitude=0.1)
+        with pytest.raises(ValueError, match="M must be >= 2 when collisions are enabled"):
+            gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.1)

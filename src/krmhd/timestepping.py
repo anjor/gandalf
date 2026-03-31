@@ -568,23 +568,27 @@ def _gandalf_step_jit(
     #   Standard (n=1): g_m → g_m * exp(-ν·(m/M)·δt)
     #   Hyper (n>1):    g_m → g_m * exp(-ν·(m/M)^n·δt)
     # Conservation: m=0 (particle number) and m=1 (momentum) are exempt from collisions
-    # Note: M>=2 validation and overflow checks performed in gandalf_step() wrapper before JIT compilation
-    # (M<2 would cause degenerate normalized rates and is rejected at wrapper level)
-    moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
-    # For hyper-collisions: normalized by M to match original GANDALF (requires M>=2)
-    # Normalized by M: max damping rate at m=M is exactly ν·dt, independent of M
-    collision_damping_rate = nu * ((moment_indices / M) ** hyper_n)
-    collision_factors = jnp.where(
-        moment_indices >= 2,
-        jnp.exp(-collision_damping_rate * dt),  # m≥2: hyper-collision damping
-        1.0,  # m=0,1: no collision (conserves particles and momentum)
-    )  # Shape: [M+1]
+    # Note: gandalf_step() wrapper enforces M>=2 only when nu>0.
+    # The JIT kernel independently guards collision application with `if M >= 2` below.
 
     # Apply BOTH dissipation mechanisms: resistive (all m) AND collisional (m≥2)
     # Note: Multiplicative dissipation operators preserve reality condition f(-k) = f*(k)
     # since exp(-rate·dt) is real and applied uniformly to all modes
     g_new = g_new * g_resistive_damp[:, :, :, jnp.newaxis]  # (1) Resistive dissipation
-    g_new = g_new * collision_factors[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (2) Collisional damping
+
+    # Static branch: M is in static_argnames, so this is resolved at JAX trace time
+    if M >= 2:
+        # Collision damping requires M>=2 to avoid division by zero in (m/M)^n
+        moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
+        # For hyper-collisions: normalized by M to match original GANDALF (requires M>=2)
+        # Normalized by M: max damping rate at m=M is exactly ν·dt, independent of M
+        collision_damping_rate = nu * ((moment_indices / M) ** hyper_n)
+        collision_factors = jnp.where(
+            moment_indices >= 2,
+            jnp.exp(-collision_damping_rate * dt),  # m≥2: hyper-collision damping
+            1.0,  # m=0,1: no collision (conserves particles and momentum)
+        )  # Shape: [M+1]
+        g_new = g_new * collision_factors[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (2) Collisional damping
 
     # Project Hermite moments back to the resolved 3D spectral band. The Hermite
     # Poisson-bracket RHS is already dealiased in physics.py, so this is a
@@ -710,11 +714,13 @@ def gandalf_step(
 
     # Validate M for collision operator (prevents division by zero)
     # Collision damping rate = ν·(m/M)^n requires M >= 2 for well-defined rates
-    # M=0 would cause division by zero, M=1 would make all rates zero
-    if state.M < 2:
+    # M=0 (and M=1) are allowed for pure fluid RMHD runs when collisions are disabled (nu=0)
+    # Strict > 0 check is intentional: even tiny nu (e.g. 1e-15) requires M>=2
+    if state.M < 2 and nu_effective > 0:
         raise ValueError(
-            f"M must be >= 2 for collision operators (got M={state.M}). "
-            "Collision damping uses (m/M)^n, requiring M >= 2 for meaningful rates."
+            f"M must be >= 2 when collisions are enabled (got M={state.M}, nu={nu_effective}). "
+            "Collision damping uses (m/M)^n, requiring M >= 2 for meaningful rates. "
+            "For pure fluid RMHD, set nu=0."
         )
 
     # Safety check for hyper-collision overflow with NORMALIZED dissipation

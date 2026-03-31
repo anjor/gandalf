@@ -106,7 +106,7 @@ class KRMHDState(BaseModel):
     z_minus: Array = Field(description="Elsasser z- (counter-propagating wave) in Fourier space")
     B_parallel: Array = Field(description="Parallel magnetic field in Fourier space")
     g: Array = Field(description="Hermite moments of electron distribution")
-    M: int = Field(ge=0, description="Number of Hermite moments (M=0 for pure fluid, M>0 for kinetic)")
+    M: int = Field(ge=0, description="Number of Hermite moments (M=0: pure fluid RMHD, g has 1 slot kept zero; M>=2: kinetic with g_0..g_M)")
     beta_i: float = Field(gt=0.0, description="Ion plasma beta")
     v_th: float = Field(gt=0.0, description="Electron thermal velocity")
     nu: float = Field(ge=0.0, description="Collision frequency")
