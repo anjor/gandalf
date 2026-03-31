@@ -1536,3 +1536,27 @@ class TestM0RMHDOnly:
         state = initialize_alfven_wave(grid, M=0, amplitude=0.1)
         new_state = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, nu=0.0)
         assert jnp.all(jnp.isfinite(new_state.z_plus))
+        assert jnp.all(jnp.isfinite(new_state.z_minus))
+
+    def test_m0_with_hyper_resistivity(self):
+        """M=0 with hyper-resistivity (r>1) should work."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=4, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_alfven_wave(grid, M=0, amplitude=0.1)
+        new_state = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, nu=0.0, hyper_r=2)
+        assert jnp.all(jnp.isfinite(new_state.z_plus))
+        assert jnp.all(jnp.isfinite(new_state.z_minus))
+
+    def test_m1_nu0_runs(self):
+        """M=1 with nu=0 should run (degenerate but allowed for fluid-only use)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=4, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_alfven_wave(grid, M=1, amplitude=0.1)
+        new_state = gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.0)
+        assert jnp.all(jnp.isfinite(new_state.z_plus))
+        assert jnp.all(jnp.isfinite(new_state.z_minus))
+
+    def test_m1_with_nu_raises(self):
+        """M=1 with nu > 0 should raise ValueError (same as M=0)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=4, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = initialize_alfven_wave(grid, M=1, amplitude=0.1)
+        with pytest.raises(ValueError, match="M must be >= 2 when collisions are enabled"):
+            gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.1)
