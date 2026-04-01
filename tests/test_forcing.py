@@ -21,6 +21,7 @@ from krmhd import (
     energy,
 )
 from krmhd.spectral import rfftn_inverse
+from krmhd.forcing import gaussian_white_noise_fourier_perp_lowkz
 
 
 class TestGaussianWhiteNoise:
@@ -818,3 +819,51 @@ class TestSpecificModeForcing:
             force_alfven_modes_specific(
                 state, mode_triplets, fampl=1.0, dt=-0.005, key=key
             )
+
+
+class TestGaussianWhiteNoiseFourierPerpLowkz:
+    """Tests for low-|kz| perpendicular band forcing.
+
+    Regression tests for #131: static_argnums bug in the JIT wrapper.
+    """
+
+    def test_basic_call_does_not_crash(self):
+        """Calling with ordinary bool/int arguments should not crash.
+
+        Regression test for #131: wrong static_argnums caused JIT tracing
+        to treat imag_part as static instead of Nx_full.
+        """
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        key = jax.random.PRNGKey(0)
+
+        field, new_key = gaussian_white_noise_fourier_perp_lowkz(
+            grid=grid,
+            amplitude=1.0,
+            n_min=1,
+            n_max=4,
+            max_nz=1,
+            include_nz0=False,
+            dt=0.01,
+            key=key,
+        )
+
+        assert field.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        assert jnp.iscomplexobj(field)
+
+    def test_include_nz0_both_values(self):
+        """Both include_nz0=True and False should work without crashing."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        key = jax.random.PRNGKey(1)
+
+        for include in [True, False]:
+            field, key = gaussian_white_noise_fourier_perp_lowkz(
+                grid=grid,
+                amplitude=1.0,
+                n_min=1,
+                n_max=4,
+                max_nz=1,
+                include_nz0=include,
+                dt=0.01,
+                key=key,
+            )
+            assert field.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
