@@ -77,7 +77,7 @@ class KRMHDFields(NamedTuple):
     z_minus: Array
     B_parallel: Array
     g: Array  # Shape: [Nz, Ny, Nx//2+1, M+1]
-    time: float
+    time: float  # Python float at public API; JAX Array inside JIT context
 
 
 def _fields_from_state(state: KRMHDState) -> KRMHDFields:
@@ -92,7 +92,11 @@ def _fields_from_state(state: KRMHDState) -> KRMHDFields:
 
 
 def _state_from_fields(fields: KRMHDFields, state_template: KRMHDState) -> KRMHDState:
-    """Reconstruct KRMHDState from JAX fields (validates at boundary)."""
+    """Reconstruct KRMHDState from JAX fields (validates at boundary).
+
+    This function MUST remain outside any jit-compiled scope because
+    float() materializes a JAX scalar into a Python float for Pydantic.
+    """
     return KRMHDState(
         z_plus=fields.z_plus,
         z_minus=fields.z_minus,
@@ -103,7 +107,7 @@ def _state_from_fields(fields: KRMHDFields, state_template: KRMHDState) -> KRMHD
         v_th=state_template.v_th,
         nu=state_template.nu,
         Lambda=state_template.Lambda,
-        time=fields.time,
+        time=float(fields.time),
         grid=state_template.grid,
     )
 
