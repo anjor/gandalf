@@ -212,6 +212,7 @@ class TestGandalfStep:
         assert isinstance(state.time, float), (
             f"state.time should be Python float, got {type(state.time)}"
         )
+        assert abs(state.time - 5 * dt) < 1e-6
 
     def test_gandalf_deterministic(self):
         """GANDALF should produce deterministic results."""
