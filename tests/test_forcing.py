@@ -867,3 +867,4 @@ class TestGaussianWhiteNoiseFourierPerpLowkz:
                 key=key,
             )
             assert field.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+            assert jnp.iscomplexobj(field)
