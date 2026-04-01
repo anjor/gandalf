@@ -103,7 +103,7 @@ def _state_from_fields(fields: KRMHDFields, state_template: KRMHDState) -> KRMHD
         v_th=state_template.v_th,
         nu=state_template.nu,
         Lambda=state_template.Lambda,
-        time=fields.time,
+        time=float(fields.time),
         grid=state_template.grid,
     )
 

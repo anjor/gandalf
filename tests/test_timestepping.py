@@ -195,6 +195,24 @@ class TestGandalfStep:
         expected_time = 10 * dt
         assert jnp.isclose(state.time, expected_time, rtol=1e-6)
 
+    def test_gandalf_time_is_python_float(self):
+        """gandalf_step must return time as Python float, not JAX array.
+
+        Regression test for #126: after many steps, JAX array accumulation
+        in time caused Pydantic validation errors.
+        """
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        state = initialize_alfven_wave(grid, M=20, kz_mode=1, amplitude=0.1)
+
+        dt = 0.01
+        for _ in range(5):
+            state = gandalf_step(state, dt, eta=0.0, v_A=1.0)
+
+        assert isinstance(state.time, float), (
+            f"state.time should be Python float, got {type(state.time)}"
+        )
+
     def test_gandalf_deterministic(self):
         """GANDALF should produce deterministic results."""
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
