@@ -1579,3 +1579,266 @@ class TestM0RMHDOnly:
         state = initialize_alfven_wave(grid, M=1, amplitude=0.1)
         with pytest.raises(ValueError, match="M must be >= 2 when collisions are enabled"):
             gandalf_step(state, dt=0.01, eta=0.0, v_A=1.0, nu=0.1)
+
+
+class TestIMEX222:
+    """IMEX-RK222 Hermite integrator (Issue #137)."""
+
+    @staticmethod
+    def _make_random_state(Nx=16, Ny=16, Nz=8, M=6, seed=0, z_amp=0.1, g_amp=0.05,
+                           nu=1.0, beta_i=1.0, Lambda=1.0):
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=1.0, Ly=1.0, Lz=1.0)
+        Nxh = Nx // 2 + 1
+
+        key = jax.random.PRNGKey(seed)
+        k1, k2, k3 = jax.random.split(key, 3)
+
+        def random_complex(key, shape, scale):
+            kr, ki = jax.random.split(key)
+            re = jax.random.normal(kr, shape)
+            im = jax.random.normal(ki, shape)
+            return scale * (re + 1j * im).astype(jnp.complex64)
+
+        z_plus = random_complex(k1, (Nz, Ny, Nxh), z_amp)
+        z_minus = random_complex(k2, (Nz, Ny, Nxh), z_amp)
+        g = random_complex(k3, (Nz, Ny, Nxh, M + 1), g_amp)
+        # Zero out the k=0 mode to stay in the physical subspace
+        z_plus = z_plus.at[0, 0, 0].set(0.0)
+        z_minus = z_minus.at[0, 0, 0].set(0.0)
+        g = g.at[0, 0, 0, :].set(0.0)
+
+        state = KRMHDState(
+            z_plus=z_plus,
+            z_minus=z_minus,
+            B_parallel=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
+            g=g,
+            M=M,
+            beta_i=beta_i,
+            v_th=1.0,
+            nu=nu,
+            Lambda=Lambda,
+            time=0.0,
+            grid=grid,
+        )
+        return state
+
+    def test_imex222_runs_and_is_finite(self):
+        """Basic smoke test: IMEX scheme completes a step and produces finite output."""
+        state = self._make_random_state()
+        new = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, scheme="imex_rk222")
+        assert jnp.all(jnp.isfinite(new.z_plus))
+        assert jnp.all(jnp.isfinite(new.z_minus))
+        assert jnp.all(jnp.isfinite(new.g))
+
+    def test_imex222_invalid_scheme_raises(self):
+        """Unknown scheme kwarg raises."""
+        state = self._make_random_state()
+        with pytest.raises(ValueError, match="scheme must be"):
+            gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, scheme="bogus")
+
+    def test_imex222_fluid_limit_regression(self):
+        """M=2, nu=0, eta=0: IMEX z+/z- trajectory matches Lawson path closely.
+
+        The IMEX scheme only touches the g-advance; the Elsasser step is
+        deliberately bit-identical. With M=2 and no collisions the residual
+        difference comes purely from complex64 roundoff in the two paths'
+        different Hermite arithmetic, so a tolerance of ~1e-5 is appropriate.
+        """
+        # M=2 with nu=0 runs both schemes without collisions.
+        state0 = self._make_random_state(M=2, nu=0.0, z_amp=0.01, g_amp=0.01)
+        state_l = state0
+        state_i = state0
+        for _ in range(20):
+            state_l = gandalf_step(state_l, dt=0.005, eta=0.0, v_A=1.0,
+                                   nu=0.0, scheme="lawson_rk4")
+            state_i = gandalf_step(state_i, dt=0.005, eta=0.0, v_A=1.0,
+                                   nu=0.0, scheme="imex_rk222")
+        diff_plus = float(jnp.max(jnp.abs(state_l.z_plus - state_i.z_plus)))
+        diff_minus = float(jnp.max(jnp.abs(state_l.z_minus - state_i.z_minus)))
+        assert diff_plus < 1e-4, f"z_plus divergence: {diff_plus}"
+        assert diff_minus < 1e-4, f"z_minus divergence: {diff_minus}"
+
+    def test_imex222_pure_streaming_stable_large_dt(self):
+        """Pure streaming test: z+/z-=0, g nonzero. IMEX stays bounded at dt
+        well past what a streaming-CFL guard would permit.
+
+        Scheme bound: the streaming matrix has max eigenvalue ~ sqrt(2M/Lambda).
+        IMEX should remain numerically stable at large dt because streaming is
+        implicit; the ratio of energies after 50 steps should stay O(1).
+        """
+        Nx = Ny = 16
+        Nz = 16
+        M = 32
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=1.0, Ly=1.0, Lz=1.0)
+        key = jax.random.PRNGKey(5)
+        kr, ki = jax.random.split(key)
+        shape = (Nz, Ny, Nx // 2 + 1, M + 1)
+        g = (0.01 * (jax.random.normal(kr, shape) + 1j * jax.random.normal(ki, shape))
+             ).astype(jnp.complex64)
+        g = g.at[0, 0, 0, :].set(0.0)
+
+        state = KRMHDState(
+            z_plus=jnp.zeros((Nz, Ny, Nx // 2 + 1), dtype=jnp.complex64),
+            z_minus=jnp.zeros((Nz, Ny, Nx // 2 + 1), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((Nz, Ny, Nx // 2 + 1), dtype=jnp.complex64),
+            g=g,
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=1.0,
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        # A deliberately large dt: the implicit scheme must remain bounded.
+        dt = 0.5
+        E0 = float(jnp.sum(jnp.abs(state.g) ** 2))
+        s = state
+        for _ in range(50):
+            s = gandalf_step(s, dt=dt, eta=0.0, v_A=1.0, scheme="imex_rk222")
+        assert jnp.all(jnp.isfinite(s.g))
+        E = float(jnp.sum(jnp.abs(s.g) ** 2))
+        # Damping makes energy monotone non-increasing (D is negative semidefinite on
+        # m>=2, streaming is skew-Hermitian). Require energy to stay bounded above.
+        assert E <= E0 * 1.01, f"Energy grew: E0={E0}, E={E}"
+        # And bounded below by machine precision (not all energy should vanish in 50 steps
+        # unless ν·dt·n is huge).
+        assert E > 1e-20
+
+    def test_imex222_hypercollision_overflow_disabled(self):
+        """IMEX path accepts large nu*dt without raising (unconditionally stable).
+        Lawson path still raises on the same input.
+        """
+        state = self._make_random_state(M=4, nu=200.0)  # nu*dt = 2.0 with dt=0.01 is fine
+        # Bump to trigger the Lawson guard (nu*dt >= 50): dt=0.3, nu=200 -> nu*dt=60.
+        dt = 0.3
+        # Lawson must raise
+        with pytest.raises(ValueError, match="Hyper-collision overflow"):
+            gandalf_step(state, dt=dt, eta=0.01, v_A=1.0, nu=200.0, scheme="lawson_rk4")
+        # IMEX must not raise — solve is unconditionally stable; collision is implicit.
+        new = gandalf_step(state, dt=dt, eta=0.01, v_A=1.0, nu=200.0, scheme="imex_rk222")
+        assert jnp.all(jnp.isfinite(new.g))
+
+    def test_imex222_damping_bypasses_m0_m1(self):
+        """At kz=0, L reduces to diag(D) with D[0]=D[1]=0 and D[m]<0 for m>=2.
+        Pass a g with support only at kz=0 (the zonal mean) and verify that
+        strong collisional damping (nu=10) decays m>=2 while leaving m=0 and
+        m=1 untouched — the conservation property that motivated the m>=2
+        mask in _damping_diag.
+
+        Note: this only tests the damping path. kz=0 slices are not physically
+        meaningful (they live at the k=0 Fourier mode which is itself zeroed
+        elsewhere by physics), but the IMEX operator is well-defined there
+        and isolates the damping invariant cleanly.
+        """
+        Nx = Ny = 8
+        Nz = 4
+        M = 4
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=1.0, Ly=1.0, Lz=1.0)
+        Nxh = Nx // 2 + 1
+        g = jnp.zeros((Nz, Ny, Nxh, M + 1), dtype=jnp.complex64)
+        # Put nonzero amplitude in all m, at a nonzero k_perp but kz=0:
+        g = g.at[0, 1, 1, :].set(1.0 + 0.5j)
+
+        state = KRMHDState(
+            z_plus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
+            z_minus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
+            g=g,
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=10.0,
+            Lambda=1.5,
+            time=0.0,
+            grid=grid,
+        )
+
+        m0_init = complex(state.g[0, 1, 1, 0])
+        m1_init = complex(state.g[0, 1, 1, 1])
+        m4_init = complex(state.g[0, 1, 1, M])
+
+        s = state
+        for _ in range(5):
+            s = gandalf_step(s, dt=0.1, eta=0.0, v_A=1.0, scheme="imex_rk222")
+
+        m0_final = complex(s.g[0, 1, 1, 0])
+        m1_final = complex(s.g[0, 1, 1, 1])
+        m4_final = complex(s.g[0, 1, 1, M])
+
+        # m=0, m=1 should be unchanged (D is zero there; L at kz=0 is diag D)
+        assert abs(m0_final - m0_init) < 1e-5
+        assert abs(m1_final - m1_init) < 1e-5
+        # m=M should decay under nu=10, dt=0.1, n_steps=5 -> total damping ~0.5 per step
+        assert abs(m4_final) < 0.5 * abs(m4_init), (
+            f"m=M not damped: before={m4_init}, after={m4_final}"
+        )
+
+    def test_imex222_order_of_accuracy_pure_streaming(self):
+        """Manufactured linear test: with z+/z-=0, eta=0, nu=0 and all k_perp=0
+        modes zeroed, the g-advance reduces to exp(-i*sqrt(beta_i)*kz*T*t).
+        ARS(2,2,2) is 2nd-order accurate on linear problems; verify slope ~ 2.
+        """
+        import numpy as np
+        from krmhd.hermite import compute_streaming_matrix
+
+        Nx = Ny = 8
+        Nz = 4
+        M = 4
+        beta_i = 1.0
+        Lambda = 1.5  # Lambda>1 → T nonsymmetric but real eigenvalues
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=1.0, Ly=1.0, Lz=1.0)
+
+        # Put energy on a single kz mode only; isolate the linear problem.
+        Nxh = Nx // 2 + 1
+        g = np.zeros((Nz, Ny, Nxh, M + 1), dtype=np.complex64)
+        kz_idx = 1
+        g[kz_idx, 0, 0, 0] = 1.0
+        g[kz_idx, 0, 0, 1] = 0.5j
+        g = jnp.asarray(g)
+
+        state = KRMHDState(
+            z_plus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
+            z_minus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
+            g=g,
+            M=M,
+            beta_i=beta_i,
+            v_th=1.0,
+            nu=0.0,
+            Lambda=Lambda,
+            time=0.0,
+            grid=grid,
+        )
+
+        # Exact solution at time T via matrix exponential
+        T_mat = compute_streaming_matrix(M, Lambda)
+        kz_val = float(np.asarray(grid.kz)[kz_idx])
+        L0 = -1j * np.sqrt(beta_i) * kz_val * T_mat  # D=0, nu=0
+        T_final = 1.0  # 1 unit of τ_A
+
+        # Exact matrix exponential
+        g_init = np.asarray(g[kz_idx, 0, 0, :])
+        g_exact = np.linalg.solve(np.eye(M + 1), g_init)  # identity check
+        from scipy.linalg import expm
+        g_exact = expm(L0 * T_final) @ g_init
+
+        errs = []
+        dts = [0.1, 0.05, 0.025]
+        for dt in dts:
+            n_steps = int(round(T_final / dt))
+            s = state
+            for _ in range(n_steps):
+                s = gandalf_step(s, dt=dt, eta=0.0, v_A=1.0, nu=0.0,
+                                 scheme="imex_rk222")
+            g_num = np.asarray(s.g[kz_idx, 0, 0, :])
+            errs.append(np.linalg.norm(g_num - g_exact))
+
+        # Slope from log-log: expect ~2 (ARS(2,2,2) is 2nd-order)
+        log_dts = np.log(dts)
+        log_errs = np.log(errs)
+        slope = np.polyfit(log_dts, log_errs, 1)[0]
+        assert slope >= 1.7, (
+            f"IMEX convergence slope too low: {slope:.2f}, errs={errs}"
+        )

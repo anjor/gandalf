@@ -727,3 +727,131 @@ def compute_streaming_eigensystem(
             )
 
     return jnp.array(T), jnp.array(eigenvalues), jnp.array(P), jnp.array(P_inv)
+
+
+# =============================================================================
+# IMEX-RK222 Implicit Operator (Issue #137)
+# =============================================================================
+
+
+@lru_cache(maxsize=None)
+def _damping_diag(M: int, hyper_n: int) -> Any:
+    """
+    Per-moment hyper-collisional damping rates normalized to max-rate unity.
+
+    Returns a length-(M+1) float64 numpy array where entry m is:
+        -(m/M)^hyper_n  for m >= 2
+        0               for m = 0, 1 (conserves particle number and momentum)
+
+    The damping operator D is diag(nu * _damping_diag(M, hyper_n)) in the
+    implicit-stage matrix L. Matches the damping block the Lawson path
+    applies as exp(-nu * (m/M)^n * dt).
+    """
+    import numpy as np
+
+    m = np.arange(M + 1, dtype=np.float64)
+    # Safe even for M=0,1: we only use m>=2 entries, and zero them out below.
+    # Avoid division by zero for M=0: float division would produce inf/nan,
+    # but the mask discards those values anyway.
+    if M >= 2:
+        rates = -((m / M) ** hyper_n)
+    else:
+        rates = np.zeros_like(m)
+    rates[:2] = 0.0
+    return rates
+
+
+def build_implicit_operator(
+    kz: Array,
+    beta_i: float,
+    nu: float,
+    M: int,
+    Lambda: float,
+    hyper_n: int,
+) -> Array:
+    """
+    Build the per-k_z implicit operator L = -i*sqrt(beta_i)*kz*T + D.
+
+    L is block-diagonal in Fourier space and depends only on k_z (shared
+    across k_x, k_y). Returned as a batched complex array of shape
+    (Nz, M+1, M+1). Dtype follows the ambient JAX precision
+    (complex64 under default configs, complex128 if jax_enable_x64 is set).
+
+    T is the Hermite streaming coupling matrix (tridiagonal, from
+    compute_streaming_matrix). D is diag(nu * _damping_diag) with zeros at
+    m=0,1 so the damping preserves particle number and momentum.
+
+    Args:
+        kz: (Nz,) array of parallel wavenumbers.
+        beta_i: Ion plasma beta.
+        nu: Collision frequency (normalized by M inside the diag factors).
+        M: Maximum Hermite moment index.
+        Lambda: Kinetic closure parameter (enters T via g1 kinetic correction).
+        hyper_n: Hyper-collision exponent.
+
+    Returns:
+        L: (Nz, M+1, M+1) complex JAX array.
+    """
+    import numpy as np
+
+    T = compute_streaming_matrix(M, Lambda)  # (M+1, M+1) float64
+    D_diag = nu * _damping_diag(M, hyper_n)  # (M+1,) float64, zeros at m=0,1
+
+    kz_np = np.asarray(kz, dtype=np.float64)
+    sqrt_beta = float(np.sqrt(beta_i))
+    # L[z, i, j] = -1j * sqrt(beta_i) * kz[z] * T[i, j] + diag(D_diag)
+    stream = -1j * sqrt_beta * kz_np[:, None, None] * T[None, :, :]
+    L = stream + np.diag(D_diag)[None, :, :]
+    return jnp.asarray(L)
+
+
+def factor_imex_operator(
+    L_per_kz: Array,
+    dt: Array | float,
+    gamma: float,
+) -> tuple[Array, Array]:
+    """
+    LU-factor (I - dt*gamma*L) per k_z for ARS(2,2,2) implicit stages.
+
+    Args:
+        L_per_kz: (Nz, M+1, M+1) implicit operator from build_implicit_operator.
+        dt: Timestep (may be traced; factorization rebuilt each step).
+        gamma: ARS(2,2,2) implicit stage coefficient (2 - sqrt(2))/2.
+
+    Returns:
+        (lu, piv): batched LU factors; shapes (Nz, M+1, M+1) complex and
+        (Nz, M+1) int32. Consumed by jax.scipy.linalg.lu_solve per k_z.
+    """
+    size = L_per_kz.shape[-1]
+    I = jnp.eye(size, dtype=L_per_kz.dtype)
+    A = I[None, :, :] - (dt * gamma) * L_per_kz
+    lu, piv = jax.vmap(jax.scipy.linalg.lu_factor)(A)
+    return lu, piv
+
+
+def imex_solve(
+    lu: Array,
+    piv: Array,
+    rhs: Array,
+) -> Array:
+    """
+    Solve the per-k_z batched linear system (I - dt*gamma*L) @ x = rhs.
+
+    The leading axis of rhs (Nz) is treated as a batch dimension paired with
+    the LU factors. For each k_z the factored matrix is solved once against
+    all (k_x, k_y) RHS vectors.
+
+    Args:
+        lu: (Nz, M+1, M+1) LU factors from factor_imex_operator.
+        piv: (Nz, M+1) pivot indices.
+        rhs: (Nz, Ny, Nx//2+1, M+1) complex field array.
+
+    Returns:
+        Solution array with the same shape as rhs.
+    """
+    Nz, Ny, Nxh, Mp1 = rhs.shape
+    # (Nz, Ny, Nxh, M+1) -> (Nz, M+1, Ny*Nxh): put m-axis as matrix row axis,
+    # flatten k_perp into RHS-column axis expected by lu_solve.
+    rhs_batched = jnp.transpose(rhs, (0, 3, 1, 2)).reshape(Nz, Mp1, Ny * Nxh)
+    sol_batched = jax.vmap(jax.scipy.linalg.lu_solve)((lu, piv), rhs_batched)
+    return sol_batched.reshape(Nz, Mp1, Ny, Nxh).transpose(0, 2, 3, 1)

@@ -722,6 +722,149 @@ class TestStreamingMatrix:
             compute_streaming_eigensystem(5, Lambda=0.5)
 
 
+class TestIMEXOperator:
+    """Tests for the IMEX-RK222 implicit operator helpers (Issue #137)."""
+
+    def test_damping_diag_conservation_mask(self):
+        """_damping_diag zeros out m=0,1 (conserves particle number, momentum)."""
+        from krmhd.hermite import _damping_diag
+
+        D = _damping_diag(M=10, hyper_n=3)
+        assert D.shape == (11,)
+        assert D[0] == 0.0
+        assert D[1] == 0.0
+        # m>=2 entries are negative (damping)
+        assert all(D[2:] < 0.0)
+
+    def test_damping_diag_normalization(self):
+        """_damping_diag at m=M returns -1 (normalized damping rate)."""
+        from krmhd.hermite import _damping_diag
+
+        for M in [4, 32, 128]:
+            for n in [1, 2, 3, 4, 6]:
+                D = _damping_diag(M, n)
+                assert D[M] == pytest.approx(-1.0, abs=1e-14)
+
+    def test_damping_diag_power_law(self):
+        """_damping_diag follows (m/M)^hyper_n for m>=2."""
+        import numpy as np
+        from krmhd.hermite import _damping_diag
+
+        M, n = 8, 2
+        D = _damping_diag(M, n)
+        for m in range(2, M + 1):
+            assert D[m] == pytest.approx(-((m / M) ** n), abs=1e-14)
+
+    def test_build_implicit_operator_shape(self):
+        """L has shape (Nz, M+1, M+1) and is complex-valued."""
+        import numpy as np
+        from krmhd.hermite import build_implicit_operator
+
+        kz = jnp.array([0.0, 1.0, -1.0, 2.0])
+        L = build_implicit_operator(kz, beta_i=1.0, nu=1.0, M=6, Lambda=1.0, hyper_n=2)
+        assert L.shape == (4, 7, 7)
+        assert jnp.iscomplexobj(L)
+
+    def test_build_implicit_operator_kz_zero_is_damping_only(self):
+        """At kz=0, L reduces to pure damping diag(nu * D_diag)."""
+        import numpy as np
+        from krmhd.hermite import build_implicit_operator, _damping_diag
+
+        kz = jnp.array([0.0])
+        nu = 2.5
+        M, hyper_n = 8, 3
+        L = build_implicit_operator(kz, beta_i=4.0, nu=nu, M=M, Lambda=1.0, hyper_n=hyper_n)
+        expected = np.diag(nu * _damping_diag(M, hyper_n))
+        actual = np.asarray(L[0])
+        assert np.allclose(actual, expected, atol=1e-6)
+
+    def test_build_implicit_operator_streaming_structure(self):
+        """At nu=0, L reduces to -i*sqrt(beta_i)*kz*T (pure streaming)."""
+        import numpy as np
+        from krmhd.hermite import build_implicit_operator, compute_streaming_matrix
+
+        beta_i = 2.0
+        kz_val = 1.5
+        M = 5
+        Lambda = 2.0
+        kz = jnp.array([kz_val])
+        L = build_implicit_operator(kz, beta_i=beta_i, nu=0.0, M=M, Lambda=Lambda, hyper_n=2)
+        T = compute_streaming_matrix(M, Lambda)
+        expected = -1j * np.sqrt(beta_i) * kz_val * T
+        actual = np.asarray(L[0])
+        assert np.allclose(actual, expected, atol=1e-5)
+
+    def test_factor_imex_operator_shapes(self):
+        """LU factorization returns (Nz, M+1, M+1) and (Nz, M+1)."""
+        import numpy as np
+        from krmhd.hermite import build_implicit_operator, factor_imex_operator
+
+        kz = jnp.array([0.0, 0.5, 1.0])
+        L = build_implicit_operator(kz, beta_i=1.0, nu=1.0, M=4, Lambda=1.0, hyper_n=2)
+        gamma = (2.0 - np.sqrt(2.0)) / 2.0
+        lu, piv = factor_imex_operator(L, dt=0.1, gamma=gamma)
+        assert lu.shape == (3, 5, 5)
+        assert piv.shape == (3, 5)
+
+    def test_imex_solve_roundtrip(self):
+        """Solve round-trip: (I - dt*gamma*L) @ solve((...), rhs) == rhs."""
+        import numpy as np
+        from krmhd.hermite import (
+            build_implicit_operator,
+            factor_imex_operator,
+            imex_solve,
+        )
+
+        Nz, Ny, Nxh, M = 4, 3, 3, 4
+        dt = 0.05
+        gamma = (2.0 - np.sqrt(2.0)) / 2.0
+
+        kz = jnp.linspace(-1.0, 1.0, Nz)
+        L = build_implicit_operator(kz, beta_i=1.0, nu=1.5, M=M, Lambda=1.0, hyper_n=2)
+        lu, piv = factor_imex_operator(L, dt, gamma)
+
+        rng = np.random.default_rng(42)
+        rhs_np = (rng.standard_normal((Nz, Ny, Nxh, M + 1))
+                  + 1j * rng.standard_normal((Nz, Ny, Nxh, M + 1))).astype(np.complex64)
+        rhs = jnp.asarray(rhs_np)
+
+        x = imex_solve(lu, piv, rhs)
+
+        # Verify A @ x == rhs
+        Mp1 = M + 1
+        I = jnp.eye(Mp1, dtype=L.dtype)
+        A = I[None, :, :] - dt * gamma * L
+        Ax = jnp.einsum("zij,zyxj->zyxi", A, x)
+        max_err = float(jnp.max(jnp.abs(Ax - rhs)))
+        assert max_err < 5e-4, f"residual too large: {max_err}"
+
+    def test_imex_solve_preserves_m0_m1_at_zero_streaming(self):
+        """At kz=0, (I - dt*gamma*L) is identity on m=0,1; they pass through."""
+        import numpy as np
+        from krmhd.hermite import (
+            build_implicit_operator,
+            factor_imex_operator,
+            imex_solve,
+        )
+
+        Nz, Ny, Nxh, M = 1, 2, 2, 4
+        dt = 0.1
+        gamma = (2.0 - np.sqrt(2.0)) / 2.0
+
+        kz = jnp.array([0.0])
+        L = build_implicit_operator(kz, beta_i=1.0, nu=10.0, M=M, Lambda=1.0, hyper_n=2)
+        lu, piv = factor_imex_operator(L, dt, gamma)
+
+        rng = np.random.default_rng(7)
+        rhs_np = (rng.standard_normal((Nz, Ny, Nxh, M + 1))
+                  + 1j * rng.standard_normal((Nz, Ny, Nxh, M + 1))).astype(np.complex64)
+        rhs = jnp.asarray(rhs_np)
+        x = imex_solve(lu, piv, rhs)
+        # m=0 and m=1 slices unchanged to roundoff
+        assert jnp.allclose(x[..., 0], rhs[..., 0], atol=1e-6)
+        assert jnp.allclose(x[..., 1], rhs[..., 1], atol=1e-6)
+
+
 if __name__ == "__main__":
     # Allow running tests directly
     pytest.main([__file__, "-v"])
