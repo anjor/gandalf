@@ -655,33 +655,41 @@ def _gandalf_step_imex222_jit(
     advection is treated explicitly. Elsasser z+/z- use the current
     integrating-factor RK2 midpoint (bit-identical to the Lawson-RK4 path).
 
-    Butcher tableau (gamma=(2-sqrt(2))/2, delta=1-1/(2*gamma); see Ascher,
-    Ruuth, Spiteri 1997, Table IV):
+    Butcher tableau (γ=(2-√2)/2 ≈ 0.2929, δ=1-1/(2γ) ≈ -0.7071; see Ascher,
+    Ruuth, Spiteri 1997, Table IV). Below "g" in the Hermite field and "γ"
+    the tableau coefficient are distinct — tableau rows use γ, not g:
 
-        Implicit A:      Explicit A_tilde:
-          c  |            c  |
-          0  | 0   0   0   0  | 0     0     0
-          g  | 0   g   0   g  | g     0     0
-          1  | 0  1-g  g   1  | d    1-d    0
-          -----------------   -----------------
-             | 0  1-g  g      | d    1-d    0
+        Implicit A:          Explicit Ã:
+          c  |                c  |
+          0  | 0    0    0     0  | 0     0     0
+          γ  | 0    γ    0     γ  | γ     0     0
+          1  | 0   1-γ   γ     1  | δ    1-δ    0
+          --------------------    --------------------
+             | 0   1-γ   γ         | δ    1-δ    0
 
     The tableau has three stages, but stage 1 is trivial (c=0, A[0,*]=0)
-    so u^(1) = u^n, and N(u^(1)) = N(u^n). This kernel implements the two
+    so g^(1) = g^n, and N(g^(1)) = N(g^n). This kernel implements the two
     non-trivial stages directly:
 
-        Stage A (tableau stage 2, c=gamma):
-            (I - dt*gamma*L) g^(1) = g^n + dt*gamma*N(g^n, z+/-^n)
+        Stage A (tableau stage 2, c=γ):
+            (I - dt·γ·L) g^(1) = g^n + dt·γ·N(g^n, z±^n)
         Stage B (tableau stage 3, c=1):
-            (I - dt*gamma*L) g^(n+1) = g^n
-                + dt*(1-gamma)*L*g^(1)
-                + dt*delta*N(g^n, z+/-^n)
-                + dt*(1-delta)*N(g^(1), z+/-^(n+dt/2))
+            (I - dt·γ·L) g^(n+1) = g^n
+                + dt·(1-γ)·L·g^(1)
+                + dt·δ·N(g^n, z±^n)
+                + dt·(1-δ)·N(g^(1), z±^(n+dt/2))
 
     L and its factorization (lu, piv) are precomputed per step outside
     this JIT kernel (see gandalf_step). Hyper-collisional damping is folded
     into L; the exponential collision factor is therefore NOT applied here.
-    Resistive damping on g (from z+/- coupling) stays exponential.
+
+    Known limitation: resistive damping on g is applied as an exponential
+    post-step factor exp(-eta*(k_perp^2/k_perp_max^2)^r*dt), identical to
+    the Lawson path. This is a 1st-order Strang-style operator split with
+    the IMEX solve — the combined scheme is formally 2nd-order for the
+    streaming + collision block and 1st-order for the streaming +
+    resistivity interaction. For eta*dt*|k_perp|^(2r) << 1 (the typical
+    turbulence regime), the extra splitting error is negligible.
     """
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
     kx_3d = kx[jnp.newaxis, jnp.newaxis, :]

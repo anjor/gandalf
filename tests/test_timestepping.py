@@ -1645,24 +1645,30 @@ class TestIMEX222:
             gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, scheme="bogus")
 
     def test_imex222_nontrivial_vA_matches_lawson(self):
-        """z+/z- Elsasser phase / nonlinear coupling at v_A=2.0 must match
-        Lawson to roundoff. The integrating-factor phases in both kernels use
-        the same convention; passing v_A through must behave identically so
-        a caller using non-unit Alfven velocity is not silently broken.
+        """z+/z- Elsasser phase and nonlinear coupling at v_A=2.0 must match
+        the Lawson path over a long trajectory (T=1.0 ~ one parallel Alfven
+        crossing time). Locks down the claim that both schemes use the same
+        Elsasser integrating-factor convention end-to-end, not just for the
+        first few short steps where an O(v_A*kz*dt^2) discrepancy would be
+        below tolerance.
         """
         state0 = self._make_random_state(M=3, nu=0.0, z_amp=0.02, g_amp=0.01)
         v_A = 2.0
+        dt = 0.005
+        n_steps = 200  # T = 1.0, ~ one parallel Alfven crossing
         state_l = state0
         state_i = state0
-        for _ in range(10):
-            state_l = gandalf_step(state_l, dt=0.005, eta=0.0, v_A=v_A,
+        for _ in range(n_steps):
+            state_l = gandalf_step(state_l, dt=dt, eta=0.0, v_A=v_A,
                                    nu=0.0, scheme="lawson_rk4")
-            state_i = gandalf_step(state_i, dt=0.005, eta=0.0, v_A=v_A,
+            state_i = gandalf_step(state_i, dt=dt, eta=0.0, v_A=v_A,
                                    nu=0.0, scheme="imex_rk222")
         diff_plus = float(jnp.max(jnp.abs(state_l.z_plus - state_i.z_plus)))
         diff_minus = float(jnp.max(jnp.abs(state_l.z_minus - state_i.z_minus)))
-        assert diff_plus < 1e-4, f"z_plus divergence at v_A={v_A}: {diff_plus}"
-        assert diff_minus < 1e-4, f"z_minus divergence at v_A={v_A}: {diff_minus}"
+        # Tight tolerance over a long trajectory: if either scheme silently
+        # mishandled v_A, the divergence would grow to O(v_A*kz*T*<nl>) ~ 1e-2+.
+        assert diff_plus < 5e-4, f"z_plus divergence at v_A={v_A} over T={n_steps*dt}: {diff_plus}"
+        assert diff_minus < 5e-4, f"z_minus divergence at v_A={v_A} over T={n_steps*dt}: {diff_minus}"
 
     def test_imex222_fluid_limit_regression(self):
         """M=2, nu=0, eta=0: IMEX z+/z- trajectory matches Lawson path closely.
@@ -1846,10 +1852,9 @@ class TestIMEX222:
         L0 = -1j * np.sqrt(beta_i) * kz_val * T_mat  # D=0, nu=0
         T_final = 1.0  # 1 unit of τ_A
 
-        # Exact matrix exponential
-        g_init = np.asarray(g[kz_idx, 0, 0, :])
-        g_exact = np.linalg.solve(np.eye(M + 1), g_init)  # identity check
+        # Exact reference via matrix exponential: g(T) = exp(L0 * T) @ g(0).
         from scipy.linalg import expm
+        g_init = np.asarray(g[kz_idx, 0, 0, :])
         g_exact = expm(L0 * T_final) @ g_init
 
         errs = []
