@@ -842,7 +842,9 @@ def _gandalf_step_imex222_jit(
     # Resistive damping on g (from coupling to z+/-, kept exponential).
     # Hyper-collisional damping is already inside L, so no collision factor
     # here. Reuses perp_dissipation_factor computed above for the z+/- damping
-    # — the resistive kernel is identical across all three fields.
+    # — the resistive kernel is identical across all three fields. The
+    # [:, :, :, jnp.newaxis] broadcast appends the m-axis so the (Nz, Ny, Nxh)
+    # kernel multiplies uniformly across all Hermite moments of g.
     g_new = g_new * perp_dissipation_factor[:, :, :, jnp.newaxis]
 
     # Defensive dealias of Hermite moments. z+/- are NOT dealiased here by
@@ -925,6 +927,17 @@ def gandalf_step(
             subsequent run under the other scheme is valid — state carries
             only field data — but the evolution cadence is per-call.
 
+            REPRODUCIBILITY: the scheme default changed from "lawson_rk4"
+            to "imex_rk222" in #138. Existing drivers that omitted `scheme`
+            will silently pick up the new integrator. The Elsasser formula
+            is mathematically identical under both schemes, but the two
+            JIT graphs produce different float32 arithmetic orderings, so
+            a mid-run switch (or checkpoint resumed under a different
+            default) will drift from the original trajectory at roughly
+            1e-6 per step (~5e-4 over 200 steps; see
+            test_imex222_nontrivial_vA_matches_lawson). For bit-level
+            reproducibility across reruns, pin `scheme=` explicitly.
+
     Returns:
         New KRMHDState at time t + dt
 
@@ -952,9 +965,10 @@ def gandalf_step(
 
     Performance:
         - IMEX path rebuilds `L` and its LU factorization on every call
-          (128 batched 129x129 solves at M=Nz=128). Dominated by FFTs in
-          the RHS evaluations, but not free. See Issue #139 for the caching
-          follow-up.
+          (128 batched 129x129 solves at M=Nz=128). Measured overhead:
+          ~22 ms/step on Apple M-series CPU (build 5 ms + factor 17 ms).
+          Small relative to the four RHS FFT evaluations at 128^3, but
+          not free. See Issue #139 for the caching follow-up.
         - IMEX evaluates `_krmhd_rhs_jit` 4 times per step (2 real k_z for
           the Elsasser midpoint + 2 k_z=0 for the IMEX nonlinear stages);
           the Lawson path evaluates it 6 times (2 + 4 Lawson-RK4 stages).

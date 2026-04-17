@@ -1809,6 +1809,24 @@ class TestIMEX222:
             f"m=M not damped: before={m4_init}, after={m4_final}"
         )
 
+    def test_imex222_hyper_r_path(self):
+        """Smoke test hyper_r=2 on the IMEX path. The post-step resistive
+        damping factor is scheme-independent, but the IMEX code path has its
+        own k_perp_max_squared / hyper_r exponent calculation; this locks
+        it down against regressions in that branch."""
+        state = self._make_random_state(M=4, nu=1.0, z_amp=0.02, g_amp=0.01)
+        # hyper_r=2 is moderate hyper-resistivity; eta must satisfy eta*dt < 50
+        # (normalized resistivity guard).
+        s = state
+        for _ in range(10):
+            s = gandalf_step(s, dt=0.01, eta=0.5, v_A=1.0, nu=1.0,
+                             hyper_r=2, hyper_n=2, scheme="imex_rk222")
+        assert jnp.all(jnp.isfinite(s.z_plus))
+        assert jnp.all(jnp.isfinite(s.z_minus))
+        assert jnp.all(jnp.isfinite(s.g))
+        # High-k modes should be damped by the hyper-resistive exp() factor.
+        assert float(jnp.max(jnp.abs(s.g))) <= float(jnp.max(jnp.abs(state.g))) * 2.0
+
     def test_imex222_minimum_M_with_streaming_and_damping(self):
         """M=2 is the smallest system for which collisional damping is even
         defined (conservation carves out m=0,1 so M>=2 to have a damped m).

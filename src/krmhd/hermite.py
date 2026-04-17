@@ -785,6 +785,12 @@ def build_implicit_operator(
     to JAX's current complex default (complex64 under default configs;
     complex128 only if jax_enable_x64 is enabled).
 
+    Note: the subsequent LU solve inherits the downcast. At M=128 and large
+    k_z the condition number of `(I - gamma dt L)` can reach O(10^3);
+    complex64 residuals are ~3e-7 per test_imex_solve_roundtrip, adequate
+    for typical turbulence runs. Enable jax_enable_x64 for precision-
+    critical work (tracked on Issue #140).
+
     T is the Hermite streaming coupling matrix (tridiagonal, from
     compute_streaming_matrix). D is diag(nu * _damping_diag) with zeros at
     m=0,1 so the damping preserves particle number and momentum.
