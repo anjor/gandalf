@@ -109,6 +109,7 @@ def main():
         state = gandalf_step(
             state, dt=dt, eta=eta, v_A=v_A,
             hyper_r=hyper_r, hyper_n=hyper_n,
+            scheme="imex_rk222",
         )
 
         # Diagnostics

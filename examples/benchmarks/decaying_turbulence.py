@@ -133,7 +133,7 @@ def main():
         # Time step
         if step < n_steps:
             dt = compute_cfl_timestep(state, v_A, cfl_safety)
-            state = gandalf_step(state, dt, eta, v_A)
+            state = gandalf_step(state, dt, eta, v_A, scheme="imex_rk222")
 
     print(f"✓ Completed {n_steps} timesteps")
     print(f"  Final time: t = {state.time:.3f}")

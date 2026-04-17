@@ -843,6 +843,38 @@ class TestIMEXOperator:
         max_err = float(jnp.max(jnp.abs(Ax - rhs)))
         assert max_err < 5e-6, f"residual too large: {max_err}"
 
+    def test_L_times_g_einsum_axis_ordering(self):
+        """Lock down the (zij, zyxj -> zyxi) contraction used in stage B.
+
+        At kz=0 and nu=c>0 the operator L is diagonal with
+        L[0, m, m] = c * _damping_diag[m]. Applied to a g with a single
+        nonzero moment at m0, the result must be a single nonzero entry at
+        m0 with value L[0, m0, m0] * g[0, y, x, m0]. If the einsum axes
+        were swapped (e.g. \"zji,zyxj->zyxi\"), this test would fail.
+        """
+        import numpy as np
+        from krmhd.hermite import build_implicit_operator, _damping_diag
+
+        Nz, Ny, Nxh, M = 1, 2, 2, 6
+        nu = 3.0
+        kz = jnp.array([0.0])
+        L = build_implicit_operator(kz, beta_i=1.0, nu=nu, M=M, Lambda=1.0, hyper_n=2)
+
+        g = jnp.zeros((Nz, Ny, Nxh, M + 1), dtype=L.dtype)
+        m0 = 4
+        g = g.at[0, 1, 0, m0].set(1.0 + 0.5j)
+
+        L_g = jnp.einsum("zij,zyxj->zyxi", L, g)
+
+        # Expected: only the [0, 1, 0, m0] slot is nonzero,
+        # with value = nu * _damping_diag[m0] * g[0,1,0,m0].
+        expected_val = nu * _damping_diag(M, 2)[m0] * (1.0 + 0.5j)
+        assert jnp.allclose(L_g[0, 1, 0, m0], expected_val, atol=1e-6)
+        # And every other slot is zero.
+        mask = np.ones((Nz, Ny, Nxh, M + 1), dtype=bool)
+        mask[0, 1, 0, m0] = False
+        assert jnp.allclose(L_g[jnp.asarray(mask)], 0.0, atol=1e-6)
+
     def test_imex_solve_preserves_m0_m1_at_zero_streaming(self):
         """At kz=0, (I - dt*gamma*L) is identity on m=0,1; they pass through."""
         import numpy as np

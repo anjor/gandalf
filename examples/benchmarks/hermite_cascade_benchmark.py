@@ -570,6 +570,7 @@ def main():
             v_A=v_A,
             hyper_r=hyper_r,
             hyper_n=hyper_n,
+            scheme="imex_rk222",
         )
 
         step += 1

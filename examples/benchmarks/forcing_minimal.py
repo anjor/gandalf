@@ -54,7 +54,7 @@ def main():
         eps_inj = compute_energy_injection_rate(state_before, state, dt)
 
         # Evolve dynamics (cascade + dissipation)
-        state = gandalf_step(state, dt=dt, eta=eta, v_A=v_A)
+        state = gandalf_step(state, dt=dt, eta=eta, v_A=v_A, scheme="imex_rk222")
 
         # Print progress
         E = compute_energy(state)['total']

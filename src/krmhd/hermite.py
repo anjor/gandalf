@@ -739,7 +739,7 @@ def compute_streaming_eigensystem(
 # supported values, so 32 entries easily covers any realistic set of runs
 # and guards against unbounded growth if someone does exploration sweeps.
 @lru_cache(maxsize=32)
-def _damping_diag(M: int, hyper_n: int) -> Any:
+def _damping_diag(M: int, hyper_n: int) -> "np.ndarray":
     """
     Per-moment hyper-collisional damping rates normalized to max-rate unity.
 

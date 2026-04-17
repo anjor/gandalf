@@ -129,7 +129,7 @@ while state.time < t_final:
     if dt < 1e-4:
         print(f"  WARNING: Small timestep dt = {dt:.2e} at t = {state.time:.3f}")
 
-    state = gandalf_step(state, dt, eta, v_A)
+    state = gandalf_step(state, dt, eta, v_A, scheme="imex_rk222")
     step_count += 1
 
     # Safety: abort if too many steps

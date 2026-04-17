@@ -721,7 +721,11 @@ def _gandalf_step_imex222_jit(
         and pure-g convergence remains second-order (see
         test_imex222_order_of_accuracy_*). If future work needs sub-O(dt^2)
         accuracy on the coupled nonlinearity, a true RK evaluation of z+/- at
-        gamma*dt would be needed.
+        gamma*dt would be needed. This same mismatch would propagate to any
+        time-dependent forcing term that inspects `stage_fields.time` inside
+        `_krmhd_rhs_jit` — if such forcing is added (krmhd.forcing is
+        currently time-independent), the forcing time sampled at stage B
+        will also be `t+dt/2` rather than `t+gamma*dt`.
     """
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
     kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
