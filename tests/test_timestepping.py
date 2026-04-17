@@ -1644,6 +1644,26 @@ class TestIMEX222:
         with pytest.raises(ValueError, match="scheme must be"):
             gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, scheme="bogus")
 
+    def test_imex222_nontrivial_vA_matches_lawson(self):
+        """z+/z- Elsasser phase / nonlinear coupling at v_A=2.0 must match
+        Lawson to roundoff. The integrating-factor phases in both kernels use
+        the same convention; passing v_A through must behave identically so
+        a caller using non-unit Alfven velocity is not silently broken.
+        """
+        state0 = self._make_random_state(M=3, nu=0.0, z_amp=0.02, g_amp=0.01)
+        v_A = 2.0
+        state_l = state0
+        state_i = state0
+        for _ in range(10):
+            state_l = gandalf_step(state_l, dt=0.005, eta=0.0, v_A=v_A,
+                                   nu=0.0, scheme="lawson_rk4")
+            state_i = gandalf_step(state_i, dt=0.005, eta=0.0, v_A=v_A,
+                                   nu=0.0, scheme="imex_rk222")
+        diff_plus = float(jnp.max(jnp.abs(state_l.z_plus - state_i.z_plus)))
+        diff_minus = float(jnp.max(jnp.abs(state_l.z_minus - state_i.z_minus)))
+        assert diff_plus < 1e-4, f"z_plus divergence at v_A={v_A}: {diff_plus}"
+        assert diff_minus < 1e-4, f"z_minus divergence at v_A={v_A}: {diff_minus}"
+
     def test_imex222_fluid_limit_regression(self):
         """M=2, nu=0, eta=0: IMEX z+/z- trajectory matches Lawson path closely.
 

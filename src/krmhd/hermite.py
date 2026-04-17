@@ -36,6 +36,7 @@ from functools import lru_cache, partial
 from typing import Optional, Any
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 
@@ -747,8 +748,6 @@ def _damping_diag(M: int, hyper_n: int) -> Any:
     implicit-stage matrix L. Matches the damping block the Lawson path
     applies as exp(-nu * (m/M)^n * dt).
     """
-    import numpy as np
-
     m = np.arange(M + 1, dtype=np.float64)
     # Safe even for M=0,1: we only use m>=2 entries, and zero them out below.
     # Avoid division by zero for M=0: float division would produce inf/nan,
@@ -792,8 +791,6 @@ def build_implicit_operator(
     Returns:
         L: (Nz, M+1, M+1) complex JAX array.
     """
-    import numpy as np
-
     T = compute_streaming_matrix(M, Lambda)  # (M+1, M+1) float64
     D_diag = nu * _damping_diag(M, hyper_n)  # (M+1,) float64, zeros at m=0,1
 

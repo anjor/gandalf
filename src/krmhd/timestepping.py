@@ -53,6 +53,7 @@ from krmhd.hermite import (
     compute_streaming_eigensystem,
     build_implicit_operator,
     factor_imex_operator,
+    imex_solve,
 )
 from krmhd.spectral import derivative_x, derivative_y, rfftn_inverse
 
@@ -647,23 +648,37 @@ def _gandalf_step_imex222_jit(
     piv: Array,
 ) -> KRMHDFields:
     """
-    JIT-compiled IMEX-RK222 (Ascher-Ruuth-Spiteri, gamma=(2-sqrt(2))/2) stepper.
+    JIT-compiled IMEX-RK222 (Ascher-Ruuth-Spiteri 1997, ARS(2,2,2)) stepper.
 
     Linear Hermite streaming and hyper-collisional damping are treated
     implicitly via a per-kz batched LU solve; the Poisson-bracket nonlinear
     advection is treated explicitly. Elsasser z+/z- use the current
     integrating-factor RK2 midpoint (bit-identical to the Lawson-RK4 path).
 
-    Scheme:
-        Stage 1 (implicit):
+    Butcher tableau (gamma=(2-sqrt(2))/2, delta=1-1/(2*gamma); see Ascher,
+    Ruuth, Spiteri 1997, Table IV):
+
+        Implicit A:      Explicit A_tilde:
+          c  |            c  |
+          0  | 0   0   0   0  | 0     0     0
+          g  | 0   g   0   g  | g     0     0
+          1  | 0  1-g  g   1  | d    1-d    0
+          -----------------   -----------------
+             | 0  1-g  g      | d    1-d    0
+
+    The tableau has three stages, but stage 1 is trivial (c=0, A[0,*]=0)
+    so u^(1) = u^n, and N(u^(1)) = N(u^n). This kernel implements the two
+    non-trivial stages directly:
+
+        Stage A (tableau stage 2, c=gamma):
             (I - dt*gamma*L) g^(1) = g^n + dt*gamma*N(g^n, z+/-^n)
-        Stage 2 (implicit):
+        Stage B (tableau stage 3, c=1):
             (I - dt*gamma*L) g^(n+1) = g^n
                 + dt*(1-gamma)*L*g^(1)
                 + dt*delta*N(g^n, z+/-^n)
                 + dt*(1-delta)*N(g^(1), z+/-^(n+dt/2))
 
-    L and its factorization (lu, piv) are precomputed once per step outside
+    L and its factorization (lu, piv) are precomputed per step outside
     this JIT kernel (see gandalf_step). Hyper-collisional damping is folded
     into L; the exponential collision factor is therefore NOT applied here.
     Resistive damping on g (from z+/- coupling) stays exponential.
@@ -685,6 +700,12 @@ def _gandalf_step_imex222_jit(
     phase_plus_full = jnp.exp(+1j * kz_3d * dt)
     phase_minus_full = jnp.exp(-1j * kz_3d * dt)
 
+    # In g's RHS (physics.g0_rhs, g1_rhs, gm_rhs), kz enters only through the
+    # linear streaming term derivative_z(...) that couples m to m+/-1. The
+    # perpendicular Poisson brackets {Phi, g_m} and {Psi, coupled_term} and
+    # the (1-1/Lambda) kinetic correction are all kz-independent. Forcing
+    # kz to zero therefore strips ONLY the streaming contribution and leaves
+    # the nonlinear advection intact — which is exactly what N must be.
     kz_zero = jnp.zeros_like(kz)
 
     def compute_nl_g(stage_fields: KRMHDFields) -> Array:
@@ -715,12 +736,12 @@ def _gandalf_step_imex222_jit(
     z_plus_half = phase_plus_half * (fields.z_plus + phase_plus_half * (dt / 2.0) * nl_plus_0)
     z_minus_half = phase_minus_half * (fields.z_minus + phase_minus_half * (dt / 2.0) * nl_minus_0)
 
-    # IMEX Stage 1: N at (g^n, z+/-^n)
+    # IMEX tableau stage 2 (c=gamma): N evaluated at (g^n, z+/-^n); u^(1)=g^n is trivial
     N_1 = compute_nl_g(fields)
 
     # Solve (I - dt*gamma*L) g^(1) = g^n + dt*gamma * N_1
     rhs_1 = fields.g + (dt * _IMEX_GAMMA) * N_1
-    g_1 = _imex_solve(lu, piv, rhs_1)
+    g_1 = imex_solve(lu, piv, rhs_1)
 
     # Elsasser midpoint RHS (needed for the full-step update and stage-2 N)
     fields_half = KRMHDFields(
@@ -740,9 +761,9 @@ def _gandalf_step_imex222_jit(
     z_plus_new = phase_plus_full * (fields.z_plus + phase_plus_full * dt * nl_plus_half)
     z_minus_new = phase_minus_full * (fields.z_minus + phase_minus_full * dt * nl_minus_half)
 
-    # IMEX Stage 2: N at (g^(1), z+/-^mid)  — already computed above as rhs_half.g,
-    # but rhs_half.g was evaluated with real kz (includes streaming). We need the
-    # nonlinear-only Hermite RHS: reuse compute_nl_g on the same midpoint fields.
+    # IMEX tableau stage 3 (c=1): N at (g^(1), z+/-^{n+dt/2}).
+    # rhs_half.g was evaluated with real kz (includes streaming); we need the
+    # nonlinear-only Hermite RHS here, so reuse compute_nl_g on the midpoint fields.
     N_2 = compute_nl_g(fields_half)
 
     # Explicit L*g^(1) mat-vec (per-kz; (M+1, M+1) @ (M+1,) for each (ky, kx))
@@ -754,7 +775,7 @@ def _gandalf_step_imex222_jit(
         + (dt * _IMEX_DELTA) * N_1
         + (dt * (1.0 - _IMEX_DELTA)) * N_2
     )
-    g_new = _imex_solve(lu, piv, rhs_2)
+    g_new = imex_solve(lu, piv, rhs_2)
 
     # -------------------------------------------------------------------------
     # Post-step dissipation (resistivity) and dealiasing
@@ -779,20 +800,6 @@ def _gandalf_step_imex222_jit(
         g=g_new,
         time=fields.time + dt,
     )
-
-
-def _imex_solve(lu: Array, piv: Array, rhs: Array) -> Array:
-    """
-    Per-kz batched linear solve for the ARS(2,2,2) implicit stages.
-
-    Reshapes rhs of shape (Nz, Ny, Nx//2+1, M+1) into (Nz, M+1, Ny*Nxh) so
-    that jax.scipy.linalg.lu_solve, vmapped over the leading Nz axis, solves
-    one (M+1, M+1) system per k_z against Ny*Nxh RHS vectors at once.
-    """
-    Nz, Ny, Nxh, Mp1 = rhs.shape
-    rhs_batched = jnp.transpose(rhs, (0, 3, 1, 2)).reshape(Nz, Mp1, Ny * Nxh)
-    sol_batched = jax.vmap(jax.scipy.linalg.lu_solve)((lu, piv), rhs_batched)
-    return sol_batched.reshape(Nz, Mp1, Ny, Nxh).transpose(0, 2, 3, 1)
 
 
 def gandalf_step(
