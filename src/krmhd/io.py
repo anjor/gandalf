@@ -417,9 +417,8 @@ def load_checkpoint(
             grid=grid,
         )
 
-        # Load metadata. The 'scheme' attribute lands here automatically
-        # because it is written as an HDF5 attribute on the metadata group.
-        # Coerce bytes -> str per attribute for h5py < 3.0 compatibility.
+        # Decode every attribute, not just scheme: the bytes-vs-str quirk
+        # applies to timestamp, user metadata, etc. under h5py < 3.0 too.
         metadata = {k: _decode_attr(v) for k, v in f['metadata'].attrs.items()}
 
     # Advisory scheme-mismatch warning. Only fires when the checkpoint
@@ -434,16 +433,12 @@ def load_checkpoint(
         and stored_scheme != expected_scheme
     ):
         warnings.warn(
-            f"Checkpoint '{filename}' was written with scheme={stored_scheme!r} "
-            f"but expected_scheme={expected_scheme!r}. The Elsasser z+/- "
-            f"formula is identical under both schemes, but the two JIT graphs "
-            f"produce different float32 arithmetic orderings, so the resumed "
-            f"trajectory will drift by ~1e-6/step from the run that produced "
-            f"this checkpoint. "
-            f"To suppress this warning and accept the switch, omit "
-            f"`expected_scheme` from your `load_checkpoint` call. "
-            f"To reproduce the original trajectory, re-run the simulation "
-            f"under {stored_scheme!r} and save a fresh checkpoint.",
+            f"Checkpoint {filename!r}: stored scheme={stored_scheme!r} but "
+            f"expected_scheme={expected_scheme!r}. The Elsasser formula is "
+            f"scheme-independent but float32 arithmetic ordering differs, so "
+            f"the resumed trajectory will drift ~1e-6/step. "
+            f"To suppress: omit `expected_scheme` from your `load_checkpoint` "
+            f"call. To reproduce: re-run under {stored_scheme!r}.",
             UserWarning,
             stacklevel=2,
         )
@@ -452,12 +447,7 @@ def load_checkpoint(
 
 
 def _validate_scheme(scheme: str, *, kwarg_name: str) -> None:
-    """Reject typos / unknown integrators at the save/load boundary.
-
-    The allow-list is imported from ``krmhd.timestepping`` so there is one
-    place to edit when adding a new integrator — the Literal there drives
-    both static analysis and this runtime check.
-    """
+    """Reject typos / unknown integrators at the save/load boundary."""
     if scheme not in SUPPORTED_SCHEMES:
         raise ValueError(
             f"{kwarg_name}={scheme!r} is not a recognised gandalf_step "
@@ -466,14 +456,7 @@ def _validate_scheme(scheme: str, *, kwarg_name: str) -> None:
 
 
 def _decode_attr(value: Any) -> Any:
-    """Coerce an HDF5 attribute value back to ``str`` when it arrives as
-    ``bytes``.
-
-    h5py < 3.0 returns fixed-length string attributes as ``bytes`` rather
-    than ``str``; later versions return ``str`` by default. Normalizing
-    here keeps equality comparisons (``stored_scheme == expected_scheme``)
-    and the returned metadata dict consistent across h5py versions.
-    """
+    """Coerce bytes -> str so HDF5 string attributes round-trip as str under h5py < 3.0."""
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return value

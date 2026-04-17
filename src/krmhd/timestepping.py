@@ -34,7 +34,7 @@ References:
 import math
 import warnings
 from functools import partial
-from typing import Callable, Literal, Tuple, NamedTuple
+from typing import Callable, Literal, Tuple, NamedTuple, get_args
 
 import jax
 import jax.numpy as jnp
@@ -623,13 +623,12 @@ def _gandalf_step_lawson_rk4_jit(
 # IMEX-RK222 Hermite Integrator (Issue #137)
 # =============================================================================
 
-# Public allow-list of integrator schemes accepted by gandalf_step(). The
-# Literal below is the source of truth for static analysis; SUPPORTED_SCHEMES
-# is the runtime-introspectable frozenset derived from it. Other modules
-# (krmhd.io) import both so there is one place to edit when adding a new
-# integrator.
+# Public allow-list of integrator schemes accepted by gandalf_step().
+# `Scheme` is the single source of truth; `SUPPORTED_SCHEMES` is the
+# runtime-introspectable frozenset derived from it so adding a new
+# integrator is a one-line edit.
 Scheme = Literal["imex_rk222", "lawson_rk4"]
-SUPPORTED_SCHEMES: frozenset[str] = frozenset(("imex_rk222", "lawson_rk4"))
+SUPPORTED_SCHEMES: frozenset[str] = frozenset(get_args(Scheme))
 
 # ARS(2,2,2) implicit-stage coefficient and stage-2 explicit scaling (Python floats).
 # Note delta is NEGATIVE (~ -0.7071); the dt*delta*N_1 contribution in
