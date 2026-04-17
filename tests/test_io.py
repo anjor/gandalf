@@ -15,6 +15,7 @@ Test organization:
 """
 
 import tempfile
+import warnings
 from pathlib import Path
 import pytest
 import numpy as np
@@ -255,6 +256,155 @@ def test_checkpoint_grid_reconstruction(state, tmpdir):
     assert len(loaded_grid.ky) == state.grid.Ny
     assert len(loaded_grid.kz) == state.grid.Nz
     assert loaded_grid.dealias_mask.shape == (state.grid.Nz, state.grid.Ny, state.grid.Nx // 2 + 1)
+
+
+# =============================================================================
+# Scheme tag on checkpoints
+# =============================================================================
+
+
+def test_checkpoint_scheme_tag_written(state, tmpdir):
+    """When `scheme=` is passed to save_checkpoint, it lands in metadata."""
+    filename = tmpdir / "ckpt_scheme.h5"
+    save_checkpoint(state, str(filename), scheme="imex_rk222")
+
+    _, _, metadata = load_checkpoint(str(filename))
+    assert metadata.get("scheme") == "imex_rk222"
+
+
+def test_checkpoint_scheme_tag_absent_by_default(state, tmpdir):
+    """Without `scheme=`, the attribute is NOT written (legacy compat)."""
+    filename = tmpdir / "ckpt_no_scheme.h5"
+    save_checkpoint(state, str(filename))
+
+    _, _, metadata = load_checkpoint(str(filename))
+    assert "scheme" not in metadata
+
+
+def test_checkpoint_scheme_mismatch_warns(state, tmpdir):
+    """Loading with expected_scheme that differs from the stored scheme
+    emits a UserWarning naming both schemes."""
+    filename = tmpdir / "ckpt_mismatch.h5"
+    save_checkpoint(state, str(filename), scheme="lawson_rk4")
+
+    with pytest.warns(UserWarning, match="lawson_rk4.*imex_rk222"):
+        load_checkpoint(str(filename), expected_scheme="imex_rk222")
+
+
+def test_checkpoint_scheme_match_silent(state, tmpdir):
+    """Matching schemes do not emit a warning."""
+    filename = tmpdir / "ckpt_match.h5"
+    save_checkpoint(state, str(filename), scheme="imex_rk222")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # Turn warnings into errors for this block
+        load_checkpoint(str(filename), expected_scheme="imex_rk222")
+
+
+def test_checkpoint_legacy_no_stored_scheme_silent(state, tmpdir):
+    """Legacy checkpoints (no scheme attribute) emit no warning, even when
+    expected_scheme is provided. Silence is the backward-compat contract."""
+    filename = tmpdir / "ckpt_legacy.h5"
+    save_checkpoint(state, str(filename))  # no scheme=
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        load_checkpoint(str(filename), expected_scheme="imex_rk222")
+
+
+def test_checkpoint_expected_scheme_none_silent(state, tmpdir):
+    """Default expected_scheme=None skips the check entirely, even when a
+    scheme is stored. Non-opinionated callers stay quiet."""
+    filename = tmpdir / "ckpt_expected_none.h5"
+    save_checkpoint(state, str(filename), scheme="lawson_rk4")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        load_checkpoint(str(filename))  # no expected_scheme
+
+
+def test_checkpoint_save_rejects_unknown_scheme(state, tmpdir):
+    """A typo in `scheme` is caught at save time, not silently stored."""
+    filename = tmpdir / "ckpt_bad_save.h5"
+    with pytest.raises(ValueError, match="scheme='imex_rk22'"):
+        save_checkpoint(state, str(filename), scheme="imex_rk22")  # typo
+    # And the file is never created.
+    assert not filename.exists()
+
+
+def test_checkpoint_load_rejects_unknown_expected_scheme(state, tmpdir):
+    """A typo in `expected_scheme` is caught at load time, before the
+    mismatch check runs (symmetric with save-side validation)."""
+    filename = tmpdir / "ckpt_bad_load.h5"
+    save_checkpoint(state, str(filename), scheme="imex_rk222")
+    with pytest.raises(ValueError, match="expected_scheme='foo'"):
+        load_checkpoint(str(filename), expected_scheme="foo")
+
+
+def test_checkpoint_scheme_tag_survives_bytes_attr(state, tmpdir):
+    """h5py < 3.0 (and some edge cases in 3.x with vlen_string=False) return
+    fixed-length string attributes as `bytes`. The mismatch check must still
+    fire in that case: `stored_scheme = b"lawson_rk4"` is not equal to the
+    str `"imex_rk222"`, so without the bytes-decode helper we would silently
+    miss the mismatch."""
+    filename = tmpdir / "ckpt_bytes.h5"
+    save_checkpoint(state, str(filename), scheme="lawson_rk4")
+
+    # Simulate the h5py < 3.0 path: reopen the file and rewrite the scheme
+    # attribute as a fixed-length (= bytes-returning) string.
+    with h5py.File(str(filename), "a") as f:
+        del f["metadata"].attrs["scheme"]
+        f["metadata"].attrs.create(
+            "scheme",
+            data=b"lawson_rk4",
+            dtype=h5py.string_dtype(encoding="utf-8", length=10),
+        )
+
+    with pytest.warns(UserWarning, match="lawson_rk4.*imex_rk222"):
+        _, _, metadata = load_checkpoint(str(filename), expected_scheme="imex_rk222")
+    # And the returned metadata should have a plain str, not bytes, so
+    # downstream code can use it without further coercion.
+    assert metadata["scheme"] == "lawson_rk4"
+    assert isinstance(metadata["scheme"], str)
+
+
+def test_checkpoint_mismatch_warning_remediation_text(state, tmpdir):
+    """The warning must name a remediation that actually suppresses it.
+    Suppressing requires either omitting expected_scheme or re-saving the
+    checkpoint; pinning gandalf_step has zero effect on load_checkpoint
+    behaviour."""
+    filename = tmpdir / "ckpt_remediation_text.h5"
+    save_checkpoint(state, str(filename), scheme="lawson_rk4")
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        load_checkpoint(str(filename), expected_scheme="imex_rk222")
+
+    assert len(w) == 1
+    msg = str(w[0].message)
+    # Correct remediation is named verbatim.
+    assert "omit" in msg and "expected_scheme" in msg and "load_checkpoint" in msg
+    # And the misleading old phrasing ("pin gandalf_step") must NOT appear.
+    assert "pin your call to `gandalf_step" not in msg
+
+
+def test_checkpoint_mismatch_warning_points_to_caller(state, tmpdir):
+    """stacklevel=2 ensures the warning's source location names the
+    caller's frame, not io.py. Without it, a mismatched diagnostic looks
+    like it came from inside the library, which is unhelpful for triage."""
+    filename = tmpdir / "ckpt_stacklevel.h5"
+    save_checkpoint(state, str(filename), scheme="lawson_rk4")
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        load_checkpoint(str(filename), expected_scheme="imex_rk222")
+
+    assert len(w) == 1
+    # The recorded warning should point at THIS test file (the caller),
+    # not the io.py module that issued the warning.
+    assert w[0].filename.endswith("test_io.py"), (
+        f"warning filename {w[0].filename!r} is not the caller frame"
+    )
 
 
 # =============================================================================

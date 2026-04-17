@@ -355,7 +355,9 @@ def main():
         print(f"RESUMING FROM CHECKPOINT: {args.resume_from}")
         print("=" * 70)
 
-        resumed_state, resumed_grid, resumed_metadata = load_checkpoint(args.resume_from)
+        resumed_state, resumed_grid, resumed_metadata = load_checkpoint(
+            args.resume_from, expected_scheme="imex_rk222"
+        )
         initial_time = float(resumed_state.time)
         initial_step = int(resumed_metadata.get('step', 0))
 
@@ -738,7 +740,7 @@ def main():
                         cfl_number=float(diag.cfl_number),
                         max_velocity=float(diag.max_velocity),
                     )
-                    save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=False)
+                    save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=False, scheme="imex_rk222")
                     print(f"  💾 Auto-saved checkpoint: {checkpoint_filename}")
 
         # Periodic checkpoint saving (by time)
@@ -760,7 +762,7 @@ def main():
                 n_force_max=n_force_max,
                 description=f'Periodic checkpoint at t={state.time:.2f} τ_A',
             )
-            save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True)
+            save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True, scheme="imex_rk222")
             last_checkpoint_time = state.time
             print(f"  💾 Saved periodic checkpoint (by time): {checkpoint_filename}")
 
@@ -783,7 +785,7 @@ def main():
                 n_force_max=n_force_max,
                 description=f'Periodic checkpoint at step {step}',
             )
-            save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True)
+            save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True, scheme="imex_rk222")
             last_checkpoint_step = step
             print(f"  💾 Saved periodic checkpoint (by steps): {checkpoint_filename}")
 
@@ -945,7 +947,7 @@ def main():
             description=f'Final checkpoint at t={state.time:.2f} τ_A (end of run)',
             total_time=float(total_time),
         )
-        save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True)
+        save_checkpoint(state, str(checkpoint_path), metadata=checkpoint_metadata, overwrite=True, scheme="imex_rk222")
         print(f"\n💾 Saved final checkpoint: {checkpoint_filename}")
 
     # Final summary

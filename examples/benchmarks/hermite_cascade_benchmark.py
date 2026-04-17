@@ -348,7 +348,9 @@ def main():
     if args.resume_from:
         print(f"Resuming from checkpoint: {args.resume_from}")
         try:
-            state, grid, metadata = load_checkpoint(args.resume_from)
+            state, grid, metadata = load_checkpoint(
+                args.resume_from, expected_scheme="imex_rk222"
+            )
 
             # Validate grid parameters match
             if grid.Nx != Nx or grid.Ny != Ny or grid.Nz != Nz:
@@ -469,7 +471,7 @@ def main():
         # Save checkpoint periodically
         if step > 0 and step % checkpoint_interval == 0:
             checkpoint_filename = output_dir / f"hermite_cascade_checkpoint_step{step}_t{state.time:.1f}.h5"
-            save_checkpoint(state, str(checkpoint_filename))
+            save_checkpoint(state, str(checkpoint_filename), scheme="imex_rk222")
             print(f"  💾 Saved checkpoint: {checkpoint_filename.name}")
 
         if step % save_interval == 0:

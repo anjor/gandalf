@@ -86,6 +86,7 @@ import jax.numpy as jnp
 from krmhd.physics import KRMHDState
 from krmhd.spectral import SpectralGrid3D
 from krmhd.diagnostics import EnergyHistory, TurbulenceDiagnostics
+from krmhd.timestepping import Scheme, SUPPORTED_SCHEMES
 
 # File format version for compatibility checking
 # Increment when making breaking changes to file structure
@@ -101,6 +102,7 @@ def save_checkpoint(
     filename: str,
     metadata: Optional[Dict[str, Any]] = None,
     overwrite: bool = False,
+    scheme: Optional[Scheme] = None,
 ) -> None:
     """
     Save KRMHD state to HDF5 checkpoint file.
@@ -114,6 +116,12 @@ def save_checkpoint(
         filename: Output HDF5 file path
         metadata: Optional user metadata dict (arbitrary key-value pairs)
         overwrite: If True, overwrite existing file; otherwise raise error
+        scheme: Advisory — the gandalf_step integrator that produced this
+            state (``"imex_rk222"`` or ``"lawson_rk4"``). When provided, it
+            is written as an HDF5 metadata attribute and surfaced by
+            ``load_checkpoint`` so a resumed run can detect silent integrator
+            switches. ``None`` (default) omits the attribute; the state
+            format is unchanged.
 
     Raises:
         FileExistsError: If file exists and overwrite=False
@@ -128,7 +136,8 @@ def save_checkpoint(
         ...         "description": "Turbulence simulation",
         ...         "run_id": "turb_001",
         ...         "parameters": {"eta": 0.01, "nu": 0.01}
-        ...     }
+        ...     },
+        ...     scheme="imex_rk222",
         ... )
 
     File structure:
@@ -145,6 +154,11 @@ def save_checkpoint(
         Typical compression ratios are 2-5× for turbulent fields.
     """
     filepath = Path(filename)
+
+    # Validate the advisory scheme tag BEFORE touching the filesystem so a
+    # typo can't leave a partially-written file behind.
+    if scheme is not None:
+        _validate_scheme(scheme, kwarg_name="scheme")
 
     # Check if file exists
     if filepath.exists() and not overwrite:
@@ -246,6 +260,11 @@ def save_checkpoint(
         meta_group.attrs['version'] = IO_FORMAT_VERSION
         meta_group.attrs['timestamp'] = datetime.now().isoformat()
 
+        # Advisory scheme tag. Validation already happened at the top of
+        # save_checkpoint so we can't silently store a typo.
+        if scheme is not None:
+            meta_group.attrs['scheme'] = scheme
+
         # Add user metadata if provided
         if metadata is not None:
             for key, value in metadata.items():
@@ -260,6 +279,7 @@ def save_checkpoint(
 def load_checkpoint(
     filename: str,
     validate_grid: bool = True,
+    expected_scheme: Optional[Scheme] = None,
 ) -> Tuple[KRMHDState, SpectralGrid3D, Dict[str, Any]]:
     """
     Load KRMHD state from HDF5 checkpoint file.
@@ -271,11 +291,20 @@ def load_checkpoint(
     Args:
         filename: Input HDF5 checkpoint file path
         validate_grid: If True, verify grid dimensions are consistent
+        expected_scheme: Optional gandalf_step scheme the caller intends to
+            resume with (``"imex_rk222"`` or ``"lawson_rk4"``). If provided
+            *and* the checkpoint was saved with a ``scheme`` tag, a
+            ``UserWarning`` is emitted when they differ — a silent switch
+            between integrators makes trajectories drift by ~1e-6/step at
+            float32 even though the Elsasser formula is scheme-independent.
+            ``None`` (default) skips the check for backward compatibility
+            with legacy checkpoints.
 
     Returns:
         state: Loaded KRMHD state
         grid: Reconstructed SpectralGrid3D
-        metadata: Dictionary with file metadata (version, timestamp, user data)
+        metadata: Dictionary with file metadata (version, timestamp, user
+            data, and ``scheme`` if the save side recorded one)
 
     Raises:
         FileNotFoundError: If checkpoint file doesn't exist
@@ -297,6 +326,10 @@ def load_checkpoint(
         (float32 on GPU, float32/float64 depending on JAX config on CPU).
     """
     filepath = Path(filename)
+
+    # Validate advisory kwarg up front (symmetric with save_checkpoint).
+    if expected_scheme is not None:
+        _validate_scheme(expected_scheme, kwarg_name="expected_scheme")
 
     if not filepath.exists():
         raise FileNotFoundError(f"Checkpoint file '{filename}' not found")
@@ -384,10 +417,49 @@ def load_checkpoint(
             grid=grid,
         )
 
-        # Load metadata
-        metadata = dict(f['metadata'].attrs)
+        # Decode every attribute, not just scheme: the bytes-vs-str quirk
+        # applies to timestamp, user metadata, etc. under h5py < 3.0 too.
+        metadata = {k: _decode_attr(v) for k, v in f['metadata'].attrs.items()}
+
+    # Advisory scheme-mismatch warning. Only fires when the checkpoint
+    # recorded a scheme AND the caller explicitly named the scheme it
+    # intends to resume with — otherwise stay silent so legacy checkpoints
+    # and non-opinionated callers don't get noisy. Validation of
+    # expected_scheme happened at the top of the function.
+    stored_scheme = metadata.get('scheme')
+    if (
+        expected_scheme is not None
+        and stored_scheme is not None
+        and stored_scheme != expected_scheme
+    ):
+        warnings.warn(
+            f"Checkpoint {filename!r}: stored scheme={stored_scheme!r} but "
+            f"expected_scheme={expected_scheme!r}. The Elsasser formula is "
+            f"scheme-independent but float32 arithmetic ordering differs, so "
+            f"the resumed trajectory will drift ~1e-6/step. "
+            f"To suppress: omit `expected_scheme` from your `load_checkpoint` "
+            f"call. To reproduce: re-run under {stored_scheme!r}.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     return state, grid, metadata
+
+
+def _validate_scheme(scheme: str, *, kwarg_name: str) -> None:
+    """Reject typos / unknown integrators at the save/load boundary."""
+    if scheme not in SUPPORTED_SCHEMES:
+        raise ValueError(
+            f"{kwarg_name}={scheme!r} is not a recognised gandalf_step "
+            f"integrator. Expected one of {sorted(SUPPORTED_SCHEMES)}."
+        )
+
+
+def _decode_attr(value: Any) -> Any:
+    """Coerce bytes -> str so HDF5 string attributes round-trip as str under h5py < 3.0."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return value
 
 
 def save_timeseries(
