@@ -803,7 +803,7 @@ def gandalf_step(
     nu: float | None = None,
     hyper_r: int = 1,
     hyper_n: int = 1,
-    scheme: str = "lawson_rk4",
+    scheme: str = "imex_rk222",
 ) -> KRMHDState:
     """
     Advance KRMHD state using the mixed GANDALF integrating-factor method.
@@ -838,12 +838,14 @@ def gandalf_step(
             - n=2: Moderate hyper-collision -νm² (recommended for most cases)
             - n=3: Strong hyper-collision -νm³ (matches original GANDALF alpha_m=3)
             - n=4: Very strong hyper-collision -νm⁴ (expert use, requires small nu)
-        scheme: Hermite integrator choice (default "lawson_rk4").
-            - "lawson_rk4": current mixed integrating-factor + Lawson-RK4 path.
-            - "imex_rk222": ARS(2,2,2) IMEX scheme (Issue #137). Streaming and
+        scheme: Hermite integrator choice (default "imex_rk222" per Issue #137).
+            - "imex_rk222": ARS(2,2,2) IMEX scheme. Streaming and
               hyper-collisional damping are implicit (unconditionally stable);
               nonlinear advection is explicit. Elsasser z+/z- advance is
               bit-identical to the Lawson path.
+            - "lawson_rk4": legacy mixed integrating-factor + Lawson-RK4 path,
+              retained for comparison and rollback. Known to be unstable at
+              high M·k_z (see Issue #137).
 
     Returns:
         New KRMHDState at time t + dt

@@ -748,8 +748,12 @@ class TestHyperdissipationValidation:
         state = initialize_alfven_wave(grid, M=20, kz_mode=1, amplitude=0.1)
         state.nu = nu_overflow
 
+        # Scheme is pinned to "lawson_rk4" because the overflow guard exists
+        # to protect exp(-nu*dt) from underflowing. The IMEX path folds
+        # damping into an implicit solve (unconditionally stable) and
+        # deliberately skips this guard; see TestIMEX222.
         with pytest.raises(ValueError, match="Hyper-collision overflow risk detected"):
-            gandalf_step(state, dt=dt, eta=0.01, v_A=1.0, hyper_n=4)
+            gandalf_step(state, dt=dt, eta=0.01, v_A=1.0, hyper_n=4, scheme="lawson_rk4")
 
     def test_hypercollision_overflow_warning(self):
         """Moderate hyper-collision rate should emit warning."""
@@ -765,7 +769,8 @@ class TestHyperdissipationValidation:
         import warnings
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            gandalf_step(state, dt=dt, eta=0.01, v_A=1.0, hyper_n=4)
+            # Lawson-specific warning (see overflow-error comment above).
+            gandalf_step(state, dt=dt, eta=0.01, v_A=1.0, hyper_n=4, scheme="lawson_rk4")
 
             # Check that a warning was issued
             assert len(w) == 1
@@ -1112,7 +1117,8 @@ class TestHyperdissipationDegenerateCases:
         state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
 
         # NORMALIZED constraint: warning threshold is ν·dt = 20.0
-        # Independent of M, n, or resolution!
+        # Independent of M, n, or resolution! This is a Lawson-path-only
+        # guard (IMEX folds damping into an implicit solve); pin scheme.
         dt = 0.01
         eta = 0.001
         nu_threshold = 20.0 / dt  # Exactly at warning threshold (nu·dt = 20.0)
@@ -1123,7 +1129,8 @@ class TestHyperdissipationDegenerateCases:
             warnings.simplefilter("always")
 
             # Should trigger warning (rate >= 20.0)
-            state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+            state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2,
+                                     scheme="lawson_rk4")
 
             # Verify warning was triggered
             hyper_warnings = [warning for warning in w
@@ -1137,7 +1144,8 @@ class TestHyperdissipationDegenerateCases:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
 
-            state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2)
+            state_new = gandalf_step(state, dt, eta=eta, v_A=1.0, hyper_r=2, hyper_n=2,
+                                     scheme="lawson_rk4")
 
             # Verify no warning below threshold
             hyper_warnings = [warning for warning in w
