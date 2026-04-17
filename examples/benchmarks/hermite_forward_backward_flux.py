@@ -221,6 +221,7 @@ def main():
             v_A=v_A,
             hyper_r=2,
             hyper_n=args.hyper_n,
+            scheme="imex_rk222",
         )
 
     print(f"\n✓ Evolution complete at t = {state.time:.4f} τ_A")

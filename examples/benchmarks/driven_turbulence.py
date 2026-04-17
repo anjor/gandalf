@@ -164,7 +164,7 @@ def main():
         total_injection += eps_inj * dt
 
         # Evolve dynamics (cascade + dissipation)
-        state = gandalf_step(state, dt=dt, eta=eta, v_A=v_A)
+        state = gandalf_step(state, dt=dt, eta=eta, v_A=v_A, scheme="imex_rk222")
 
         # Save diagnostics
         if (i + 1) % save_interval == 0:

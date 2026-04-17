@@ -31,9 +31,10 @@ References:
     - Eqs. 2.13-2.25 - Integrating factor + RK2 timestepping
 """
 
-from functools import partial
-from typing import Callable, Tuple, NamedTuple
+import math
 import warnings
+from functools import partial
+from typing import Callable, Literal, Tuple, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -47,7 +48,13 @@ from krmhd.physics import (
     g1_rhs,
     gm_rhs,
 )
-from krmhd.hermite import compute_streaming_matrix, compute_streaming_eigensystem
+from krmhd.hermite import (
+    compute_streaming_matrix,
+    compute_streaming_eigensystem,
+    build_implicit_operator,
+    factor_imex_operator,
+    imex_solve,
+)
 from krmhd.spectral import derivative_x, derivative_y, rfftn_inverse
 
 
@@ -306,7 +313,7 @@ def krmhd_rhs(
 
 
 @partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n"])
-def _gandalf_step_jit(
+def _gandalf_step_lawson_rk4_jit(
     fields: KRMHDFields,
     dt: float,
     kx: Array,
@@ -397,6 +404,9 @@ def _gandalf_step_jit(
     # Integrating factors (thesis Eq. 2.13-2.14)
     # For ∂ξ⁺/∂t - ikz·ξ⁺ = [NL]: multiply by e^(+ikz*t)
     # For ∂ξ⁻/∂t + ikz·ξ⁻ = [NL]: multiply by e^(-ikz*t)
+    # Note: v_A is absent by convention — KRMHD uses thesis normalization with
+    # τ_A = L_z/v_A = 1, so v_A enters only through the nonlinear Poisson
+    # bracket (via {ψ, …}) and the CFL timestep, not the linear Alfven phase.
     phase_plus_half = jnp.exp(+1j * kz_3d * dt / 2.0)
     phase_minus_half = jnp.exp(-1j * kz_3d * dt / 2.0)
     phase_plus_full = jnp.exp(+1j * kz_3d * dt)
@@ -609,6 +619,259 @@ def _gandalf_step_jit(
     )
 
 
+# =============================================================================
+# IMEX-RK222 Hermite Integrator (Issue #137)
+# =============================================================================
+
+# ARS(2,2,2) implicit-stage coefficient and stage-2 explicit scaling (Python floats).
+# Note delta is NEGATIVE (~ -0.7071); the dt*delta*N_1 contribution in
+# stage B's RHS therefore *subtracts* the initial-state nonlinear evaluation.
+# This is correct per Ascher-Ruuth-Spiteri 1997 Table IV.
+_IMEX_GAMMA: float = (2.0 - math.sqrt(2.0)) / 2.0        # gamma = (2 - sqrt(2))/2
+_IMEX_DELTA: float = 1.0 - 1.0 / (2.0 * _IMEX_GAMMA)     # delta = 1 - 1/(2*gamma) ~ -0.7071
+
+# Sentinel passed as nu to _krmhd_rhs_jit on the IMEX path. Hyper-collisional
+# damping is folded into the implicit operator L via _damping_diag in
+# build_implicit_operator, so the explicit RHS must NOT double-count it.
+# Using this named constant makes the "deliberately zero" intent readable at
+# every call site (otherwise a bare literal `0.0` looks like a mistake).
+_NU_IN_IMPLICIT_OPERATOR: float = 0.0
+
+
+# Note: hyper_n is deliberately absent from static_argnames because it is
+# baked into L_per_kz (via _damping_diag) before this JIT kernel is called.
+# Adding it here would force a needless recompile whenever hyper_n changed,
+# even though the traced graph has no direct dependence on it.
+@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r"])
+def _gandalf_step_imex222_jit(
+    fields: KRMHDFields,
+    dt: float,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    eta: float,
+    v_A: float,
+    beta_i: float,
+    nu: float,
+    Lambda: float,
+    M: int,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+    hyper_r: int,
+    L_per_kz: Array,
+    lu: Array,
+    piv: Array,
+) -> KRMHDFields:
+    """
+    JIT-compiled IMEX-RK222 (Ascher-Ruuth-Spiteri 1997, ARS(2,2,2)) stepper.
+
+    Linear Hermite streaming and hyper-collisional damping are treated
+    implicitly via a per-kz batched LU solve; the Poisson-bracket nonlinear
+    advection is treated explicitly. Elsasser z+/z- use the current
+    integrating-factor RK2 midpoint. The Elsasser formula is identical to
+    the Lawson path (z_plus_rhs / z_minus_rhs do not depend on g), but the
+    two schemes produce a different JIT graph, so the realized z+/- trajectory
+    agrees only to ~float32 accumulation error (~5e-4 over 200 steps, see
+    test_imex222_nontrivial_vA_matches_lawson), not to machine precision.
+
+    Butcher tableau (γ=(2-√2)/2 ≈ 0.2929, δ=1-1/(2γ) ≈ -0.7071; see Ascher,
+    Ruuth, Spiteri 1997, Table IV). Below "g" in the Hermite field and "γ"
+    the tableau coefficient are distinct — tableau rows use γ, not g:
+
+        Implicit A:          Explicit Ã:
+          c  |                c  |
+          0  | 0    0    0     0  | 0     0     0
+          γ  | 0    γ    0     γ  | γ     0     0
+          1  | 0   1-γ   γ     1  | δ    1-δ    0
+          --------------------    --------------------
+             | 0   1-γ   γ         | δ    1-δ    0
+
+    The tableau has three stages, but stage 1 is trivial (c=0, A[0,*]=0)
+    so g^(1) = g^n, and N(g^(1)) = N(g^n). This kernel implements the two
+    non-trivial stages directly:
+
+        Stage A (tableau stage 2, c=γ):
+            (I - dt·γ·L) g^(1) = g^n + dt·γ·N(g^n, z±^n)
+        Stage B (tableau stage 3, c=1):
+            (I - dt·γ·L) g^(n+1) = g^n
+                + dt·(1-γ)·L·g^(1)
+                + dt·δ·N(g^n, z±^n)
+                + dt·(1-δ)·N(g^(1), z±^(n+dt/2))
+
+    L and its factorization (lu, piv) are precomputed per step outside
+    this JIT kernel (see gandalf_step). Hyper-collisional damping is folded
+    into L; the exponential collision factor is therefore NOT applied here.
+
+    Known limitation — resistivity splitting:
+        Resistive damping on g is applied as an exponential post-step factor
+        exp(-eta*(k_perp^2/k_perp_max^2)^r*dt), identical to the Lawson path.
+        This is a 1st-order Strang-style operator split with the IMEX solve —
+        the combined scheme is formally 2nd-order for the streaming +
+        collision block and 1st-order for the streaming + resistivity
+        interaction. For eta*dt*|k_perp|^(2r) << 1 (the typical turbulence
+        regime), the extra splitting error is negligible.
+
+    Known limitation — z+/- coupling time:
+        Stage B evaluates N(g^(1), z+/-^{n+dt/2}) using the Elsasser midpoint,
+        but the ARS(2,2,2) tableau places stage 2 at c=gamma*dt ~= 0.293*dt.
+        The resulting O(dt^2*|gamma-1/2|) phase mismatch in the z+/-<->g
+        cross-coupling is absorbed by the scheme's global O(dt^2) truncation,
+        and pure-g convergence remains second-order (see
+        test_imex222_order_of_accuracy_*). If future work needs sub-O(dt^2)
+        accuracy on the coupled nonlinearity, a true RK evaluation of z+/- at
+        gamma*dt would be needed. This same mismatch would propagate to any
+        time-dependent forcing term that inspects `stage_fields.time` inside
+        `_krmhd_rhs_jit` — if such forcing is added (krmhd.forcing is
+        currently time-independent), the forcing time sampled at stage B
+        will also be `t+dt/2` rather than `t+gamma*dt`.
+    """
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+
+    idx_max = (Nx - 1) // 3
+    idy_max = (Ny - 1) // 3
+    k_perp_max_squared = kx[idx_max]**2 + ky[idy_max]**2
+
+    # -------------------------------------------------------------------------
+    # Elsasser integrating-factor RK2 midpoint (unchanged from Lawson path).
+    # Phase factors match _gandalf_step_lawson_rk4_jit byte-for-byte. v_A does
+    # not appear here: KRMHD uses thesis normalization with τ_A = L_z/v_A = 1,
+    # so v_A enters only through the nonlinear Poisson bracket and CFL.
+    # -------------------------------------------------------------------------
+    phase_plus_half = jnp.exp(+1j * kz_3d * dt / 2.0)
+    phase_minus_half = jnp.exp(-1j * kz_3d * dt / 2.0)
+    phase_plus_full = jnp.exp(+1j * kz_3d * dt)
+    phase_minus_full = jnp.exp(-1j * kz_3d * dt)
+
+    # In g's RHS (physics.g0_rhs, g1_rhs, gm_rhs), kz enters only through the
+    # linear streaming term derivative_z(...) that couples m to m+/-1. The
+    # perpendicular Poisson brackets {Phi, g_m} and {Psi, coupled_term} and
+    # the (1-1/Lambda) kinetic correction are all kz-independent. Forcing
+    # kz to zero therefore strips ONLY the streaming contribution and leaves
+    # the nonlinear advection intact — which is exactly what N must be.
+    # No double-counting of collisions: g{0,1,m}_rhs do NOT take nu, and
+    # physics.py:1049 explicitly states collisions are applied in the
+    # timestepper, not in the RHS. The nu argument below is a no-op for
+    # g's RHS; collisions enter only via D inside the implicit operator L.
+    kz_zero = jnp.zeros_like(kz)
+
+    def compute_nl_g(stage_fields: KRMHDFields) -> Array:
+        """Evaluate Hermite nonlinear RHS with kz forced to zero (strips streaming)."""
+        return _krmhd_rhs_jit(
+            stage_fields,
+            kx,
+            ky,
+            kz_zero,
+            dealias_mask,
+            0.0,
+            v_A,
+            beta_i,
+            _NU_IN_IMPLICIT_OPERATOR,
+            Lambda,
+            M,
+            Nz,
+            Ny,
+            Nx,
+        ).g
+
+    # Elsasser half-step. Passing nu=0.0 explicitly (not nu) makes it visible
+    # that _krmhd_rhs_jit's nu argument is intentionally a no-op on the IMEX
+    # path: collisional damping lives in L, not in the RHS. If someone later
+    # adds a nu-dependent term to the RHS, the zero here is a signpost that
+    # the IMEX path needs separate handling.
+    rhs_0 = _krmhd_rhs_jit(
+        fields, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i,
+        _NU_IN_IMPLICIT_OPERATOR, Lambda, M, Nz, Ny, Nx
+    )
+    nl_plus_0 = rhs_0.z_plus - (1j * kz_3d * fields.z_plus)
+    nl_minus_0 = rhs_0.z_minus + (1j * kz_3d * fields.z_minus)
+    z_plus_half = phase_plus_half * (fields.z_plus + phase_plus_half * (dt / 2.0) * nl_plus_0)
+    z_minus_half = phase_minus_half * (fields.z_minus + phase_minus_half * (dt / 2.0) * nl_minus_0)
+
+    # IMEX tableau stage 2 (c=gamma): N evaluated at (g^n, z+/-^n); u^(1)=g^n is trivial
+    N_1 = compute_nl_g(fields)
+
+    # Solve (I - dt*gamma*L) g^(1) = g^n + dt*gamma * N_1
+    rhs_1 = fields.g + (dt * _IMEX_GAMMA) * N_1
+    g_1 = imex_solve(lu, piv, rhs_1)
+
+    # Elsasser midpoint RHS (needed for the full-step update and stage-2 N)
+    fields_half = KRMHDFields(
+        z_plus=z_plus_half,
+        z_minus=z_minus_half,
+        B_parallel=fields.B_parallel,
+        g=g_1,
+        time=fields.time + dt / 2.0,
+    )
+    # nu=0.0 here for the same reason as in the half-step call above.
+    rhs_half = _krmhd_rhs_jit(
+        fields_half, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i,
+        _NU_IN_IMPLICIT_OPERATOR, Lambda, M, Nz, Ny, Nx
+    )
+    nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
+    nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
+
+    # Elsasser full-step (matches Lawson path exactly given same nl_plus/minus_half)
+    z_plus_new = phase_plus_full * (fields.z_plus + phase_plus_full * dt * nl_plus_half)
+    z_minus_new = phase_minus_full * (fields.z_minus + phase_minus_full * dt * nl_minus_half)
+
+    # IMEX tableau stage 3 (c=1): N at (g^(1), z+/-^{n+dt/2}).
+    # rhs_half.g was evaluated with real kz (includes streaming); we need the
+    # nonlinear-only Hermite RHS here, so reuse compute_nl_g on the midpoint fields.
+    N_2 = compute_nl_g(fields_half)
+
+    # Explicit L*g^(1) mat-vec (per-kz; (M+1, M+1) @ (M+1,) for each (ky, kx))
+    L_g1 = jnp.einsum("zij,zyxj->zyxi", L_per_kz, g_1)
+
+    rhs_2 = (
+        fields.g
+        + (dt * (1.0 - _IMEX_GAMMA)) * L_g1
+        + (dt * _IMEX_DELTA) * N_1
+        + (dt * (1.0 - _IMEX_DELTA)) * N_2
+    )
+    g_new = imex_solve(lu, piv, rhs_2)
+
+    # -------------------------------------------------------------------------
+    # Post-step dissipation (resistivity) and dealiasing
+    # -------------------------------------------------------------------------
+    k_perp_2r_normalized = (k_perp_squared / k_perp_max_squared) ** hyper_r
+    perp_dissipation_factor = jnp.exp(-eta * k_perp_2r_normalized * dt)
+    z_plus_new = z_plus_new * perp_dissipation_factor
+    z_minus_new = z_minus_new * perp_dissipation_factor
+
+    # Resistive damping on g (from coupling to z+/-, kept exponential).
+    # Hyper-collisional damping is already inside L, so no collision factor
+    # here. Reuses perp_dissipation_factor computed above for the z+/- damping
+    # — the resistive kernel is identical across all three fields. The
+    # [:, :, :, jnp.newaxis] broadcast appends the m-axis so the (Nz, Ny, Nxh)
+    # kernel multiplies uniformly across all Hermite moments of g.
+    g_new = g_new * perp_dissipation_factor[:, :, :, jnp.newaxis]
+
+    # Defensive dealias of Hermite moments. z+/- are NOT dealiased here by
+    # design: their dealiasing is already done inside _krmhd_rhs_jit via the
+    # Poisson-bracket evaluation (spectral.poisson_bracket_3d applies the
+    # mask after the nonlinear product). The Lawson kernel follows the same
+    # convention, so this asymmetry is intentional, not an omission.
+    g_new = g_new * dealias_mask[:, :, :, jnp.newaxis]
+
+    return KRMHDFields(
+        z_plus=z_plus_new,
+        z_minus=z_minus_new,
+        # B_parallel is passed through unchanged, matching the Lawson path
+        # byte-for-byte (see Lawson kernel end-of-body with `TODO: Issue #7`).
+        # Slow-mode evolution is a separate, pre-existing TODO tracked in
+        # https://github.com/anjor/gandalf/issues/7 ; this PR does not change
+        # its handling in either scheme.
+        B_parallel=fields.B_parallel,
+        g=g_new,
+        time=fields.time + dt,
+    )
+
+
 def gandalf_step(
     state: KRMHDState,
     dt: float,
@@ -617,6 +880,7 @@ def gandalf_step(
     nu: float | None = None,
     hyper_r: int = 1,
     hyper_n: int = 1,
+    scheme: Literal["imex_rk222", "lawson_rk4"] = "imex_rk222",
 ) -> KRMHDState:
     """
     Advance KRMHD state using the mixed GANDALF integrating-factor method.
@@ -651,6 +915,32 @@ def gandalf_step(
             - n=2: Moderate hyper-collision -νm² (recommended for most cases)
             - n=3: Strong hyper-collision -νm³ (matches original GANDALF alpha_m=3)
             - n=4: Very strong hyper-collision -νm⁴ (expert use, requires small nu)
+        scheme: Hermite integrator choice (default "imex_rk222" per Issue #137).
+            - "imex_rk222": ARS(2,2,2) IMEX scheme. Streaming and
+              hyper-collisional damping are implicit (unconditionally stable);
+              nonlinear advection is explicit. Elsasser z+/z- formula matches
+              the Lawson path (z_plus_rhs/z_minus_rhs do not depend on g);
+              realized trajectories agree to ~float32 accumulation error.
+            - "lawson_rk4": legacy mixed integrating-factor + Lawson-RK4 path,
+              retained for comparison and rollback. Known to be unstable at
+              high M·k_z (see Issue #137).
+
+            NOTE: scheme is a per-call argument and is NOT stored on
+            KRMHDState. Callers looping over time must pass it explicitly
+            each step. Mixing a checkpoint written by one scheme into a
+            subsequent run under the other scheme is valid — state carries
+            only field data — but the evolution cadence is per-call.
+
+            REPRODUCIBILITY: the scheme default changed from "lawson_rk4"
+            to "imex_rk222" in #138. Existing drivers that omitted `scheme`
+            will silently pick up the new integrator. The Elsasser formula
+            is mathematically identical under both schemes, but the two
+            JIT graphs produce different float32 arithmetic orderings, so
+            a mid-run switch (or checkpoint resumed under a different
+            default) will drift from the original trajectory at roughly
+            1e-6 per step (~5e-4 over 200 steps; see
+            test_imex222_nontrivial_vA_matches_lawson). For bit-level
+            reproducibility across reruns, pin `scheme=` explicitly.
 
     Returns:
         New KRMHDState at time t + dt
@@ -658,7 +948,9 @@ def gandalf_step(
     Raises:
         ValueError: If hyper_r not in [1, 2, 4, 8]
         ValueError: If hyper_n not in [1, 2, 3, 4, 6]
-        ValueError: If hyper-collision overflow risk detected (nu·dt >= 50, normalized)
+        ValueError: If scheme not in {"lawson_rk4", "imex_rk222"}
+        ValueError: If hyper-collision overflow risk detected (nu·dt >= 50, normalized;
+            Lawson path only — the IMEX solve is unconditionally stable)
         ValueError: If hyper-resistivity overflow risk detected (eta·dt >= 50, normalized)
 
     Example:
@@ -669,9 +961,29 @@ def gandalf_step(
         >>> state_new = gandalf_step(state, dt=0.01, eta=0.001, v_A=1.0,
         ...                          hyper_r=8, hyper_n=4)
         >>>
-        >>> # In a loop:
+        >>> # In a loop — pass scheme explicitly if you want to pin an
+        >>> # integrator regardless of future default changes:
         >>> for i in range(n_steps):
-        ...     state = gandalf_step(state, dt, eta, v_A, hyper_r=8, hyper_n=4)
+        ...     state = gandalf_step(state, dt, eta, v_A, hyper_r=8, hyper_n=4,
+        ...                          scheme="imex_rk222")
+
+    Performance:
+        - IMEX path rebuilds `L` and its LU factorization on every call
+          (128 batched 129x129 solves at M=Nz=128). Measured overhead:
+          ~22 ms/step on Apple M-series CPU (build 5 ms + factor 17 ms).
+          Small relative to the four RHS FFT evaluations at 128^3, but
+          not free. See Issue #139 for the caching follow-up.
+        - IMEX evaluates `_krmhd_rhs_jit` 4 times per step (2 real k_z for
+          the Elsasser midpoint + 2 k_z=0 for the IMEX nonlinear stages);
+          the Lawson path evaluates it 6 times (2 + 4 Lawson-RK4 stages).
+          Issue #141 tracks dropping IMEX to 2 by deriving N from `rhs_*.g`
+          and the already-computed `L*g` mat-vec.
+        - Resistive damping is applied as a post-step exp() factor, the same
+          as the Lawson convention. This is a 1st-order Strang split with
+          the IMEX solve; `eta*dt*|k_perp|^(2r) << 1` in typical turbulence
+          runs makes the extra splitting error negligible and sets a soft
+          upper bound on `dt` (though streaming+collisions are themselves
+          unconditionally stable under IMEX).
 
     Physics:
         - Linear propagation: Handled exactly (unconditionally stable)
@@ -716,6 +1028,11 @@ def gandalf_step(
     if hyper_n not in (1, 2, 3, 4, 6):
         raise ValueError(f"hyper_n must be 1, 2, 3, 4, or 6 (got {hyper_n})")
 
+    if scheme not in ("lawson_rk4", "imex_rk222"):
+        raise ValueError(
+            f"scheme must be 'lawson_rk4' or 'imex_rk222' (got {scheme!r})"
+        )
+
     # Validate M for collision operator (prevents division by zero)
     # Collision damping rate = ν·(m/M)^n requires M >= 2 for well-defined rates
     # M=0 (and M=1) are allowed for pure fluid RMHD runs when collisions are disabled (nu=0)
@@ -727,28 +1044,30 @@ def gandalf_step(
             "For pure fluid RMHD, set nu=0."
         )
 
-    # Safety check for hyper-collision overflow with NORMALIZED dissipation
-    # With normalization: exp(-ν·(m/M)^n·dt), maximum rate at m=M is simply ν·dt
-    # This is RESOLUTION-INDEPENDENT in moment space (matches original GANDALF)
+    # Safety check for hyper-collision overflow with NORMALIZED dissipation.
+    # Only the Lawson path applies damping via exp(-ν·(m/M)^n·dt), which can
+    # underflow for large nu·dt. The IMEX path folds damping into an implicit
+    # solve (unconditionally stable) and needs no such guard.
     max_collision_rate = nu_effective * dt
 
-    if max_collision_rate >= MAX_DAMPING_RATE_THRESHOLD:
-        safe_nu = MAX_DAMPING_RATE_THRESHOLD / dt
-        raise ValueError(
-            f"Hyper-collision overflow risk detected!\n"
-            f"  Parameter: nu·dt = {nu_effective}·{dt} = {max_collision_rate:.2e}\n"
-            f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
-            f"  Solution: Reduce nu to < {safe_nu:.2e} or reduce dt\n"
-            f"  Note: With normalized dissipation, constraint is nu·dt < {MAX_DAMPING_RATE_THRESHOLD} (independent of M or n!)"
-        )
+    if scheme == "lawson_rk4":
+        if max_collision_rate >= MAX_DAMPING_RATE_THRESHOLD:
+            safe_nu = MAX_DAMPING_RATE_THRESHOLD / dt
+            raise ValueError(
+                f"Hyper-collision overflow risk detected!\n"
+                f"  Parameter: nu·dt = {nu_effective}·{dt} = {max_collision_rate:.2e}\n"
+                f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
+                f"  Solution: Reduce nu to < {safe_nu:.2e} or reduce dt\n"
+                f"  Note: With normalized dissipation, constraint is nu·dt < {MAX_DAMPING_RATE_THRESHOLD} (independent of M or n!)"
+            )
 
-    # Warning for moderate risk (20-50)
-    if max_collision_rate >= DAMPING_RATE_WARNING_THRESHOLD:
-        warnings.warn(
-            f"Hyper-collision damping rate is high: nu·dt = {max_collision_rate:.2e}. "
-            f"Consider reducing nu or dt to improve numerical stability.",
-            RuntimeWarning
-        )
+        # Warning for moderate risk (20-50)
+        if max_collision_rate >= DAMPING_RATE_WARNING_THRESHOLD:
+            warnings.warn(
+                f"Hyper-collision damping rate is high: nu·dt = {max_collision_rate:.2e}. "
+                f"Consider reducing nu or dt to improve numerical stability.",
+                RuntimeWarning
+            )
 
     # Safety check for hyper-resistivity overflow with NORMALIZED dissipation
     # With normalization: exp(-η·(k⊥²/k⊥²_max)^r·dt), maximum rate at k⊥=k⊥_max is simply η·dt
@@ -776,34 +1095,69 @@ def gandalf_step(
     grid = state.grid
     fields = _fields_from_state(state)
 
-    # Precompute Hermite streaming eigensystem for integrating factor (cached)
-    _, eigenvalues, P, P_inv = compute_streaming_eigensystem(
-        state.M, state.Lambda
-    )
+    if scheme == "lawson_rk4":
+        # Precompute Hermite streaming eigensystem for integrating factor (cached)
+        _, eigenvalues, P, P_inv = compute_streaming_eigensystem(
+            state.M, state.Lambda
+        )
 
-    # Call JIT-compiled GANDALF kernel
-    new_fields = _gandalf_step_jit(
-        fields,
-        dt,
-        grid.kx,
-        grid.ky,
-        grid.kz,
-        grid.dealias_mask,
-        eta,
-        v_A,
-        state.beta_i,
-        nu_effective,
-        state.Lambda,
-        state.M,
-        grid.Nz,
-        grid.Ny,
-        grid.Nx,
-        hyper_r,
-        hyper_n,
-        streaming_eigenvalues=eigenvalues,
-        streaming_P_T=P.T,
-        streaming_P_inv_T=P_inv.T,
-    )
+        new_fields = _gandalf_step_lawson_rk4_jit(
+            fields,
+            dt,
+            grid.kx,
+            grid.ky,
+            grid.kz,
+            grid.dealias_mask,
+            eta,
+            v_A,
+            state.beta_i,
+            nu_effective,
+            state.Lambda,
+            state.M,
+            grid.Nz,
+            grid.Ny,
+            grid.Nx,
+            hyper_r,
+            hyper_n,
+            streaming_eigenvalues=eigenvalues,
+            streaming_P_T=P.T,
+            streaming_P_inv_T=P_inv.T,
+        )
+    else:  # scheme == "imex_rk222"
+        # Build the implicit operator L(k_z) = -i*sqrt(beta_i)*kz*T + D(nu, M, hyper_n)
+        # and factor (I - dt*gamma*L) once per step. L is cheap to rebuild because
+        # only Nz distinct (M+1)x(M+1) matrices exist (shared across k_perp).
+        L_per_kz = build_implicit_operator(
+            grid.kz,
+            state.beta_i,
+            nu_effective,
+            state.M,
+            state.Lambda,
+            hyper_n,
+        )
+        lu, piv = factor_imex_operator(L_per_kz, dt, _IMEX_GAMMA)
+
+        new_fields = _gandalf_step_imex222_jit(
+            fields,
+            dt,
+            grid.kx,
+            grid.ky,
+            grid.kz,
+            grid.dealias_mask,
+            eta,
+            v_A,
+            state.beta_i,
+            nu_effective,
+            state.Lambda,
+            state.M,
+            grid.Nz,
+            grid.Ny,
+            grid.Nx,
+            hyper_r,
+            L_per_kz,
+            lu,
+            piv,
+        )
 
     # Convert back to KRMHDState (Pydantic validation at boundary)
     return _state_from_fields(new_fields, state)
@@ -873,7 +1227,10 @@ def compute_cfl_timestep(
     # CFL timestep
     dt_cfl = cfl_safety * min_spacing / v_max
 
-    # Note: No Hermite streaming constraint needed — the integrating factor
-    # handles oscillatory streaming terms exactly (unitary propagator).
+    # Note: No Hermite streaming constraint needed for either scheme.
+    # - Lawson path: the integrating factor handles oscillatory streaming
+    #   terms exactly (unitary propagator).
+    # - IMEX path (Issue #137): streaming is part of the implicit operator
+    #   L and solved unconditionally stably each stage.
 
     return float(dt_cfl)
