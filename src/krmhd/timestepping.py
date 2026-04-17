@@ -630,6 +630,13 @@ def _gandalf_step_lawson_rk4_jit(
 _IMEX_GAMMA: float = (2.0 - math.sqrt(2.0)) / 2.0        # gamma = (2 - sqrt(2))/2
 _IMEX_DELTA: float = 1.0 - 1.0 / (2.0 * _IMEX_GAMMA)     # delta = 1 - 1/(2*gamma) ~ -0.7071
 
+# Sentinel passed as nu to _krmhd_rhs_jit on the IMEX path. Hyper-collisional
+# damping is folded into the implicit operator L via _damping_diag in
+# build_implicit_operator, so the explicit RHS must NOT double-count it.
+# Using this named constant makes the "deliberately zero" intent readable at
+# every call site (otherwise a bare literal `0.0` looks like a mistake).
+_NU_IN_IMPLICIT_OPERATOR: float = 0.0
+
 
 # Note: hyper_n is deliberately absent from static_argnames because it is
 # baked into L_per_kz (via _damping_diag) before this JIT kernel is called.
@@ -663,7 +670,11 @@ def _gandalf_step_imex222_jit(
     Linear Hermite streaming and hyper-collisional damping are treated
     implicitly via a per-kz batched LU solve; the Poisson-bracket nonlinear
     advection is treated explicitly. Elsasser z+/z- use the current
-    integrating-factor RK2 midpoint (bit-identical to the Lawson-RK4 path).
+    integrating-factor RK2 midpoint. The Elsasser formula is identical to
+    the Lawson path (z_plus_rhs / z_minus_rhs do not depend on g), but the
+    two schemes produce a different JIT graph, so the realized z+/- trajectory
+    agrees only to ~float32 accumulation error (~5e-4 over 200 steps, see
+    test_imex222_nontrivial_vA_matches_lawson), not to machine precision.
 
     Butcher tableau (γ=(2-√2)/2 ≈ 0.2929, δ=1-1/(2γ) ≈ -0.7071; see Ascher,
     Ruuth, Spiteri 1997, Table IV). Below "g" in the Hermite field and "γ"
@@ -755,7 +766,7 @@ def _gandalf_step_imex222_jit(
             0.0,
             v_A,
             beta_i,
-            nu,
+            _NU_IN_IMPLICIT_OPERATOR,
             Lambda,
             M,
             Nz,
@@ -763,9 +774,14 @@ def _gandalf_step_imex222_jit(
             Nx,
         ).g
 
-    # Elsasser half-step
+    # Elsasser half-step. Passing nu=0.0 explicitly (not nu) makes it visible
+    # that _krmhd_rhs_jit's nu argument is intentionally a no-op on the IMEX
+    # path: collisional damping lives in L, not in the RHS. If someone later
+    # adds a nu-dependent term to the RHS, the zero here is a signpost that
+    # the IMEX path needs separate handling.
     rhs_0 = _krmhd_rhs_jit(
-        fields, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
+        fields, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i,
+        _NU_IN_IMPLICIT_OPERATOR, Lambda, M, Nz, Ny, Nx
     )
     nl_plus_0 = rhs_0.z_plus - (1j * kz_3d * fields.z_plus)
     nl_minus_0 = rhs_0.z_minus + (1j * kz_3d * fields.z_minus)
@@ -787,8 +803,10 @@ def _gandalf_step_imex222_jit(
         g=g_1,
         time=fields.time + dt / 2.0,
     )
+    # nu=0.0 here for the same reason as in the half-step call above.
     rhs_half = _krmhd_rhs_jit(
-        fields_half, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
+        fields_half, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i,
+        _NU_IN_IMPLICIT_OPERATOR, Lambda, M, Nz, Ny, Nx
     )
     nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
     nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
@@ -894,8 +912,9 @@ def gandalf_step(
         scheme: Hermite integrator choice (default "imex_rk222" per Issue #137).
             - "imex_rk222": ARS(2,2,2) IMEX scheme. Streaming and
               hyper-collisional damping are implicit (unconditionally stable);
-              nonlinear advection is explicit. Elsasser z+/z- advance is
-              bit-identical to the Lawson path.
+              nonlinear advection is explicit. Elsasser z+/z- formula matches
+              the Lawson path (z_plus_rhs/z_minus_rhs do not depend on g);
+              realized trajectories agree to ~float32 accumulation error.
             - "lawson_rk4": legacy mixed integrating-factor + Lawson-RK4 path,
               retained for comparison and rollback. Known to be unstable at
               high M·k_z (see Issue #137).

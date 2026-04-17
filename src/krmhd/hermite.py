@@ -735,7 +735,10 @@ def compute_streaming_eigensystem(
 # =============================================================================
 
 
-@lru_cache(maxsize=None)
+# Bounded cache: (M, hyper_n) are small integers drawn from a handful of
+# supported values, so 32 entries easily covers any realistic set of runs
+# and guards against unbounded growth if someone does exploration sweeps.
+@lru_cache(maxsize=32)
 def _damping_diag(M: int, hyper_n: int) -> Any:
     """
     Per-moment hyper-collisional damping rates normalized to max-rate unity.
