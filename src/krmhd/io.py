@@ -75,7 +75,7 @@ References:
 """
 
 from pathlib import Path
-from typing import Dict, Literal, Optional, Tuple, Any
+from typing import Dict, Literal, Optional, Tuple, Any, get_args
 from datetime import datetime
 import warnings
 
@@ -443,11 +443,12 @@ def load_checkpoint(
             f"but expected_scheme={expected_scheme!r}. The Elsasser z+/- "
             f"formula is identical under both schemes, but the two JIT graphs "
             f"produce different float32 arithmetic orderings, so the resumed "
-            f"trajectory drifts by ~1e-6/step from the run that produced this "
-            f"checkpoint. To continue, call "
-            f"`gandalf_step(..., scheme={expected_scheme!r})` — the resumed "
-            f"run will diverge but remain physically valid. To avoid the "
-            f"drift entirely, rebuild the checkpoint under {expected_scheme!r}.",
+            f"trajectory will drift by ~1e-6/step from the run that produced "
+            f"this checkpoint. "
+            f"To suppress this warning and accept the drift, pin your call "
+            f"to `gandalf_step(..., scheme={expected_scheme!r})`. "
+            f"To reproduce the original trajectory, re-run the simulation "
+            f"under {stored_scheme!r} and save a fresh checkpoint.",
             UserWarning,
             stacklevel=2,
         )
@@ -456,8 +457,14 @@ def load_checkpoint(
 
 
 def _validate_scheme(scheme: str, *, kwarg_name: str) -> None:
-    """Reject typos / unknown integrators at the save/load boundary."""
-    allowed = {"imex_rk222", "lawson_rk4"}
+    """Reject typos / unknown integrators at the save/load boundary.
+
+    Derives the allow-list from the ``Scheme`` Literal at runtime via
+    ``typing.get_args`` so ``Scheme`` stays the single source of truth —
+    adding a third integrator only requires editing the Literal, not this
+    helper.
+    """
+    allowed = set(get_args(Scheme))
     if scheme not in allowed:
         raise ValueError(
             f"{kwarg_name}={scheme!r} is not a recognised gandalf_step "
