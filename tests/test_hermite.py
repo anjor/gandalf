@@ -835,8 +835,13 @@ class TestIMEXOperator:
         I = jnp.eye(Mp1, dtype=L.dtype)
         A = I[None, :, :] - dt * gamma * L
         Ax = jnp.einsum("zij,zyxj->zyxi", A, x)
+        # Residual bound: the batched complex64 LU solve of a well-conditioned
+        # (M+1)x(M+1) system produces max |Ax - rhs| ~ 3e-7 empirically here.
+        # 5e-6 leaves ~20x headroom for machine-dependent variation without
+        # masking a regression (e.g. a silent dtype downcast would bump this
+        # well above 5e-6).
         max_err = float(jnp.max(jnp.abs(Ax - rhs)))
-        assert max_err < 5e-4, f"residual too large: {max_err}"
+        assert max_err < 5e-6, f"residual too large: {max_err}"
 
     def test_imex_solve_preserves_m0_m1_at_zero_streaming(self):
         """At kz=0, (I - dt*gamma*L) is identity on m=0,1; they pass through."""

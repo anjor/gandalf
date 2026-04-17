@@ -777,8 +777,10 @@ def build_implicit_operator(
 
     L is block-diagonal in Fourier space and depends only on k_z (shared
     across k_x, k_y). Returned as a batched complex array of shape
-    (Nz, M+1, M+1). Dtype follows the ambient JAX precision
-    (complex64 under default configs, complex128 if jax_enable_x64 is set).
+    (Nz, M+1, M+1). The intermediate computation is done in numpy
+    float64/complex128 for conditioning; the final `jnp.asarray` downcasts
+    to JAX's current complex default (complex64 under default configs;
+    complex128 only if jax_enable_x64 is enabled).
 
     T is the Hermite streaming coupling matrix (tridiagonal, from
     compute_streaming_matrix). D is diag(nu * _damping_diag) with zeros at

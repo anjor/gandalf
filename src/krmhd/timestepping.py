@@ -686,13 +686,24 @@ def _gandalf_step_imex222_jit(
     this JIT kernel (see gandalf_step). Hyper-collisional damping is folded
     into L; the exponential collision factor is therefore NOT applied here.
 
-    Known limitation: resistive damping on g is applied as an exponential
-    post-step factor exp(-eta*(k_perp^2/k_perp_max^2)^r*dt), identical to
-    the Lawson path. This is a 1st-order Strang-style operator split with
-    the IMEX solve — the combined scheme is formally 2nd-order for the
-    streaming + collision block and 1st-order for the streaming +
-    resistivity interaction. For eta*dt*|k_perp|^(2r) << 1 (the typical
-    turbulence regime), the extra splitting error is negligible.
+    Known limitation — resistivity splitting:
+        Resistive damping on g is applied as an exponential post-step factor
+        exp(-eta*(k_perp^2/k_perp_max^2)^r*dt), identical to the Lawson path.
+        This is a 1st-order Strang-style operator split with the IMEX solve —
+        the combined scheme is formally 2nd-order for the streaming +
+        collision block and 1st-order for the streaming + resistivity
+        interaction. For eta*dt*|k_perp|^(2r) << 1 (the typical turbulence
+        regime), the extra splitting error is negligible.
+
+    Known limitation — z+/- coupling time:
+        Stage B evaluates N(g^(1), z+/-^{n+dt/2}) using the Elsasser midpoint,
+        but the ARS(2,2,2) tableau places stage 2 at c=gamma*dt ~= 0.293*dt.
+        The resulting O(dt^2*|gamma-1/2|) phase mismatch in the z+/-<->g
+        cross-coupling is absorbed by the scheme's global O(dt^2) truncation,
+        and pure-g convergence remains second-order (see
+        test_imex222_order_of_accuracy_*). If future work needs sub-O(dt^2)
+        accuracy on the coupled nonlinearity, a true RK evaluation of z+/- at
+        gamma*dt would be needed.
     """
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
     kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
@@ -804,9 +815,10 @@ def _gandalf_step_imex222_jit(
     z_minus_new = z_minus_new * perp_dissipation_factor
 
     # Resistive damping on g (from coupling to z+/-, kept exponential).
-    # Hyper-collisional damping is already inside L, so no collision factor here.
-    g_resistive_damp = jnp.exp(-eta * k_perp_2r_normalized * dt)
-    g_new = g_new * g_resistive_damp[:, :, :, jnp.newaxis]
+    # Hyper-collisional damping is already inside L, so no collision factor
+    # here. Reuses perp_dissipation_factor computed above for the z+/- damping
+    # — the resistive kernel is identical across all three fields.
+    g_new = g_new * perp_dissipation_factor[:, :, :, jnp.newaxis]
 
     # Defensive dealias of Hermite moments
     g_new = g_new * dealias_mask[:, :, :, jnp.newaxis]
