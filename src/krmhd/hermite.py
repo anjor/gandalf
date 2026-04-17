@@ -757,6 +757,10 @@ def _damping_diag(M: int, hyper_n: int) -> Any:
     else:
         rates = np.zeros_like(m)
     rates[:2] = 0.0
+    # Freeze the cached array: lru_cache returns the same object on every
+    # call, so an accidental in-place edit by a caller would silently corrupt
+    # future results.
+    rates.setflags(write=False)
     return rates
 
 
@@ -820,8 +824,10 @@ def factor_imex_operator(
         (Nz, M+1) int32. Consumed by jax.scipy.linalg.lu_solve per k_z.
     """
     size = L_per_kz.shape[-1]
-    I = jnp.eye(size, dtype=L_per_kz.dtype)
-    A = I[None, :, :] - (dt * gamma) * L_per_kz
+    # Named `eye` (not `I`) to avoid shadowing the imaginary unit in a file
+    # where complex arithmetic with `1j` is ubiquitous nearby.
+    eye = jnp.eye(size, dtype=L_per_kz.dtype)
+    A = eye[None, :, :] - (dt * gamma) * L_per_kz
     lu, piv = jax.vmap(jax.scipy.linalg.lu_factor)(A)
     return lu, piv
 

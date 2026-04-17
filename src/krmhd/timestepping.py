@@ -34,7 +34,7 @@ References:
 import math
 import warnings
 from functools import partial
-from typing import Callable, Tuple, NamedTuple
+from typing import Callable, Literal, Tuple, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -404,6 +404,9 @@ def _gandalf_step_lawson_rk4_jit(
     # Integrating factors (thesis Eq. 2.13-2.14)
     # For ∂ξ⁺/∂t - ikz·ξ⁺ = [NL]: multiply by e^(+ikz*t)
     # For ∂ξ⁻/∂t + ikz·ξ⁻ = [NL]: multiply by e^(-ikz*t)
+    # Note: v_A is absent by convention — KRMHD uses thesis normalization with
+    # τ_A = L_z/v_A = 1, so v_A enters only through the nonlinear Poisson
+    # bracket (via {ψ, …}) and the CFL timestep, not the linear Alfven phase.
     phase_plus_half = jnp.exp(+1j * kz_3d * dt / 2.0)
     phase_minus_half = jnp.exp(-1j * kz_3d * dt / 2.0)
     phase_plus_full = jnp.exp(+1j * kz_3d * dt)
@@ -701,7 +704,10 @@ def _gandalf_step_imex222_jit(
     k_perp_max_squared = kx[idx_max]**2 + ky[idy_max]**2
 
     # -------------------------------------------------------------------------
-    # Elsasser integrating-factor RK2 midpoint (unchanged from Lawson path)
+    # Elsasser integrating-factor RK2 midpoint (unchanged from Lawson path).
+    # Phase factors match _gandalf_step_lawson_rk4_jit byte-for-byte. v_A does
+    # not appear here: KRMHD uses thesis normalization with τ_A = L_z/v_A = 1,
+    # so v_A enters only through the nonlinear Poisson bracket and CFL.
     # -------------------------------------------------------------------------
     phase_plus_half = jnp.exp(+1j * kz_3d * dt / 2.0)
     phase_minus_half = jnp.exp(-1j * kz_3d * dt / 2.0)
@@ -714,6 +720,10 @@ def _gandalf_step_imex222_jit(
     # the (1-1/Lambda) kinetic correction are all kz-independent. Forcing
     # kz to zero therefore strips ONLY the streaming contribution and leaves
     # the nonlinear advection intact — which is exactly what N must be.
+    # No double-counting of collisions: g{0,1,m}_rhs do NOT take nu, and
+    # physics.py:1049 explicitly states collisions are applied in the
+    # timestepper, not in the RHS. The nu argument below is a no-op for
+    # g's RHS; collisions enter only via D inside the implicit operator L.
     kz_zero = jnp.zeros_like(kz)
 
     def compute_nl_g(stage_fields: KRMHDFields) -> Array:
@@ -818,7 +828,7 @@ def gandalf_step(
     nu: float | None = None,
     hyper_r: int = 1,
     hyper_n: int = 1,
-    scheme: str = "imex_rk222",
+    scheme: Literal["imex_rk222", "lawson_rk4"] = "imex_rk222",
 ) -> KRMHDState:
     """
     Advance KRMHD state using the mixed GANDALF integrating-factor method.

@@ -1809,6 +1809,73 @@ class TestIMEX222:
             f"m=M not damped: before={m4_init}, after={m4_final}"
         )
 
+    def test_imex222_order_of_accuracy_with_damping(self):
+        """Same manufactured-solution approach as the pure-streaming test,
+        but with nu > 0 so the damping operator D (diag, negative-semidef
+        on m>=2) is folded into L. Verifies the implicit damping branch
+        is also 2nd-order accurate."""
+        import numpy as np
+        from krmhd.hermite import compute_streaming_matrix, _damping_diag
+
+        Nx = Ny = 8
+        Nz = 4
+        M = 4
+        beta_i = 1.0
+        Lambda = 1.5
+        nu = 2.0
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=1.0, Ly=1.0, Lz=1.0)
+
+        Nxh = Nx // 2 + 1
+        g = np.zeros((Nz, Ny, Nxh, M + 1), dtype=np.complex64)
+        kz_idx = 1
+        g[kz_idx, 0, 0, 0] = 1.0
+        g[kz_idx, 0, 0, 1] = 0.5j
+        g[kz_idx, 0, 0, 2] = 0.2
+        g = jnp.asarray(g)
+
+        state = KRMHDState(
+            z_plus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
+            z_minus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
+            B_parallel=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
+            g=g,
+            M=M,
+            beta_i=beta_i,
+            v_th=1.0,
+            nu=nu,
+            Lambda=Lambda,
+            time=0.0,
+            grid=grid,
+        )
+
+        # Exact linear operator = -i sqrt(beta_i) kz T + nu * diag(D) (hyper_n=1).
+        T_mat = compute_streaming_matrix(M, Lambda)
+        D_diag = nu * _damping_diag(M, hyper_n=1)
+        kz_val = float(np.asarray(grid.kz)[kz_idx])
+        L0 = -1j * np.sqrt(beta_i) * kz_val * T_mat + np.diag(D_diag)
+        T_final = 1.0
+
+        from scipy.linalg import expm
+        g_init = np.asarray(g[kz_idx, 0, 0, :])
+        g_exact = expm(L0 * T_final) @ g_init
+
+        errs = []
+        dts = [0.1, 0.05, 0.025]
+        for dt in dts:
+            n_steps = int(round(T_final / dt))
+            s = state
+            for _ in range(n_steps):
+                s = gandalf_step(s, dt=dt, eta=0.0, v_A=1.0, nu=nu,
+                                 hyper_n=1, scheme="imex_rk222")
+            g_num = np.asarray(s.g[kz_idx, 0, 0, :])
+            errs.append(np.linalg.norm(g_num - g_exact))
+
+        log_dts = np.log(dts)
+        log_errs = np.log(errs)
+        slope = np.polyfit(log_dts, log_errs, 1)[0]
+        assert slope >= 1.7, (
+            f"IMEX damped-convergence slope too low: {slope:.2f}, errs={errs}"
+        )
+
     def test_imex222_order_of_accuracy_pure_streaming(self):
         """Manufactured linear test: with z+/z-=0, eta=0, nu=0 and all k_perp=0
         modes zeroed, the g-advance reduces to exp(-i*sqrt(beta_i)*kz*T*t).
