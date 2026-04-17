@@ -1809,6 +1809,45 @@ class TestIMEX222:
             f"m=M not damped: before={m4_init}, after={m4_final}"
         )
 
+    def test_imex222_bparallel_parity_with_lawson(self):
+        """B_parallel is a passive-slot pass-through in both schemes today
+        (Issue #7). Verify both paths leave it bit-identical so a future
+        slow-mode evolution lands in both schemes at once, not silently one
+        at a time."""
+        state0 = self._make_random_state(M=3, nu=0.0, z_amp=0.02, g_amp=0.01)
+        # Seed B_parallel with a nonzero pattern so pass-through is observable.
+        key = jax.random.PRNGKey(99)
+        kr, ki = jax.random.split(key)
+        Bp_shape = state0.B_parallel.shape
+        Bp = (0.05 * (jax.random.normal(kr, Bp_shape)
+                     + 1j * jax.random.normal(ki, Bp_shape))).astype(jnp.complex64)
+        state0 = state0.model_copy(update={"B_parallel": Bp})
+
+        state_l = gandalf_step(state0, dt=0.01, eta=0.01, v_A=1.0,
+                               nu=0.0, scheme="lawson_rk4")
+        state_i = gandalf_step(state0, dt=0.01, eta=0.01, v_A=1.0,
+                               nu=0.0, scheme="imex_rk222")
+        # Both paths pass fields.B_parallel through unchanged.
+        assert jnp.array_equal(state_l.B_parallel, state0.B_parallel)
+        assert jnp.array_equal(state_i.B_parallel, state0.B_parallel)
+
+    def test_imex222_adaptive_dt_rebuilds_operator(self):
+        """Changing dt between calls must trigger a fresh L/LU factorization.
+        Exercises the "no stale cache" path if/when caching is added (#139).
+        Today no cache exists — this is a defensive smoke test."""
+        state = self._make_random_state(M=4, nu=1.0, z_amp=0.01, g_amp=0.01)
+        # Two calls with different dt; both must produce finite output and
+        # neither should crash due to a dt-dependent factorization mismatch.
+        s1 = gandalf_step(state, dt=0.01, eta=0.01, v_A=1.0, scheme="imex_rk222")
+        s2 = gandalf_step(s1,    dt=0.005, eta=0.01, v_A=1.0, scheme="imex_rk222")
+        s3 = gandalf_step(s2,    dt=0.02, eta=0.01, v_A=1.0, scheme="imex_rk222")
+        for s in (s1, s2, s3):
+            assert jnp.all(jnp.isfinite(s.g))
+            assert jnp.all(jnp.isfinite(s.z_plus))
+            assert jnp.all(jnp.isfinite(s.z_minus))
+        # And the effective times advance correctly.
+        assert s3.time == pytest.approx(state.time + 0.01 + 0.005 + 0.02, abs=1e-6)
+
     def test_imex222_order_of_accuracy_with_damping(self):
         """Same manufactured-solution approach as the pure-streaming test,
         but with nu > 0 so the damping operator D (diag, negative-semidef

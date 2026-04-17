@@ -628,6 +628,10 @@ _IMEX_GAMMA: float = (2.0 - math.sqrt(2.0)) / 2.0        # gamma = (2 - sqrt(2))
 _IMEX_DELTA: float = 1.0 - 1.0 / (2.0 * _IMEX_GAMMA)     # delta = 1 - 1/(2*gamma)
 
 
+# Note: hyper_n is deliberately absent from static_argnames because it is
+# baked into L_per_kz (via _damping_diag) before this JIT kernel is called.
+# Adding it here would force a needless recompile whenever hyper_n changed,
+# even though the traced graph has no direct dependence on it.
 @partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r"])
 def _gandalf_step_imex222_jit(
     fields: KRMHDFields,
@@ -826,6 +830,11 @@ def _gandalf_step_imex222_jit(
     return KRMHDFields(
         z_plus=z_plus_new,
         z_minus=z_minus_new,
+        # B_parallel is passed through unchanged, matching the Lawson path
+        # byte-for-byte (see Lawson kernel end-of-body with `TODO: Issue #7`).
+        # Slow-mode evolution is a separate, pre-existing TODO tracked in
+        # https://github.com/anjor/gandalf/issues/7 ; this PR does not change
+        # its handling in either scheme.
         B_parallel=fields.B_parallel,
         g=g_new,
         time=fields.time + dt,
