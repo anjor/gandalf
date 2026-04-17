@@ -75,7 +75,7 @@ References:
 """
 
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Literal, Optional, Tuple, Any
 from datetime import datetime
 import warnings
 
@@ -95,13 +95,19 @@ IO_FORMAT_VERSION = "1.0.0"
 # level 4 is a good balance between compression ratio and speed
 COMPRESSION_LEVEL = 4
 
+# Accepted values for the advisory `scheme` tag on checkpoints (Issue #142).
+# Kept in sync with the `scheme` kwarg on krmhd.timestepping.gandalf_step so
+# save/load can reject typos at the boundary instead of silently storing a
+# misspelled tag that would defeat the mismatch check.
+Scheme = Literal["imex_rk222", "lawson_rk4"]
+
 
 def save_checkpoint(
     state: KRMHDState,
     filename: str,
     metadata: Optional[Dict[str, Any]] = None,
     overwrite: bool = False,
-    scheme: Optional[str] = None,
+    scheme: Optional[Scheme] = None,
 ) -> None:
     """
     Save KRMHD state to HDF5 checkpoint file.
@@ -153,6 +159,11 @@ def save_checkpoint(
         Typical compression ratios are 2-5× for turbulent fields.
     """
     filepath = Path(filename)
+
+    # Validate the advisory scheme tag BEFORE touching the filesystem so a
+    # typo can't leave a partially-written file behind (Issue #142).
+    if scheme is not None:
+        _validate_scheme(scheme, kwarg_name="scheme")
 
     # Check if file exists
     if filepath.exists() and not overwrite:
@@ -254,10 +265,8 @@ def save_checkpoint(
         meta_group.attrs['version'] = IO_FORMAT_VERSION
         meta_group.attrs['timestamp'] = datetime.now().isoformat()
 
-        # Advisory scheme tag (Issue #142) — consumed by load_checkpoint's
-        # expected_scheme mismatch warning. Never treated as authoritative:
-        # callers who care about reproducibility pass `scheme=` to both the
-        # save and the load side.
+        # Advisory scheme tag (Issue #142). Validation already happened at the
+        # top of save_checkpoint so we can't silently store a typo.
         if scheme is not None:
             meta_group.attrs['scheme'] = scheme
 
@@ -275,7 +284,7 @@ def save_checkpoint(
 def load_checkpoint(
     filename: str,
     validate_grid: bool = True,
-    expected_scheme: Optional[str] = None,
+    expected_scheme: Optional[Scheme] = None,
 ) -> Tuple[KRMHDState, SpectralGrid3D, Dict[str, Any]]:
     """
     Load KRMHD state from HDF5 checkpoint file.
@@ -322,6 +331,10 @@ def load_checkpoint(
         (float32 on GPU, float32/float64 depending on JAX config on CPU).
     """
     filepath = Path(filename)
+
+    # Validate advisory kwarg up front (symmetric with save_checkpoint).
+    if expected_scheme is not None:
+        _validate_scheme(expected_scheme, kwarg_name="expected_scheme")
 
     if not filepath.exists():
         raise FileNotFoundError(f"Checkpoint file '{filename}' not found")
@@ -417,7 +430,8 @@ def load_checkpoint(
     # Advisory scheme-mismatch warning (Issue #142). Only fires when the
     # checkpoint recorded a scheme AND the caller explicitly named the
     # scheme it intends to resume with — otherwise we stay silent so legacy
-    # checkpoints and non-opinionated callers don't get noisy.
+    # checkpoints and non-opinionated callers don't get noisy. Validation
+    # of expected_scheme happened at the top of the function.
     stored_scheme = metadata.get('scheme')
     if (
         expected_scheme is not None
@@ -426,17 +440,29 @@ def load_checkpoint(
     ):
         warnings.warn(
             f"Checkpoint '{filename}' was written with scheme={stored_scheme!r} "
-            f"but you requested expected_scheme={expected_scheme!r}. The z+/- "
-            f"Elsasser formula is identical under both schemes, but the two "
-            f"JIT graphs produce different float32 arithmetic orderings, so "
-            f"the resumed trajectory drifts by ~1e-6/step from the run that "
-            f"produced this checkpoint. Pass scheme=<expected_scheme> to "
-            f"gandalf_step to continue anyway, or rebuild the checkpoint "
-            f"under {expected_scheme!r} to avoid the drift.",
+            f"but expected_scheme={expected_scheme!r}. The Elsasser z+/- "
+            f"formula is identical under both schemes, but the two JIT graphs "
+            f"produce different float32 arithmetic orderings, so the resumed "
+            f"trajectory drifts by ~1e-6/step from the run that produced this "
+            f"checkpoint. To continue, call "
+            f"`gandalf_step(..., scheme={expected_scheme!r})` — the resumed "
+            f"run will diverge but remain physically valid. To avoid the "
+            f"drift entirely, rebuild the checkpoint under {expected_scheme!r}.",
             UserWarning,
+            stacklevel=2,
         )
 
     return state, grid, metadata
+
+
+def _validate_scheme(scheme: str, *, kwarg_name: str) -> None:
+    """Reject typos / unknown integrators at the save/load boundary."""
+    allowed = {"imex_rk222", "lawson_rk4"}
+    if scheme not in allowed:
+        raise ValueError(
+            f"{kwarg_name}={scheme!r} is not a recognised gandalf_step "
+            f"integrator. Expected one of {sorted(allowed)}."
+        )
 
 
 def save_timeseries(

@@ -15,6 +15,7 @@ Test organization:
 """
 
 import tempfile
+import warnings
 from pathlib import Path
 import pytest
 import numpy as np
@@ -295,9 +296,8 @@ def test_checkpoint_scheme_match_silent(state, tmpdir):
     filename = tmpdir / "ckpt_match.h5"
     save_checkpoint(state, str(filename), scheme="imex_rk222")
 
-    import warnings as _warnings
-    with _warnings.catch_warnings():
-        _warnings.simplefilter("error")  # Turn warnings into errors for this block
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # Turn warnings into errors for this block
         load_checkpoint(str(filename), expected_scheme="imex_rk222")
 
 
@@ -307,9 +307,8 @@ def test_checkpoint_legacy_no_stored_scheme_silent(state, tmpdir):
     filename = tmpdir / "ckpt_legacy.h5"
     save_checkpoint(state, str(filename))  # no scheme=
 
-    import warnings as _warnings
-    with _warnings.catch_warnings():
-        _warnings.simplefilter("error")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         load_checkpoint(str(filename), expected_scheme="imex_rk222")
 
 
@@ -319,10 +318,46 @@ def test_checkpoint_expected_scheme_none_silent(state, tmpdir):
     filename = tmpdir / "ckpt_expected_none.h5"
     save_checkpoint(state, str(filename), scheme="lawson_rk4")
 
-    import warnings as _warnings
-    with _warnings.catch_warnings():
-        _warnings.simplefilter("error")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         load_checkpoint(str(filename))  # no expected_scheme
+
+
+def test_checkpoint_save_rejects_unknown_scheme(state, tmpdir):
+    """A typo in `scheme` is caught at save time, not silently stored."""
+    filename = tmpdir / "ckpt_bad_save.h5"
+    with pytest.raises(ValueError, match="scheme='imex_rk22'"):
+        save_checkpoint(state, str(filename), scheme="imex_rk22")  # typo
+    # And the file is never created.
+    assert not filename.exists()
+
+
+def test_checkpoint_load_rejects_unknown_expected_scheme(state, tmpdir):
+    """A typo in `expected_scheme` is caught at load time, before the
+    mismatch check runs (symmetric with save-side validation)."""
+    filename = tmpdir / "ckpt_bad_load.h5"
+    save_checkpoint(state, str(filename), scheme="imex_rk222")
+    with pytest.raises(ValueError, match="expected_scheme='foo'"):
+        load_checkpoint(str(filename), expected_scheme="foo")
+
+
+def test_checkpoint_mismatch_warning_points_to_caller(state, tmpdir):
+    """stacklevel=2 ensures the warning's source location names the
+    caller's frame, not io.py. A missing stacklevel was the blocker from
+    review round 1 on #143."""
+    filename = tmpdir / "ckpt_stacklevel.h5"
+    save_checkpoint(state, str(filename), scheme="lawson_rk4")
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        load_checkpoint(str(filename), expected_scheme="imex_rk222")
+
+    assert len(w) == 1
+    # The recorded warning should point at THIS test file (the caller),
+    # not the io.py module that issued the warning.
+    assert w[0].filename.endswith("test_io.py"), (
+        f"warning filename {w[0].filename!r} is not the caller frame"
+    )
 
 
 # =============================================================================
