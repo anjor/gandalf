@@ -259,7 +259,7 @@ def test_checkpoint_grid_reconstruction(state, tmpdir):
 
 
 # =============================================================================
-# Scheme tag on checkpoints (Issue #142)
+# Scheme tag on checkpoints
 # =============================================================================
 
 
@@ -341,10 +341,30 @@ def test_checkpoint_load_rejects_unknown_expected_scheme(state, tmpdir):
         load_checkpoint(str(filename), expected_scheme="foo")
 
 
+def test_checkpoint_mismatch_warning_remediation_text(state, tmpdir):
+    """The warning must name a remediation that actually suppresses it.
+    Suppressing requires either omitting expected_scheme or re-saving the
+    checkpoint; pinning gandalf_step has zero effect on load_checkpoint
+    behaviour."""
+    filename = tmpdir / "ckpt_remediation_text.h5"
+    save_checkpoint(state, str(filename), scheme="lawson_rk4")
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        load_checkpoint(str(filename), expected_scheme="imex_rk222")
+
+    assert len(w) == 1
+    msg = str(w[0].message)
+    # Correct remediation is named verbatim.
+    assert "omit" in msg and "expected_scheme" in msg and "load_checkpoint" in msg
+    # And the misleading old phrasing ("pin gandalf_step") must NOT appear.
+    assert "pin your call to `gandalf_step" not in msg
+
+
 def test_checkpoint_mismatch_warning_points_to_caller(state, tmpdir):
     """stacklevel=2 ensures the warning's source location names the
-    caller's frame, not io.py. A missing stacklevel was the blocker from
-    review round 1 on #143."""
+    caller's frame, not io.py. Without it, a mismatched diagnostic looks
+    like it came from inside the library, which is unhelpful for triage."""
     filename = tmpdir / "ckpt_stacklevel.h5"
     save_checkpoint(state, str(filename), scheme="lawson_rk4")
 

@@ -355,7 +355,9 @@ def main():
         print(f"RESUMING FROM CHECKPOINT: {args.resume_from}")
         print("=" * 70)
 
-        resumed_state, resumed_grid, resumed_metadata = load_checkpoint(args.resume_from)
+        resumed_state, resumed_grid, resumed_metadata = load_checkpoint(
+            args.resume_from, expected_scheme="imex_rk222"
+        )
         initial_time = float(resumed_state.time)
         initial_step = int(resumed_metadata.get('step', 0))
 

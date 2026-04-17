@@ -348,7 +348,9 @@ def main():
     if args.resume_from:
         print(f"Resuming from checkpoint: {args.resume_from}")
         try:
-            state, grid, metadata = load_checkpoint(args.resume_from)
+            state, grid, metadata = load_checkpoint(
+                args.resume_from, expected_scheme="imex_rk222"
+            )
 
             # Validate grid parameters match
             if grid.Nx != Nx or grid.Ny != Ny or grid.Nz != Nz:
