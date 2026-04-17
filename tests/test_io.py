@@ -258,6 +258,74 @@ def test_checkpoint_grid_reconstruction(state, tmpdir):
 
 
 # =============================================================================
+# Scheme tag on checkpoints (Issue #142)
+# =============================================================================
+
+
+def test_checkpoint_scheme_tag_written(state, tmpdir):
+    """When `scheme=` is passed to save_checkpoint, it lands in metadata."""
+    filename = tmpdir / "ckpt_scheme.h5"
+    save_checkpoint(state, str(filename), scheme="imex_rk222")
+
+    _, _, metadata = load_checkpoint(str(filename))
+    assert metadata.get("scheme") == "imex_rk222"
+
+
+def test_checkpoint_scheme_tag_absent_by_default(state, tmpdir):
+    """Without `scheme=`, the attribute is NOT written (legacy compat)."""
+    filename = tmpdir / "ckpt_no_scheme.h5"
+    save_checkpoint(state, str(filename))
+
+    _, _, metadata = load_checkpoint(str(filename))
+    assert "scheme" not in metadata
+
+
+def test_checkpoint_scheme_mismatch_warns(state, tmpdir):
+    """Loading with expected_scheme that differs from the stored scheme
+    emits a UserWarning naming both schemes."""
+    filename = tmpdir / "ckpt_mismatch.h5"
+    save_checkpoint(state, str(filename), scheme="lawson_rk4")
+
+    with pytest.warns(UserWarning, match="lawson_rk4.*imex_rk222"):
+        load_checkpoint(str(filename), expected_scheme="imex_rk222")
+
+
+def test_checkpoint_scheme_match_silent(state, tmpdir):
+    """Matching schemes do not emit a warning."""
+    filename = tmpdir / "ckpt_match.h5"
+    save_checkpoint(state, str(filename), scheme="imex_rk222")
+
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")  # Turn warnings into errors for this block
+        load_checkpoint(str(filename), expected_scheme="imex_rk222")
+
+
+def test_checkpoint_legacy_no_stored_scheme_silent(state, tmpdir):
+    """Legacy checkpoints (no scheme attribute) emit no warning, even when
+    expected_scheme is provided. Silence is the backward-compat contract."""
+    filename = tmpdir / "ckpt_legacy.h5"
+    save_checkpoint(state, str(filename))  # no scheme=
+
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")
+        load_checkpoint(str(filename), expected_scheme="imex_rk222")
+
+
+def test_checkpoint_expected_scheme_none_silent(state, tmpdir):
+    """Default expected_scheme=None skips the check entirely, even when a
+    scheme is stored. Non-opinionated callers stay quiet."""
+    filename = tmpdir / "ckpt_expected_none.h5"
+    save_checkpoint(state, str(filename), scheme="lawson_rk4")
+
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")
+        load_checkpoint(str(filename))  # no expected_scheme
+
+
+# =============================================================================
 # Timeseries Tests
 # =============================================================================
 

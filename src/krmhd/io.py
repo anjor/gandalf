@@ -101,6 +101,7 @@ def save_checkpoint(
     filename: str,
     metadata: Optional[Dict[str, Any]] = None,
     overwrite: bool = False,
+    scheme: Optional[str] = None,
 ) -> None:
     """
     Save KRMHD state to HDF5 checkpoint file.
@@ -114,6 +115,12 @@ def save_checkpoint(
         filename: Output HDF5 file path
         metadata: Optional user metadata dict (arbitrary key-value pairs)
         overwrite: If True, overwrite existing file; otherwise raise error
+        scheme: Advisory — the gandalf_step integrator that produced this
+            state (``"imex_rk222"`` or ``"lawson_rk4"``). When provided, it
+            is written as an HDF5 metadata attribute and surfaced by
+            ``load_checkpoint`` so a resumed run can detect silent integrator
+            switches. ``None`` (default) omits the attribute; the state
+            format is unchanged.
 
     Raises:
         FileExistsError: If file exists and overwrite=False
@@ -128,7 +135,8 @@ def save_checkpoint(
         ...         "description": "Turbulence simulation",
         ...         "run_id": "turb_001",
         ...         "parameters": {"eta": 0.01, "nu": 0.01}
-        ...     }
+        ...     },
+        ...     scheme="imex_rk222",
         ... )
 
     File structure:
@@ -246,6 +254,13 @@ def save_checkpoint(
         meta_group.attrs['version'] = IO_FORMAT_VERSION
         meta_group.attrs['timestamp'] = datetime.now().isoformat()
 
+        # Advisory scheme tag (Issue #142) — consumed by load_checkpoint's
+        # expected_scheme mismatch warning. Never treated as authoritative:
+        # callers who care about reproducibility pass `scheme=` to both the
+        # save and the load side.
+        if scheme is not None:
+            meta_group.attrs['scheme'] = scheme
+
         # Add user metadata if provided
         if metadata is not None:
             for key, value in metadata.items():
@@ -260,6 +275,7 @@ def save_checkpoint(
 def load_checkpoint(
     filename: str,
     validate_grid: bool = True,
+    expected_scheme: Optional[str] = None,
 ) -> Tuple[KRMHDState, SpectralGrid3D, Dict[str, Any]]:
     """
     Load KRMHD state from HDF5 checkpoint file.
@@ -271,11 +287,20 @@ def load_checkpoint(
     Args:
         filename: Input HDF5 checkpoint file path
         validate_grid: If True, verify grid dimensions are consistent
+        expected_scheme: Optional gandalf_step scheme the caller intends to
+            resume with (``"imex_rk222"`` or ``"lawson_rk4"``). If provided
+            *and* the checkpoint was saved with a ``scheme`` tag, a
+            ``UserWarning`` is emitted when they differ — a silent switch
+            between integrators makes trajectories drift by ~1e-6/step at
+            float32 even though the Elsasser formula is scheme-independent
+            (Issue #142). ``None`` (default) skips the check for backward
+            compatibility with legacy checkpoints.
 
     Returns:
         state: Loaded KRMHD state
         grid: Reconstructed SpectralGrid3D
-        metadata: Dictionary with file metadata (version, timestamp, user data)
+        metadata: Dictionary with file metadata (version, timestamp, user
+            data, and ``scheme`` if the save side recorded one)
 
     Raises:
         FileNotFoundError: If checkpoint file doesn't exist
@@ -384,8 +409,32 @@ def load_checkpoint(
             grid=grid,
         )
 
-        # Load metadata
+        # Load metadata. The 'scheme' attribute (Issue #142) lands here
+        # automatically because it is written as an HDF5 attribute on the
+        # metadata group.
         metadata = dict(f['metadata'].attrs)
+
+    # Advisory scheme-mismatch warning (Issue #142). Only fires when the
+    # checkpoint recorded a scheme AND the caller explicitly named the
+    # scheme it intends to resume with — otherwise we stay silent so legacy
+    # checkpoints and non-opinionated callers don't get noisy.
+    stored_scheme = metadata.get('scheme')
+    if (
+        expected_scheme is not None
+        and stored_scheme is not None
+        and stored_scheme != expected_scheme
+    ):
+        warnings.warn(
+            f"Checkpoint '{filename}' was written with scheme={stored_scheme!r} "
+            f"but you requested expected_scheme={expected_scheme!r}. The z+/- "
+            f"Elsasser formula is identical under both schemes, but the two "
+            f"JIT graphs produce different float32 arithmetic orderings, so "
+            f"the resumed trajectory drifts by ~1e-6/step from the run that "
+            f"produced this checkpoint. Pass scheme=<expected_scheme> to "
+            f"gandalf_step to continue anyway, or rebuild the checkpoint "
+            f"under {expected_scheme!r} to avoid the drift.",
+            UserWarning,
+        )
 
     return state, grid, metadata
 
