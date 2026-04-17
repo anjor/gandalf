@@ -75,7 +75,7 @@ References:
 """
 
 from pathlib import Path
-from typing import Dict, Literal, Optional, Tuple, Any, get_args
+from typing import Dict, Optional, Tuple, Any
 from datetime import datetime
 import warnings
 
@@ -86,6 +86,7 @@ import jax.numpy as jnp
 from krmhd.physics import KRMHDState
 from krmhd.spectral import SpectralGrid3D
 from krmhd.diagnostics import EnergyHistory, TurbulenceDiagnostics
+from krmhd.timestepping import Scheme, SUPPORTED_SCHEMES
 
 # File format version for compatibility checking
 # Increment when making breaking changes to file structure
@@ -94,13 +95,6 @@ IO_FORMAT_VERSION = "1.0.0"
 # Compression settings for HDF5 datasets
 # level 4 is a good balance between compression ratio and speed
 COMPRESSION_LEVEL = 4
-
-# Accepted values for the advisory `scheme` tag on checkpoints. Kept in sync
-# with the `scheme` kwarg on krmhd.timestepping.gandalf_step so save/load
-# can reject typos at the boundary instead of silently storing a misspelled
-# tag that would defeat the mismatch check.
-Scheme = Literal["imex_rk222", "lawson_rk4"]
-_ALLOWED_SCHEMES: frozenset[str] = frozenset(get_args(Scheme))
 
 
 def save_checkpoint(
@@ -425,7 +419,8 @@ def load_checkpoint(
 
         # Load metadata. The 'scheme' attribute lands here automatically
         # because it is written as an HDF5 attribute on the metadata group.
-        metadata = dict(f['metadata'].attrs)
+        # Coerce bytes -> str per attribute for h5py < 3.0 compatibility.
+        metadata = {k: _decode_attr(v) for k, v in f['metadata'].attrs.items()}
 
     # Advisory scheme-mismatch warning. Only fires when the checkpoint
     # recorded a scheme AND the caller explicitly named the scheme it
@@ -459,16 +454,29 @@ def load_checkpoint(
 def _validate_scheme(scheme: str, *, kwarg_name: str) -> None:
     """Reject typos / unknown integrators at the save/load boundary.
 
-    The allow-list is cached in ``_ALLOWED_SCHEMES`` and derived once at
-    import time from the ``Scheme`` Literal via ``typing.get_args`` — so
-    ``Scheme`` stays the single source of truth. Adding a third integrator
-    only requires editing the Literal.
+    The allow-list is imported from ``krmhd.timestepping`` so there is one
+    place to edit when adding a new integrator — the Literal there drives
+    both static analysis and this runtime check.
     """
-    if scheme not in _ALLOWED_SCHEMES:
+    if scheme not in SUPPORTED_SCHEMES:
         raise ValueError(
             f"{kwarg_name}={scheme!r} is not a recognised gandalf_step "
-            f"integrator. Expected one of {sorted(_ALLOWED_SCHEMES)}."
+            f"integrator. Expected one of {sorted(SUPPORTED_SCHEMES)}."
         )
+
+
+def _decode_attr(value: Any) -> Any:
+    """Coerce an HDF5 attribute value back to ``str`` when it arrives as
+    ``bytes``.
+
+    h5py < 3.0 returns fixed-length string attributes as ``bytes`` rather
+    than ``str``; later versions return ``str`` by default. Normalizing
+    here keeps equality comparisons (``stored_scheme == expected_scheme``)
+    and the returned metadata dict consistent across h5py versions.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return value
 
 
 def save_timeseries(

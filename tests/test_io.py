@@ -341,6 +341,33 @@ def test_checkpoint_load_rejects_unknown_expected_scheme(state, tmpdir):
         load_checkpoint(str(filename), expected_scheme="foo")
 
 
+def test_checkpoint_scheme_tag_survives_bytes_attr(state, tmpdir):
+    """h5py < 3.0 (and some edge cases in 3.x with vlen_string=False) return
+    fixed-length string attributes as `bytes`. The mismatch check must still
+    fire in that case: `stored_scheme = b"lawson_rk4"` is not equal to the
+    str `"imex_rk222"`, so without the bytes-decode helper we would silently
+    miss the mismatch."""
+    filename = tmpdir / "ckpt_bytes.h5"
+    save_checkpoint(state, str(filename), scheme="lawson_rk4")
+
+    # Simulate the h5py < 3.0 path: reopen the file and rewrite the scheme
+    # attribute as a fixed-length (= bytes-returning) string.
+    with h5py.File(str(filename), "a") as f:
+        del f["metadata"].attrs["scheme"]
+        f["metadata"].attrs.create(
+            "scheme",
+            data=b"lawson_rk4",
+            dtype=h5py.string_dtype(encoding="utf-8", length=10),
+        )
+
+    with pytest.warns(UserWarning, match="lawson_rk4.*imex_rk222"):
+        _, _, metadata = load_checkpoint(str(filename), expected_scheme="imex_rk222")
+    # And the returned metadata should have a plain str, not bytes, so
+    # downstream code can use it without further coercion.
+    assert metadata["scheme"] == "lawson_rk4"
+    assert isinstance(metadata["scheme"], str)
+
+
 def test_checkpoint_mismatch_warning_remediation_text(state, tmpdir):
     """The warning must name a remediation that actually suppresses it.
     Suppressing requires either omitting expected_scheme or re-saving the
