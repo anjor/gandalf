@@ -1809,6 +1809,56 @@ class TestIMEX222:
             f"m=M not damped: before={m4_init}, after={m4_final}"
         )
 
+    def test_imex222_minimum_M_with_streaming_and_damping(self):
+        """M=2 is the smallest system for which collisional damping is even
+        defined (conservation carves out m=0,1 so M>=2 to have a damped m).
+        Exercise BOTH branches of L simultaneously — nonzero streaming (from
+        nonzero kz in a 3D grid) and nonzero nu — and verify the trajectory
+        stays finite over a longer window than the short smoke tests."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8, Lx=1.0, Ly=1.0, Lz=1.0)
+        Nxh = grid.Nx // 2 + 1
+        M = 2
+
+        key = jax.random.PRNGKey(31)
+        k1, k2, k3 = jax.random.split(key, 3)
+
+        def rand_complex(k, shape, scale):
+            kr, ki = jax.random.split(k)
+            return (scale * (jax.random.normal(kr, shape)
+                             + 1j * jax.random.normal(ki, shape))).astype(jnp.complex64)
+
+        z_plus = rand_complex(k1, (grid.Nz, grid.Ny, Nxh), 0.05)
+        z_minus = rand_complex(k2, (grid.Nz, grid.Ny, Nxh), 0.05)
+        g = rand_complex(k3, (grid.Nz, grid.Ny, Nxh, M + 1), 0.02)
+        z_plus = z_plus.at[0, 0, 0].set(0.0)
+        z_minus = z_minus.at[0, 0, 0].set(0.0)
+        g = g.at[0, 0, 0, :].set(0.0)
+
+        state = KRMHDState(
+            z_plus=z_plus,
+            z_minus=z_minus,
+            B_parallel=jnp.zeros((grid.Nz, grid.Ny, Nxh), dtype=jnp.complex64),
+            g=g,
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=1.5,         # nonzero damping  -> D branch of L active
+            Lambda=1.0,
+            time=0.0,
+            grid=grid,
+        )
+        # 3D grid with Nz=8 gives nonzero kz, so the streaming branch of L
+        # is also active at every step.
+        s = state
+        for _ in range(100):
+            s = gandalf_step(s, dt=0.01, eta=0.005, v_A=1.0, nu=1.5,
+                             scheme="imex_rk222")
+        assert jnp.all(jnp.isfinite(s.z_plus))
+        assert jnp.all(jnp.isfinite(s.z_minus))
+        assert jnp.all(jnp.isfinite(s.g))
+        # m=M=2 should have been damped; max|g| should be bounded.
+        assert float(jnp.max(jnp.abs(s.g))) < 10.0
+
     def test_imex222_zpm_parity_with_nu_positive(self):
         """z+/z- evolution must be bit-identical across schemes irrespective
         of nu: nu only affects g (damping, via D-inside-L on IMEX or via the

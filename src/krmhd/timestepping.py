@@ -624,8 +624,11 @@ def _gandalf_step_lawson_rk4_jit(
 # =============================================================================
 
 # ARS(2,2,2) implicit-stage coefficient and stage-2 explicit scaling (Python floats).
+# Note delta is NEGATIVE (~ -0.7071); the dt*delta*N_1 contribution in
+# stage B's RHS therefore *subtracts* the initial-state nonlinear evaluation.
+# This is correct per Ascher-Ruuth-Spiteri 1997 Table IV.
 _IMEX_GAMMA: float = (2.0 - math.sqrt(2.0)) / 2.0        # gamma = (2 - sqrt(2))/2
-_IMEX_DELTA: float = 1.0 - 1.0 / (2.0 * _IMEX_GAMMA)     # delta = 1 - 1/(2*gamma)
+_IMEX_DELTA: float = 1.0 - 1.0 / (2.0 * _IMEX_GAMMA)     # delta = 1 - 1/(2*gamma) ~ -0.7071
 
 
 # Note: hyper_n is deliberately absent from static_argnames because it is
@@ -824,7 +827,11 @@ def _gandalf_step_imex222_jit(
     # — the resistive kernel is identical across all three fields.
     g_new = g_new * perp_dissipation_factor[:, :, :, jnp.newaxis]
 
-    # Defensive dealias of Hermite moments
+    # Defensive dealias of Hermite moments. z+/- are NOT dealiased here by
+    # design: their dealiasing is already done inside _krmhd_rhs_jit via the
+    # Poisson-bracket evaluation (spectral.poisson_bracket_3d applies the
+    # mask after the nonlinear product). The Lawson kernel follows the same
+    # convention, so this asymmetry is intentional, not an omission.
     g_new = g_new * dealias_mask[:, :, :, jnp.newaxis]
 
     return KRMHDFields(
@@ -918,9 +925,28 @@ def gandalf_step(
         >>> state_new = gandalf_step(state, dt=0.01, eta=0.001, v_A=1.0,
         ...                          hyper_r=8, hyper_n=4)
         >>>
-        >>> # In a loop:
+        >>> # In a loop — pass scheme explicitly if you want to pin an
+        >>> # integrator regardless of future default changes:
         >>> for i in range(n_steps):
-        ...     state = gandalf_step(state, dt, eta, v_A, hyper_r=8, hyper_n=4)
+        ...     state = gandalf_step(state, dt, eta, v_A, hyper_r=8, hyper_n=4,
+        ...                          scheme="imex_rk222")
+
+    Performance:
+        - IMEX path rebuilds `L` and its LU factorization on every call
+          (128 batched 129x129 solves at M=Nz=128). Dominated by FFTs in
+          the RHS evaluations, but not free. See Issue #139 for the caching
+          follow-up.
+        - IMEX evaluates `_krmhd_rhs_jit` 4 times per step (2 real k_z for
+          the Elsasser midpoint + 2 k_z=0 for the IMEX nonlinear stages);
+          the Lawson path evaluates it 6 times (2 + 4 Lawson-RK4 stages).
+          Issue #141 tracks dropping IMEX to 2 by deriving N from `rhs_*.g`
+          and the already-computed `L*g` mat-vec.
+        - Resistive damping is applied as a post-step exp() factor, the same
+          as the Lawson convention. This is a 1st-order Strang split with
+          the IMEX solve; `eta*dt*|k_perp|^(2r) << 1` in typical turbulence
+          runs makes the extra splitting error negligible and sets a soft
+          upper bound on `dt` (though streaming+collisions are themselves
+          unconditionally stable under IMEX).
 
     Physics:
         - Linear propagation: Handled exactly (unconditionally stable)
