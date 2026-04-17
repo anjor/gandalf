@@ -893,6 +893,12 @@ def gandalf_step(
               retained for comparison and rollback. Known to be unstable at
               high M·k_z (see Issue #137).
 
+            NOTE: scheme is a per-call argument and is NOT stored on
+            KRMHDState. Callers looping over time must pass it explicitly
+            each step. Mixing a checkpoint written by one scheme into a
+            subsequent run under the other scheme is valid — state carries
+            only field data — but the evolution cadence is per-call.
+
     Returns:
         New KRMHDState at time t + dt
 

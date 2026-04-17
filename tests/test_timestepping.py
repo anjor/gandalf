@@ -1809,6 +1809,25 @@ class TestIMEX222:
             f"m=M not damped: before={m4_init}, after={m4_final}"
         )
 
+    def test_imex222_zpm_parity_with_nu_positive(self):
+        """z+/z- evolution must be bit-identical across schemes irrespective
+        of nu: nu only affects g (damping, via D-inside-L on IMEX or via the
+        post-step exponential on Lawson). A divergence here would signal a
+        silent cross-contamination of nu into the z+/- path."""
+        state0 = self._make_random_state(M=4, nu=2.5, z_amp=0.02, g_amp=0.01)
+        dt = 0.005
+        state_l = state0
+        state_i = state0
+        for _ in range(50):
+            state_l = gandalf_step(state_l, dt=dt, eta=0.0, v_A=1.0,
+                                   nu=2.5, scheme="lawson_rk4")
+            state_i = gandalf_step(state_i, dt=dt, eta=0.0, v_A=1.0,
+                                   nu=2.5, scheme="imex_rk222")
+        diff_plus = float(jnp.max(jnp.abs(state_l.z_plus - state_i.z_plus)))
+        diff_minus = float(jnp.max(jnp.abs(state_l.z_minus - state_i.z_minus)))
+        assert diff_plus < 5e-4, f"z_plus parity broken at nu=2.5: {diff_plus}"
+        assert diff_minus < 5e-4, f"z_minus parity broken at nu=2.5: {diff_minus}"
+
     def test_imex222_bparallel_parity_with_lawson(self):
         """B_parallel is a passive-slot pass-through in both schemes today
         (Issue #7). Verify both paths leave it bit-identical so a future
@@ -1911,6 +1930,9 @@ class TestIMEX222:
         log_dts = np.log(dts)
         log_errs = np.log(errs)
         slope = np.polyfit(log_dts, log_errs, 1)[0]
+        # ARS(2,2,2) is 2nd order. The floor 1.7 (not 1.9) absorbs float32 LU
+        # roundoff, which starts to flatten the curve at the smallest dt; see
+        # test_imex_solve_roundtrip for the complex64 residual magnitude.
         assert slope >= 1.7, (
             f"IMEX damped-convergence slope too low: {slope:.2f}, errs={errs}"
         )
@@ -1978,6 +2000,9 @@ class TestIMEX222:
         log_dts = np.log(dts)
         log_errs = np.log(errs)
         slope = np.polyfit(log_dts, log_errs, 1)[0]
+        # ARS(2,2,2) is 2nd order. Floor at 1.7 (not 1.9) because at small dt
+        # the complex64 LU residual (~3e-7, see test_imex_solve_roundtrip) is
+        # comparable to the scheme's truncation error, flattening the slope.
         assert slope >= 1.7, (
             f"IMEX convergence slope too low: {slope:.2f}, errs={errs}"
         )
