@@ -25,6 +25,7 @@ from krmhd.physics import (
     initialize_alfven_wave,
     initialize_hermite_moments,
     initialize_orszag_tang,
+    initialize_random_spectrum,
     energy,
 )
 from krmhd.timestepping import krmhd_rhs, gandalf_step, compute_cfl_timestep
@@ -557,6 +558,73 @@ class TestConvergence:
             avg_rate = jnp.mean(jnp.array(convergence_rates))
             assert avg_rate > 1.5, \
                 f"Average convergence rate p={avg_rate:.2f} too low (expected >1.5 for RK2)"
+
+    def test_second_order_convergence_nonlinear_3d(self):
+        """Verify O(dt²) convergence with an active nonlinearity at kz != 0.
+
+        The single-Alfvén-wave test above has an identically vanishing
+        Poisson bracket, so it only exercises the (exact) linear integrating
+        factor and is blind to errors in how the nonlinear increment is
+        combined with the phase factors. This test uses a random 3D spectrum
+        (kz != 0 modes with order-unity nonlinearity) so that the
+        linear-nonlinear cross coupling dominates the time-discretization
+        error.
+
+        Regression test for audit finding F2: the Elsasser update applied the
+        integrating-factor phase twice to the nonlinear increment
+        (e^(2i·kz·dt)·dt·NL instead of e^(i·kz·dt/2)·dt·NL), which degraded
+        the scheme to 1st order in the kz-dependent phase of every nonlinear
+        transfer while leaving 2D (kz=0) benchmarks untouched.
+        """
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        v_A = 1.0
+        eta = 0.0  # Inviscid: isolate time-integration error
+        scheme = "imex_rk222"  # Pin scheme (both share the Elsasser update)
+
+        def make_state():
+            # M=0 (pure fluid) isolates the Elsasser sector; nu=0 required for M=0.
+            # amplitude=1000 gives order-unity REAL-SPACE fields (the spectral
+            # coefficients returned by initialize_random_spectrum carry the
+            # 1/N^3 irfft normalization, so amplitude=1 real-space fields are
+            # ~1e-3): the nonlinear rate is then O(1) and the O(dt^2)
+            # truncation error sits well above the complex64 accumulation
+            # floor at the smallest dt tested, while CFL ~ 0.3 at dt=0.02.
+            return initialize_random_spectrum(
+                grid, M=0, alpha=5/3, amplitude=1000.0,
+                k_min=1.0, k_max=3.0, nu=0.0, seed=42,
+            )
+
+        t_final = 0.2
+
+        # Reference solution with a very small timestep
+        dt_ref = 1e-3
+        state_ref = make_state()
+        for _ in range(round(t_final / dt_ref)):
+            state_ref = gandalf_step(state_ref, dt_ref, eta=eta, v_A=v_A, scheme=scheme)
+        z_plus_ref = state_ref.z_plus
+
+        timesteps = [0.02, 0.01, 0.005]
+        errors = []
+        for dt in timesteps:
+            state = make_state()
+            for _ in range(round(t_final / dt)):
+                state = gandalf_step(state, dt, eta=eta, v_A=v_A, scheme=scheme)
+            error = jnp.sqrt(jnp.mean(jnp.abs(state.z_plus - z_plus_ref) ** 2))
+            errors.append(float(error))
+
+        # Consecutive convergence orders p = log(e_i/e_{i+1}) / log(dt_i/dt_{i+1})
+        rates = []
+        for i in range(len(errors) - 1):
+            p = np.log(errors[i] / errors[i + 1]) / np.log(timesteps[i] / timesteps[i + 1])
+            rates.append(float(p))
+        avg_rate = float(np.mean(rates))
+
+        assert avg_rate > 1.7, (
+            f"Nonlinear 3D convergence order p={avg_rate:.2f} too low "
+            f"(expected ~2 for the integrating-factor RK2 midpoint scheme; "
+            f"p~1 indicates a phase error on the nonlinear increment). "
+            f"errors={errors}, rates={rates}"
+        )
 
 
 class TestHermiteMomentIntegration:
