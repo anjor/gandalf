@@ -613,7 +613,6 @@ class TestKRMHDState:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64),
             M=M,
             beta_i=1.0,
@@ -627,7 +626,6 @@ class TestKRMHDState:
         # Check stored Elsasser variable shapes
         assert state.z_plus.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
         assert state.z_minus.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
-        assert state.B_parallel.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
         assert state.g.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1)
 
         # Check computed property shapes (phi, A_parallel derived from Elsasser)
@@ -653,7 +651,6 @@ class TestKRMHDState:
             KRMHDState(
                 z_plus=jnp.zeros((grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),  # 2D instead of 3D
                 z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-                B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
                 g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
                 M=10,
                 beta_i=1.0,
@@ -763,9 +760,6 @@ class TestKRMHDState:
         assert jnp.any(state.phi != 0.0), "phi should have wave mode"
         assert jnp.any(state.A_parallel != 0.0), "A_parallel should have wave mode"
 
-        # Check B_parallel is zero (pure Alfvén wave)
-        assert jnp.all(state.B_parallel == 0.0), "B_parallel should be zero for Alfvén wave"
-
         # Check that only one mode is excited (approximately)
         n_nonzero_phi = jnp.sum(jnp.abs(state.phi) > 1e-10)
         n_nonzero_A = jnp.sum(jnp.abs(state.A_parallel) > 1e-10)
@@ -803,9 +797,6 @@ class TestKRMHDState:
         # Check k=0 mode is zero
         assert state.phi[0, 0, 0] == 0.0, "k=0 mode should be zero"
         assert state.A_parallel[0, 0, 0] == 0.0, "k=0 mode should be zero"
-
-        # Check B_parallel is initially zero
-        assert jnp.all(state.B_parallel == 0.0), "B_parallel should start at zero"
 
         # Check Hermite moments are equilibrium
         assert jnp.all(state.g == 0.0), "Hermite moments should be equilibrium"
@@ -868,26 +859,21 @@ class TestKRMHDState:
         # Check structure
         assert "magnetic" in E
         assert "kinetic" in E
-        assert "compressive" in E
         assert "total" in E
 
         # Check all positive
         assert E["magnetic"] >= 0.0
         assert E["kinetic"] >= 0.0
-        assert E["compressive"] >= 0.0
         assert E["total"] >= 0.0
 
         # Check total = sum
         assert jnp.isclose(
-            E["total"], E["magnetic"] + E["kinetic"] + E["compressive"]
+            E["total"], E["magnetic"] + E["kinetic"]
         ), "Total energy should equal sum of components"
 
         # For Alfvén wave, expect equipartition E_mag ≈ E_kin
         ratio = E["magnetic"] / (E["kinetic"] + 1e-20)
         assert 0.8 < ratio < 1.2, f"Alfvén wave should have E_mag ≈ E_kin, got ratio {ratio}"
-
-        # Compressive energy should be zero (no B_parallel)
-        assert E["compressive"] == 0.0, "Alfvén wave should have zero compressive energy"
 
     def test_energy_random_spectrum(self):
         """Test energy calculation for random spectrum."""
@@ -914,7 +900,7 @@ class TestKRMHDState:
 
         # Check total = sum
         assert jnp.isclose(
-            E["total"], E["magnetic"] + E["kinetic"] + E["compressive"]
+            E["total"], E["magnetic"] + E["kinetic"]
         ), "Total energy should equal sum of components"
 
         # For random initialization, energies should be of similar order
@@ -957,7 +943,6 @@ class TestKRMHDState:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64),
             M=M,
             beta_i=1.0,
@@ -972,7 +957,6 @@ class TestKRMHDState:
 
         assert E["magnetic"] == 0.0
         assert E["kinetic"] == 0.0
-        assert E["compressive"] == 0.0
         assert E["total"] == 0.0
 
     def test_energy_parseval_validation(self):
@@ -1053,9 +1037,6 @@ class TestKRMHDState:
         assert jnp.isclose(ratio, 1.0, rtol=0.05), \
             f"Alfvén wave equipartition: E_mag/E_kin = {ratio}, expected ≈ 1.0"
 
-        # Compressive energy should be exactly zero
-        assert E["compressive"] == 0.0, "Pure Alfvén wave should have no compressive energy"
-
     def test_hermite_dtype_validation(self):
         """Test that Hermite moments must be complex."""
         from krmhd.physics import KRMHDState
@@ -1068,7 +1049,6 @@ class TestKRMHDState:
             KRMHDState(
                 z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
                 z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-                B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
                 g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.float32),  # Real!
                 M=M,
                 beta_i=1.0,
@@ -1113,10 +1093,6 @@ class TestKRMHDState:
         # Same for A_parallel
         A_real = rfftn_inverse(state.A_parallel, grid.Nz, grid.Ny, grid.Nx)
         assert jnp.all(jnp.isreal(A_real)), "A_parallel in real space should be real-valued"
-
-        # Same for B_parallel
-        B_real = rfftn_inverse(state.B_parallel, grid.Nz, grid.Ny, grid.Nx)
-        assert jnp.all(jnp.isreal(B_real)), "B_parallel in real space should be real-valued"
 
     def test_reality_condition_random_spectrum(self):
         """Test that random spectrum initialization satisfies reality condition."""
@@ -2291,12 +2267,12 @@ class TestKRMHDStatePytree:
         from krmhd.physics import _krmhd_state_flatten, _krmhd_state_unflatten
         children, aux_data = _krmhd_state_flatten(state)
 
-        # Check children are arrays or pytrees (5 fields: z_plus, z_minus, B_parallel, g, grid)
-        assert len(children) == 5
-        # First 4 should be arrays
-        assert all(isinstance(c, jax.Array) for c in children[:4])
+        # Check children are arrays or pytrees (4 fields: z_plus, z_minus, g, grid)
+        assert len(children) == 4
+        # First 3 should be arrays
+        assert all(isinstance(c, jax.Array) for c in children[:3])
         # Last one is grid (also a pytree)
-        assert isinstance(children[4], SpectralGrid3D)
+        assert isinstance(children[3], SpectralGrid3D)
 
         # Check aux_data contains static fields
         M, beta_i, v_th, nu, Lambda, time = aux_data
@@ -2441,7 +2417,6 @@ class TestKRMHDStatePytree:
         state = KRMHDState(
             z_plus=jnp.zeros((32, 32, 17), dtype=complex),
             z_minus=jnp.zeros((32, 32, 17), dtype=complex),
-            B_parallel=jnp.zeros((32, 32, 17), dtype=complex),
             g=jnp.zeros((32, 32, 17, 6), dtype=complex),
             M=5,
             beta_i=1.0,
@@ -2458,7 +2433,6 @@ class TestKRMHDStatePytree:
             KRMHDState(
                 z_plus=jnp.zeros((32, 32, 17), dtype=complex),
                 z_minus=jnp.zeros((32, 32, 17), dtype=complex),
-                B_parallel=jnp.zeros((32, 32, 17), dtype=complex),
                 g=jnp.zeros((32, 32, 17, 6), dtype=complex),
                 M=-1,  # Invalid: must be >= 0
                 beta_i=1.0,

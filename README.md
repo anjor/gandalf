@@ -16,9 +16,11 @@ The KRMHD model splits plasma dynamics into two coupled sectors:
 - These fields drive the turbulent energy cascade
 
 ### Passive (Slow Mode) Sector
-- **Parallel magnetic field delta_B_parallel**: Field-aligned magnetic fluctuations
-- **Electron density/pressure n_e, p_e**: Thermodynamic perturbations
+- **Electron density/pressure n_e, p_e**: Thermodynamic perturbations (via Hermite moments)
 - Advected by Alfvenic turbulence without back-reaction
+- The compressive observables (delta_n_e, delta_B_parallel) are derived
+  diagnostics of the Lambda+/- Hermite hierarchies (thesis; dne_dbpar.cu in
+  the original GANDALF), not independently evolved fields
 
 Key physical processes include:
 - Poisson bracket nonlinearities: `{f,g} = z_hat · (grad_f x grad_g)`
@@ -1191,7 +1193,7 @@ The code includes validation against:
 - **Forcing mechanisms** (Issue #29): Gaussian white noise forcing for driven turbulence
   - gaussian_white_noise_fourier(): Band-limited stochastic forcing
   - force_alfven_modes(): Forces z⁺=z⁻ identically (drives u⊥ only, not B⊥)
-  - force_slow_modes(): Independent forcing for δB∥
+  - force_hermite_moments(): Independent forcing for kinetic moments g_m
   - compute_energy_injection_rate(): Energy diagnostics for balance validation
   - Hermitian symmetry enforcement for rfft format (critical for direct Fourier operations)
 - **Validation examples** (Issues #11-12, #27): Physics benchmarks

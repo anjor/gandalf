@@ -96,7 +96,6 @@ def test_checkpoint_roundtrip(state, tmpdir):
     # Check state fields (allow small numerical error from float32 storage)
     assert np.allclose(loaded_state.z_plus, state.z_plus, rtol=1e-6, atol=1e-7)
     assert np.allclose(loaded_state.z_minus, state.z_minus, rtol=1e-6, atol=1e-7)
-    assert np.allclose(loaded_state.B_parallel, state.B_parallel, rtol=1e-6, atol=1e-7)
     assert np.allclose(loaded_state.g, state.g, rtol=1e-6, atol=1e-7)
 
     # Check state parameters
@@ -208,10 +207,13 @@ def test_checkpoint_complex_dtype(state, tmpdir):
         assert 'z_plus_imag' in f['state']
         assert 'z_minus_real' in f['state']
         assert 'z_minus_imag' in f['state']
-        assert 'B_parallel_real' in f['state']
-        assert 'B_parallel_imag' in f['state']
         assert 'g_real' in f['state']
         assert 'g_imag' in f['state']
+
+        # B_parallel was removed (never evolved); new checkpoints must not
+        # contain its datasets
+        assert 'B_parallel_real' not in f['state']
+        assert 'B_parallel_imag' not in f['state']
 
         # Check dtypes (should be float32)
         assert f['state']['z_plus_real'].dtype == np.float32
@@ -221,7 +223,6 @@ def test_checkpoint_complex_dtype(state, tmpdir):
     loaded_state, _, _ = load_checkpoint(str(filename))
     assert jnp.iscomplexobj(loaded_state.z_plus)
     assert jnp.iscomplexobj(loaded_state.z_minus)
-    assert jnp.iscomplexobj(loaded_state.B_parallel)
     assert jnp.iscomplexobj(loaded_state.g)
 
 
@@ -427,7 +428,6 @@ def test_timeseries_roundtrip(energy_history, tmpdir):
     assert np.allclose(loaded_history.times, energy_history.times)
     assert np.allclose(loaded_history.E_magnetic, energy_history.E_magnetic)
     assert np.allclose(loaded_history.E_kinetic, energy_history.E_kinetic)
-    assert np.allclose(loaded_history.E_compressive, energy_history.E_compressive)
     assert np.allclose(loaded_history.E_total, energy_history.E_total)
 
     # Check metadata
@@ -527,7 +527,6 @@ def test_timeseries_dtype(energy_history, tmpdir):
         assert f['times'].dtype == np.float64
         assert f['E_magnetic'].dtype == np.float64
         assert f['E_kinetic'].dtype == np.float64
-        assert f['E_compressive'].dtype == np.float64
         assert f['E_total'].dtype == np.float64
 
 
@@ -622,7 +621,6 @@ def test_checkpoint_with_zero_fields(grid, tmpdir):
     state_zero = KRMHDState(
         z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex),
         z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex),
-        B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex),
         g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=complex),
         M=10,
         beta_i=1.0,
@@ -640,8 +638,88 @@ def test_checkpoint_with_zero_fields(grid, tmpdir):
 
     assert np.allclose(loaded_state.z_plus, 0.0)
     assert np.allclose(loaded_state.z_minus, 0.0)
-    assert np.allclose(loaded_state.B_parallel, 0.0)
     assert np.allclose(loaded_state.g, 0.0)
+
+
+def test_checkpoint_legacy_b_parallel_datasets_ignored(tmpdir):
+    """Old-format checkpoints containing B_parallel datasets must still load.
+
+    Checkpoints written before B_parallel was removed (it was stored but
+    never evolved) contain /state/B_parallel_real and /state/B_parallel_imag.
+    load_checkpoint must silently ignore them - no KeyError, no shape errors -
+    and reconstruct the state from the remaining fields.
+
+    The file is built by hand with h5py, replicating the OLD writer's layout
+    exactly (dataset names, attribute names, float32 storage, gzip level 4).
+    """
+    from datetime import datetime
+
+    Nx, Ny, Nz = 8, 8, 4
+    M = 2
+    rng = np.random.default_rng(7)
+
+    def rand_complex(shape):
+        return (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(np.complex64)
+
+    field_shape = (Nz, Ny, Nx // 2 + 1)
+    z_plus = rand_complex(field_shape)
+    z_minus = rand_complex(field_shape)
+    B_parallel = rand_complex(field_shape)  # legacy field, should be ignored
+    g = rand_complex((Nz, Ny, Nx // 2 + 1, M + 1))
+
+    filename = tmpdir / "legacy_checkpoint.h5"
+    with h5py.File(filename, 'w') as f:
+        state_group = f.create_group('state')
+        grid_group = f.create_group('grid')
+        meta_group = f.create_group('metadata')
+
+        # Old writer stored each complex field as float32 real/imag pairs
+        # with gzip level-4 compression (see io.py history).
+        for name, arr in [
+            ('z_plus', z_plus),
+            ('z_minus', z_minus),
+            ('B_parallel', B_parallel),  # extra legacy datasets
+            ('g', g),
+        ]:
+            state_group.create_dataset(
+                f'{name}_real', data=arr.real.astype(np.float32),
+                compression='gzip', compression_opts=4,
+            )
+            state_group.create_dataset(
+                f'{name}_imag', data=arr.imag.astype(np.float32),
+                compression='gzip', compression_opts=4,
+            )
+
+        state_group.attrs['M'] = M
+        state_group.attrs['beta_i'] = 1.0
+        state_group.attrs['v_th'] = 1.0
+        state_group.attrs['nu'] = 0.01
+        state_group.attrs['Lambda'] = 1.0
+        state_group.attrs['time'] = 3.5
+
+        grid_group.attrs['Nx'] = Nx
+        grid_group.attrs['Ny'] = Ny
+        grid_group.attrs['Nz'] = Nz
+        grid_group.attrs['Lx'] = 1.0
+        grid_group.attrs['Ly'] = 1.0
+        grid_group.attrs['Lz'] = 1.0
+
+        meta_group.attrs['version'] = IO_FORMAT_VERSION
+        meta_group.attrs['timestamp'] = datetime.now().isoformat()
+
+    # Must load without KeyError despite the extra B_parallel datasets
+    loaded_state, loaded_grid, metadata = load_checkpoint(str(filename))
+
+    assert loaded_grid.Nx == Nx
+    assert loaded_grid.Ny == Ny
+    assert loaded_grid.Nz == Nz
+    assert loaded_state.M == M
+    assert np.isclose(loaded_state.time, 3.5)
+    assert np.allclose(loaded_state.z_plus, z_plus, rtol=1e-6, atol=1e-7)
+    assert np.allclose(loaded_state.z_minus, z_minus, rtol=1e-6, atol=1e-7)
+    assert np.allclose(loaded_state.g, g, rtol=1e-6, atol=1e-7)
+    # The removed field must not resurface on the loaded state
+    assert not hasattr(loaded_state, 'B_parallel')
 
 
 def test_checkpoint_disable_validation(state, tmpdir):

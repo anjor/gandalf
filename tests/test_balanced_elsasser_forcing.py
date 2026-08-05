@@ -23,13 +23,11 @@ def create_zero_state(grid: SpectralGrid3D, M: int = 10) -> KRMHDState:
     """Helper to create a zero-initialized KRMHDState for testing."""
     z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex)
     z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex)
-    B_parallel = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex)
     g = jnp.zeros((M + 1, grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex)
 
     return KRMHDState(
         z_plus=z_plus,
         z_minus=z_minus,
-        B_parallel=B_parallel,
         g=g,
         M=M,
         beta_i=1.0,
@@ -291,14 +289,13 @@ def test_correlation_parameter_range():
 
 
 def test_forcing_preserves_other_fields():
-    """Test that forcing only affects z+ and z-, not B_parallel or g."""
+    """Test that forcing only affects z+ and z-, not g."""
     grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
     state = create_zero_state(grid, M=10)
 
-    # Set non-zero values in B_parallel and g
+    # Set non-zero values in g
     state = state.model_copy(
         update=dict(
-            B_parallel=jnp.ones_like(state.B_parallel) * 0.5,
             g=jnp.ones_like(state.g) * 0.3,
         )
     )
@@ -317,9 +314,7 @@ def test_forcing_preserves_other_fields():
         max_nz=1,
     )
 
-    # B_parallel and g should be unchanged
-    assert jnp.allclose(state_forced.B_parallel, state.B_parallel), \
-        "Forcing modified B_parallel (should only affect z± fields)"
+    # g should be unchanged
     assert jnp.allclose(state_forced.g, state.g), \
         "Forcing modified Hermite moments (should only affect z± fields)"
 
