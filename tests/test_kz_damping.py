@@ -59,9 +59,11 @@ class TestKzDampingNoOp:
         s_default = gandalf_step(state, dt, eta=0.01, v_A=1.0)
         s_explicit = gandalf_step(state, dt, eta=0.01, v_A=1.0, eta_z=0.0, hyper_rz=1)
 
+        # Only the dynamically evolved fields are compared; B_parallel is
+        # frozen pass-through state and is being removed entirely in
+        # refactor/remove-b-parallel (PR #149).
         assert jnp.allclose(s_default.z_plus, s_explicit.z_plus, rtol=0.0, atol=0.0)
         assert jnp.allclose(s_default.z_minus, s_explicit.z_minus, rtol=0.0, atol=0.0)
-        assert jnp.allclose(s_default.B_parallel, s_explicit.B_parallel, rtol=0.0, atol=0.0)
         assert jnp.allclose(s_default.g, s_explicit.g, rtol=0.0, atol=0.0)
 
     def test_nz2_grid_runs_without_nan_with_defaults(self):
@@ -157,7 +159,7 @@ class TestKzDampingHermiteMoments:
         state = KRMHDState(
             z_plus=zeros,
             z_minus=zeros,
-            B_parallel=zeros,
+            B_parallel=zeros,  # required pre-#149; ignored extra kwarg after it merges
             g=g,
             M=M,
             beta_i=1.0,
