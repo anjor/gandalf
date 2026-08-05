@@ -211,7 +211,9 @@ def run_simulation(
             v_A=config.physics.v_A,
             nu=config.physics.nu,
             hyper_r=config.physics.hyper_r,
-            hyper_n=config.physics.hyper_n
+            hyper_n=config.physics.hyper_n,
+            eta_z=config.physics.eta_z,
+            hyper_rz=config.physics.hyper_rz
         )
         t += dt
 
