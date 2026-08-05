@@ -8,7 +8,7 @@ energy at large scales while allowing inertial-range cascade to develop.
 Key features:
 - Band-limited forcing: inject energy only at modes n ∈ [n_min, n_max]
 - Alfvén sector forcing: drives perpendicular velocity u⊥ only, NOT δB⊥
-- Slow mode forcing: optional independent forcing for δB∥ and kinetic moments
+- Hermite moment forcing: optional independent forcing for kinetic moments g_m
 - Energy injection rate diagnostics for monitoring energy balance
 
 Physics context:
@@ -503,7 +503,6 @@ def force_alfven_modes_balanced(
     new_state = KRMHDState(
         z_plus=z_plus_new,
         z_minus=z_minus_new,
-        B_parallel=state.B_parallel,
         g=state.g,
         M=state.M,
         beta_i=state.beta_i,
@@ -698,7 +697,6 @@ def force_alfven_modes(
     new_state = KRMHDState(
         z_plus=z_plus_new,
         z_minus=z_minus_new,
-        B_parallel=state.B_parallel,  # Passive field, not forced here
         g=state.g,  # Kinetic moments, not forced here
         M=state.M,
         beta_i=state.beta_i,
@@ -775,7 +773,6 @@ def force_alfven_modes_gandalf(
     new_state = KRMHDState(
         z_plus=z_plus_new,
         z_minus=z_minus_new,
-        B_parallel=state.B_parallel,
         g=state.g,
         M=state.M,
         beta_i=state.beta_i,
@@ -1035,82 +1032,7 @@ def force_alfven_modes_specific(
     new_state = KRMHDState(
         z_plus=z_plus_new,
         z_minus=z_minus_new,
-        B_parallel=state.B_parallel,
         g=state.g,
-        M=state.M,
-        beta_i=state.beta_i,
-        v_th=state.v_th,
-        nu=state.nu,
-        Lambda=state.Lambda,
-        time=state.time,
-        grid=state.grid,
-    )
-
-    return new_state, key
-
-
-def force_slow_modes(
-    state: KRMHDState,
-    amplitude: float,
-    n_min: int,
-    n_max: int,
-    dt: float,
-    key: Array,
-) -> Tuple[KRMHDState, Array]:
-    """
-    Apply Gaussian white noise forcing to slow modes (parallel magnetic field δB∥).
-
-    This forcing is INDEPENDENT from Alfvén forcing and drives compressive/slow
-    magnetosonic fluctuations. In KRMHD, slow modes are passively advected by
-    the Alfvén flow, but can be independently forced for studying their dynamics.
-
-    Args:
-        state: Current KRMHD state
-        amplitude: Forcing amplitude for slow modes
-        n_min: Minimum mode number for forcing band (typically n=1 or n=2)
-        n_max: Maximum mode number for forcing band (typically n=2 to n=5)
-        dt: Timestep size
-        key: JAX random key
-
-    Returns:
-        new_state: State with forcing applied to B∥
-        new_key: Updated random key
-
-    Example:
-        >>> key = jax.random.PRNGKey(42)
-        >>> # Force slow modes at large scales
-        >>> state_forced, key = force_slow_modes(
-        ...     state, amplitude=0.05, n_min=1, n_max=3, dt=0.01, key=key
-        ... )
-
-    Physics:
-        Slow modes in KRMHD satisfy:
-        ∂δB∥/∂t + {φ, δB∥} = -∇∥u∥ + D∇²δB∥ + F_slow
-
-        The forcing F_slow is uncorrelated with Alfvén forcing and allows
-        studying passive scalar advection, intermittency, and compressive effects.
-
-        Mode number convention: n=1 is the fundamental mode (k=2π/L),
-        n=2 is the second harmonic (k=4π/L), etc.
-    """
-    # Input validation (gaussian_white_noise_fourier validates n_min, n_max, dt)
-    if amplitude <= 0:
-        raise ValueError(f"amplitude must be positive, got {amplitude}")
-
-    # Generate forcing field for B∥
-    forcing, key = gaussian_white_noise_fourier(
-        state.grid, amplitude, n_min, n_max, dt, key
-    )
-
-    # Apply forcing to parallel magnetic field
-    B_parallel_new = state.B_parallel + forcing
-
-    # Create new state
-    new_state = KRMHDState(
-        z_plus=state.z_plus,  # Alfvén modes unchanged
-        z_minus=state.z_minus,
-        B_parallel=B_parallel_new,  # Forced slow mode
-        g=state.g,  # Kinetic moments unchanged
         M=state.M,
         beta_i=state.beta_i,
         v_th=state.v_th,
@@ -1231,7 +1153,6 @@ def force_hermite_moments(
     new_state = KRMHDState(
         z_plus=state.z_plus,  # Alfvén modes unchanged
         z_minus=state.z_minus,
-        B_parallel=state.B_parallel,  # Slow modes unchanged
         g=g_new,  # Forced Hermite moments
         M=state.M,
         beta_i=state.beta_i,
@@ -1388,7 +1309,6 @@ def force_hermite_moments_specific(
     new_state = KRMHDState(
         z_plus=state.z_plus,
         z_minus=state.z_minus,
-        B_parallel=state.B_parallel,
         g=g_new,
         M=state.M,
         beta_i=state.beta_i,

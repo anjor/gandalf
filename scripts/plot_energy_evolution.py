@@ -85,7 +85,6 @@ def run_orszag_tang_simulation(save_file: str = "orszag_tang_history.pkl"):
         'E_total': np.array(history.E_total),
         'E_magnetic': np.array(history.E_magnetic),
         'E_kinetic': np.array(history.E_kinetic),
-        'E_compressive': np.array(history.E_compressive),
         'v_A': v_A,
         'Lx': Lx,
     }

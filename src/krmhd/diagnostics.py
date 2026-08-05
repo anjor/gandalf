@@ -1411,13 +1411,13 @@ def compute_magnetic_field_components(
 
     Computes the full 3D magnetic field including:
     - Perpendicular components from vector potential: B⊥ = ∇ × (Ψ ẑ)
-    - Parallel component: Bz = B₀ + δB∥
+    - Parallel component: Bz = B₀ (uniform guide field)
 
     All components are computed on a spectrally-padded fine grid for
     accurate field line following.
 
     Args:
-        state: KRMHD state with z_plus, z_minus, B_parallel
+        state: KRMHD state with z_plus, z_minus
         padding_factor: Resolution increase factor (default: 2)
 
     Returns:
@@ -1426,13 +1426,19 @@ def compute_magnetic_field_components(
 
     Physics:
         The magnetic field in RMHD:
-        B = B₀ẑ + δB
+        B = B₀ẑ + δB⊥
 
-        where δB comes from:
+        where:
         - B⊥ = ∇ × (Ψ ẑ) = (∂yΨ, -∂xΨ, 0)
-        - Bz = B₀ + δB∥
+        - Bz = B₀ (the δB∥ fluctuation is taken to be zero)
 
         Here Ψ = (z⁺ - z⁻)/2 is the parallel vector potential (up to normalization).
+
+        Note: δB∥ is not an evolved field in this formulation — it is a
+        derived diagnostic of the Λ± Hermite hierarchies (thesis;
+        dne_dbpar.cu in the original GANDALF), not yet implemented. Field
+        line following therefore uses Bz = B₀ exactly. This is consistent
+        with the RMHD ordering, where δB∥/B₀ = O(ε).
 
         Note: In the normalized equations, B₀ may not appear explicitly, but
         for field line following we need the full field direction.
@@ -1462,11 +1468,9 @@ def compute_magnetic_field_components(
     Bx_fine = spectral_pad_and_ifft(Bx_fourier, padding_factor)
     By_fine = spectral_pad_and_ifft(By_fourier, padding_factor)
 
-    # Parallel component: Bz = B₀ + δB∥
-    # Transform δB∥ to real space, then add B₀ = 1 (in normalized units)
-    # Note: Cannot add constant in Fourier space (only affects k=0 mode)
-    dBz_fine = spectral_pad_and_ifft(state.B_parallel, padding_factor)
-    Bz_fine = 1.0 + dBz_fine  # B₀ = 1 in code units
+    # Parallel component: Bz = B₀ (δB∥ is not an evolved field in this
+    # formulation; the fluctuation is identically zero here)
+    Bz_fine = jnp.ones_like(Bx_fine)  # B₀ = 1 in code units
 
     return {
         'Bx': Bx_fine,
@@ -1683,14 +1687,13 @@ class EnergyHistory:
     """
     Track energy evolution E(t) during KRMHD simulation.
 
-    Stores time series of all energy components (magnetic, kinetic, compressive)
+    Stores time series of all energy components (magnetic, kinetic)
     for analyzing energy conservation, dissipation rates, and equilibration.
 
     Attributes:
         times: List of simulation times
         E_magnetic: List of magnetic energy values
         E_kinetic: List of kinetic energy values
-        E_compressive: List of compressive energy values
         E_total: List of total energy values
 
     Example:
@@ -1713,7 +1716,6 @@ class EnergyHistory:
     times: List[float] = field(default_factory=list)
     E_magnetic: List[float] = field(default_factory=list)
     E_kinetic: List[float] = field(default_factory=list)
-    E_compressive: List[float] = field(default_factory=list)
     E_total: List[float] = field(default_factory=list)
 
     def append(self, state: KRMHDState) -> None:
@@ -1730,7 +1732,6 @@ class EnergyHistory:
         self.times.append(state.time)
         self.E_magnetic.append(energies['magnetic'])
         self.E_kinetic.append(energies['kinetic'])
-        self.E_compressive.append(energies['compressive'])
         self.E_total.append(energies['total'])
 
     def to_dict(self) -> Dict[str, List[float]]:
@@ -1750,7 +1751,6 @@ class EnergyHistory:
             'times': self.times,
             'E_magnetic': self.E_magnetic,
             'E_kinetic': self.E_kinetic,
-            'E_compressive': self.E_compressive,
             'E_total': self.E_total,
         }
 
@@ -1893,8 +1893,8 @@ def plot_energy_history(
     """
     Plot energy evolution E(t) from EnergyHistory.
 
-    Shows time series of all energy components (magnetic, kinetic, compressive,
-    total) on same axes for comparison.
+    Shows time series of all energy components (magnetic, kinetic, total)
+    on same axes for comparison.
 
     Args:
         history: EnergyHistory object with recorded time series
@@ -1912,19 +1912,16 @@ def plot_energy_history(
         - Conservation: E_total constant (inviscid) or exponential decay (viscous)
         - Selective decay: E_magnetic/E_kinetic increases over time
         - Equilibration: E_kinetic → E_magnetic for Alfvén waves
-        - Compressive energy should remain small in RMHD (passive)
     """
     times = np.array(history.times)
     E_mag = np.array(history.E_magnetic)
     E_kin = np.array(history.E_kinetic)
-    E_comp = np.array(history.E_compressive)
     E_tot = np.array(history.E_total)
 
     fig, ax = plt.subplots(figsize=figsize)
 
     ax.plot(times, E_mag, 'b-', label='Magnetic', linewidth=2)
     ax.plot(times, E_kin, 'r-', label='Kinetic', linewidth=2)
-    ax.plot(times, E_comp, 'g-', label='Compressive', linewidth=2)
     ax.plot(times, E_tot, 'k--', label='Total', linewidth=2)
 
     ax.set_xlabel('Time', fontsize=12)

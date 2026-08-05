@@ -125,7 +125,6 @@ def analytical_alfven_solution(
     return KRMHDState(
         z_plus=z_plus_t,
         z_minus=z_minus_t,
-        B_parallel=state0.B_parallel,
         g=state0.g,
         M=state0.M,
         beta_i=state0.beta_i,
@@ -339,7 +338,6 @@ def test_orszag_tang_convergence(
         # This properly handles negative frequency modes in y and z directions
         z_plus_ref_coarse = spectral_downsample(state_ref.z_plus, target_shape)
         z_minus_ref_coarse = spectral_downsample(state_ref.z_minus, target_shape)
-        B_parallel_ref_coarse = spectral_downsample(state_ref.B_parallel, target_shape)
 
         # For Hermite moments g (shape: [Nz, Ny, Nx//2+1, M+1]), downsample spatial dimensions
         # Note: Last dimension (M+1) is velocity space, not spatial
@@ -353,7 +351,6 @@ def test_orszag_tang_convergence(
         state_ref_coarse = KRMHDState(
             z_plus=z_plus_ref_coarse,
             z_minus=z_minus_ref_coarse,
-            B_parallel=B_parallel_ref_coarse,
             g=g_ref_coarse,
             M=state_ref.M,
             beta_i=state_ref.beta_i,
