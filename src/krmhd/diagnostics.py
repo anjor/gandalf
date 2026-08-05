@@ -2501,10 +2501,17 @@ def _compute_rfft_weighted_energy(
 
 def hermite_moment_energy(state: KRMHDState, account_for_rfft: bool = True) -> Array:
     """
-    Compute energy in each Hermite moment: Eₘ = ∑ₖ |gₘ,ₖ|².
+    Compute the per-moment Hermite spectrum: Eₘ = ∑ₖ |gₘ,ₖ|².
 
-    Returns the energy distribution across Hermite moments, showing how
-    energy is distributed in velocity space.
+    Returns the distribution of |gₘ|² across Hermite moments, showing how
+    fluctuation amplitude is distributed in velocity space.
+
+    IMPORTANT: This is the per-moment SPECTRUM ∑ₖ|gₘ,ₖ|², NOT the conserved
+    free energy. For Λ ≠ ∞ the parallel streaming matrix T is asymmetric in
+    its (0,1) block (T[1,0] carries the (1 - 1/Λ) kinetic correction), so the
+    unweighted total ∑ₘ Eₘ is NOT conserved by the streaming dynamics. The
+    conserved quadratic invariant weights the m=0 moment by w₀ = 1 - 1/Λ —
+    use hermite_free_energy() for free-energy budgets.
 
     Args:
         state: KRMHD state with Hermite moments g[Nz, Ny, Nx//2+1, M+1]
@@ -2560,6 +2567,81 @@ def hermite_moment_energy(state: KRMHDState, account_for_rfft: bool = True) -> A
         energy = jnp.sum(g_squared, axis=(0, 1, 2))  # Shape: [M+1]
 
     return energy
+
+
+def hermite_free_energy(state: KRMHDState, account_for_rfft: bool = True) -> float:
+    """
+    Compute the Λ-weighted Hermite free energy W = ∑ₘ wₘ ∑ₖ |gₘ,ₖ|².
+
+    This is the quadratic invariant of the Hermite hierarchy, with weights
+
+        w₀ = 1 - 1/Λ,    wₘ = 1  for m ≥ 1.
+
+    Unlike the unweighted sum of hermite_moment_energy() (which is the
+    per-moment spectrum, not an invariant), W is exactly conserved by the
+    inviscid, collisionless dynamics.
+
+    Derivation (detailed balance):
+        The linear parallel streaming term is
+
+            dgₘ/dt = -i·√βᵢ·k∥·∑ₙ T[m,n]·gₙ
+
+        with the tridiagonal coupling matrix T from
+        hermite.compute_streaming_matrix():
+
+            T[0,1] = √(1/2),  T[1,0] = (1 - 1/Λ)/√2,  T[1,2] = 1,
+            T[m,m+1] = √((m+1)/2),  T[m,m-1] = √(m/2)   (m ≥ 2).
+
+        Requiring d/dt ∑ₘ wₘ|gₘ|² = 0 for ALL g and k∥ gives the
+        detailed-balance condition wₘ·T[m,n] = wₙ·T[n,m] for every pair.
+        All m ≥ 1 pairs are already symmetric, so wₘ = wₙ there; the only
+        asymmetric pair is (0,1):
+
+            w₀·√(1/2) = w₁·(1 - 1/Λ)/√2   ⇒   w₀ = (1 - 1/Λ)·w₁
+
+        i.e. (up to an overall constant) w₀ = 1 - 1/Λ and wₘ≥₁ = 1.
+
+        The perpendicular advection terms {Φ, gₘ} conserve each moment's
+        ∑ₖ|gₘ|² individually, so W is an invariant of the full nonlinear
+        hierarchy (absent collisions/dissipation). Collisions and resistive
+        damping only remove free energy: dW/dt ≤ 0.
+
+    Special cases:
+        - Λ → ∞:  w₀ → 1, recovering the unweighted sum ∑ₘ Eₘ
+        - Λ = 1:  w₀ = 0, g₀ decouples from the invariant (T[1,0] = 0)
+        - Λ = -1: w₀ = 2 — the thesis-standard α = 1 case (the code's Λ
+          relates to the thesis kinetic parameter via α = -1/Λ, see
+          docs/HERMITE_CASCADE_INVESTIGATION.md). Free-energy budgets at
+          α = 1 must weight the m = 0 moment by 2.
+
+    Positivity:
+        For 0 < Λ < 1 the weight w₀ is negative and W is not positive
+        definite. That range lies outside the physical regime —
+        hermite.compute_streaming_eigensystem() already rejects those Λ
+        values via its complex-eigenvalue check — so for all usable Λ
+        (Λ ≥ 1 or Λ < 0) the form is positive (semi-)definite, with the
+        semi-definite boundary at Λ = 1 where g₀ carries zero weight.
+
+    Args:
+        state: KRMHD state with Hermite moments g[Nz, Ny, Nx//2+1, M+1]
+        account_for_rfft: If True, properly weight rfft modes (default: True)
+
+    Returns:
+        W: Scalar free energy w₀·E₀ + ∑ₘ₌₁ᴹ Eₘ
+
+    Note:
+        For M = 0 the sum degenerates to w₀·E₀ (defined, but the streaming
+        hierarchy itself is trivial in that fluid-only limit).
+
+    Example:
+        >>> W = hermite_free_energy(state)
+        >>> # Track free-energy budget during inviscid evolution
+        >>> # (should be constant for eta = nu = 0)
+    """
+    E_m = hermite_moment_energy(state, account_for_rfft)
+    w0 = 1.0 - 1.0 / state.Lambda
+    # E_m[1:] is empty for M=0, so this degenerates cleanly to w0 * E_0
+    return float(w0 * E_m[0] + jnp.sum(E_m[1:]))
 
 
 def phase_mixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = True) -> float:

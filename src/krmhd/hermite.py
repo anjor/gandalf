@@ -521,6 +521,10 @@ def check_hermite_convergence(
 
     where E_M = |gₘ|² and E_total = Σ|gₙ|² over all moments.
 
+    Note: E_total here is the unweighted per-moment spectrum sum, used only as
+    a truncation metric — it is NOT the conserved free energy when Λ ≠ ∞
+    (see diagnostics.hermite_free_energy, which weights m=0 by w₀ = 1 - 1/Λ).
+
     The energy calculation accounts for rfft format: modes with kx > 0 are
     counted twice (complex conjugate pairs), while kx = 0 is counted once.
 
