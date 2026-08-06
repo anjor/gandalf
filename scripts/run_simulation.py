@@ -98,7 +98,6 @@ def run_simulation(
         key = jr.PRNGKey(config.forcing.seed or 42)
         if verbose:
             # Show both physical wavenumbers and mode numbers for clarity
-            import numpy as np
             L_min = min(grid.Lx, grid.Ly, grid.Lz)
             n_min = int(np.round(config.forcing.k_min * L_min / (2 * np.pi)))
             n_max = int(np.round(config.forcing.k_max * L_min / (2 * np.pi)))
@@ -182,7 +181,6 @@ def run_simulation(
         if config.forcing.enabled:
             # Convert physical wavenumbers to integer mode numbers (Issue #97)
             # k = 2πn/L_min, so n = k*L_min/(2π)
-            import numpy as np
             L_min = min(grid.Lx, grid.Ly, grid.Lz)
             n_min = int(np.round(config.forcing.k_min * L_min / (2 * np.pi)))
             n_max = int(np.round(config.forcing.k_max * L_min / (2 * np.pi)))

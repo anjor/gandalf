@@ -793,7 +793,7 @@ def test_turbulence_diagnostics_roundtrip(grid, tmpdir):
     }
 
     # Save diagnostics
-    save_turbulence_diagnostics(diagnostics_list, str(filename), **metadata)
+    save_turbulence_diagnostics(diagnostics_list, str(filename), metadata=metadata)
 
     # Load diagnostics
     loaded_list, loaded_metadata = load_turbulence_diagnostics(str(filename))
@@ -845,7 +845,7 @@ def test_turbulence_diagnostics_metadata_preservation(grid, tmpdir):
         "custom_field": "test_value",
     }
 
-    save_turbulence_diagnostics(diagnostics_list, str(filename), **metadata)
+    save_turbulence_diagnostics(diagnostics_list, str(filename), metadata=metadata)
     _, loaded_metadata = load_turbulence_diagnostics(str(filename))
 
     # All metadata should be preserved
@@ -893,14 +893,16 @@ def test_turbulence_diagnostics_compression(grid, tmpdir):
     filename = tmpdir / "test_turbulence_compressed.h5"
     save_turbulence_diagnostics(diagnostics_list, str(filename))
 
-    # File should exist and be smaller than uncompressed data
-    # 7 fields × 100 samples × 8 bytes/float64 = 5600 bytes uncompressed
-    # With compression, should be significantly smaller
-    file_size = filename.stat().st_size
-    uncompressed_size = 7 * 100 * 8
-
-    # Compression should reduce size (conservative test: < 2x uncompressed)
-    assert file_size < 2 * uncompressed_size, f"File too large: {file_size} > {2 * uncompressed_size}"
+    # HDF5 per-dataset structural overhead (superblock, object headers, chunk
+    # B-trees) dominates at this data size (~700 raw bytes/dataset), so an
+    # absolute file-size bound is not meaningful. Instead verify compression is
+    # enabled on every dataset (same pattern as test_checkpoint_compression and
+    # test_timeseries_compression).
+    with h5py.File(str(filename), 'r') as f:
+        for name in ('times', 'max_velocity', 'cfl_number', 'max_nonlinear',
+                     'energy_highk', 'critical_balance_ratio', 'energy_total'):
+            assert f[name].compression == 'gzip', f"{name} not gzip-compressed"
+            assert f[name].compression_opts == 4, f"{name} unexpected gzip level"
 
 
 # =============================================================================
