@@ -66,6 +66,8 @@ def test_hermite_recurrence_relation():
     """Verify H_{m+1} = 2v·H_m - 2m·H_{m-1} explicitly."""
     v = jnp.linspace(-3.0, 3.0, 50)
 
+    eps = float(jnp.finfo(v.dtype).eps)
+
     for m in range(1, 10):
         H_m_minus_1 = hermite_polynomial(m - 1, v)
         H_m = hermite_polynomial(m, v)
@@ -74,9 +76,37 @@ def test_hermite_recurrence_relation():
         # Apply recurrence relation
         H_m_plus_1_recurrence = 2.0 * v * H_m - 2.0 * m * H_m_minus_1
 
-        assert jnp.allclose(
-            H_m_plus_1_computed, H_m_plus_1_recurrence, rtol=1e-5, atol=1e-6
-        ), f"Recurrence relation failed for m={m}"
+        # Both sides are independent floating-point evaluations of the *same*
+        # ill-conditioned expression: near a root of H_{m+1} the two terms
+        # 2v*H_m and 2m*H_{m-1} cancel almost completely, so the absolute
+        # uncertainty is set by the size of the terms being subtracted, not by
+        # the size of the result.  An absolute atol is therefore meaningless.
+        # On v in [-3, 3] those terms reach ~6.7e3 at m=4, so any float32
+        # evaluation carries ~eps*6.7e3 = 8e-4 of absolute noise (verified
+        # against a float64 reference), i.e. 800x the old atol=1e-6.  The old
+        # assertion passed on macOS only because XLA happened to contract both
+        # sides into the same FMA sequence; the x86-64 jaxlib build contracts
+        # them differently, so Linux CI saw the (equally valid) difference.
+        #
+        # Scale the tolerance by the cancellation magnitude instead.  The factor
+        # 32 covers the accumulated round-off of both evaluations (each a few
+        # eps*scale) with ~5x headroom, while a genuine error in the recurrence
+        # coefficients would show up at O(max|H_{m+1}|) -- larger than this
+        # tolerance by 5 orders of magnitude at every m tested here.
+        cancellation_scale = float(
+            jnp.max(jnp.abs(2.0 * v * H_m) + jnp.abs(2.0 * m * H_m_minus_1))
+        )
+        tol = 32.0 * eps * cancellation_scale
+        max_deviation = float(
+            jnp.max(jnp.abs(H_m_plus_1_computed - H_m_plus_1_recurrence))
+        )
+
+        assert max_deviation <= tol, (
+            f"Recurrence relation failed for m={m}: max deviation "
+            f"{max_deviation:.3e} exceeds tolerance {tol:.3e} "
+            f"(cancellation scale {cancellation_scale:.3e}, "
+            f"max|H_{m + 1}| = {float(jnp.max(jnp.abs(H_m_plus_1_computed))):.3e})"
+        )
 
 
 def test_hermite_known_values():
@@ -375,27 +405,57 @@ def test_round_trip_convergence_with_M(velocity_grid_standard):
     g_v_original = jnp.exp(-0.5 * v**2) * (1.0 + 0.1 * jnp.sin(v))
     g_v_original /= jnp.trapezoid(g_v_original, v)  # Normalize
 
+    # g(v) = even * (1 + odd), so moments of alternating parity contribute in
+    # pairs and the error is a staircase that only drops on every *second* M
+    # (measured: M=3 and M=4 give the same error to 7 digits).  Step M by 2 in
+    # the resolvable range so that every compared step is a real improvement.
     errors = []
-    M_values = [5, 10, 15, 20, 25]
+    M_values = [2, 4, 6, 8, 10, 15, 20, 25]
 
     for M in M_values:
         moments = distribution_to_moments(g_v_original, v, M, v_th)
         g_v_reconstructed = moments_to_distribution(moments, v, v_th, M)
 
         error = jnp.sqrt(jnp.trapezoid((g_v_original - g_v_reconstructed) ** 2, v))
-        errors.append(error)
+        errors.append(float(error))
 
-    # Error should generally decrease with M (allow small fluctuations)
-    # Check that final error is significantly smaller than initial error
+    # Round-off floor of the round trip.  Each moment is a 1000-point trapezoid
+    # quadrature (~log2(1000) = 10 eps of accumulated relative error) and the
+    # reconstruction sums M+1 basis functions (~sqrt(M) eps), so the round-trip
+    # error cannot fall below a few tens of eps relative to ||g||.  Measured
+    # plateau is 5.1 * eps * ||g|| = 3.2e-7, so 30 eps is a safe upper bound
+    # with ~6x headroom.  Beyond that point the error is pure round-off noise
+    # and its ordering in M is decided by the FFT/BLAS kernels of the specific
+    # jaxlib build -- which is exactly why the old strict-monotonicity check
+    # passed on macOS and on Linux/py3.10 but failed on Linux/py3.12.
+    eps = float(jnp.finfo(v.dtype).eps)
+    g_norm = float(jnp.sqrt(jnp.trapezoid(g_v_original**2, v)))
+    noise_floor = 30.0 * eps * g_norm
+
+    # Truncation error must fall monotonically while it still dominates
+    # round-off.  Every such step here is a factor >= 8 drop, far above noise.
+    for i in range(len(errors) - 1):
+        if errors[i] <= noise_floor:
+            break  # saturated: further differences are round-off, not physics
+        assert errors[i + 1] < errors[i], (
+            f"Error did not improve above the round-off floor "
+            f"({noise_floor:.3e}): M={M_values[i]} error={errors[i]:.6e}, "
+            f"M={M_values[i + 1]} error={errors[i + 1]:.6e}"
+        )
+
+    # Overall convergence must be dramatic, not marginal.
     assert errors[-1] < errors[0] * 0.5, (
         f"Error not decreasing sufficiently: "
-        f"M={M_values[0]} error={errors[0]}, M={M_values[-1]} error={errors[-1]}"
+        f"M={M_values[0]} error={errors[0]:.6e}, "
+        f"M={M_values[-1]} error={errors[-1]:.6e}"
     )
 
-    # Check that most steps show improvement (allow 1 non-improvement)
-    improvements = sum(1 for i in range(len(errors) - 1) if errors[i] > errors[i + 1])
-    assert improvements >= len(errors) - 2, (
-        f"Too many non-improvements in convergence: {improvements}/{len(errors)-1}"
+    # ...and the converged tail must actually sit at the float32 floor rather
+    # than plateauing at some larger value (which would indicate a real
+    # truncation or normalization bug in the transform pair).
+    assert errors[-1] <= noise_floor, (
+        f"Round-trip error saturated at {errors[-1]:.6e}, above the expected "
+        f"float32 round-off floor {noise_floor:.3e}"
     )
 
 

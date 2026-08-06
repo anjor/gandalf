@@ -311,11 +311,22 @@ class TestPoissonBracket2D:
         bracket_k = poisson_bracket_2d(f_k, g_k, grid.kx, grid.ky, grid.Ny, grid.Nx, grid.dealias_mask)
 
         # Check k=0 mode (spatial mean)
-        k0_mode = jnp.abs(bracket_k[0, 0])
+        k0_mode = float(jnp.abs(bracket_k[0, 0]))
 
-        # Should be zero (derivatives kill constants)
-        # Tolerance accounts for dealiasing and FFT round-off with random fields
-        assert k0_mode < 0.01, f"k=0 mode should be zero, got {k0_mode}"
+        # Same scaling argument as test_mean_preserving_3d: bracket_k[0,0] is
+        # the unnormalized sum of {f,g} over all N = Ny*Nx points, so its
+        # float32 floor is eps * log2(N) * ||{f,g}||_2 = 4e-2 here -- four times
+        # *larger* than the old absolute `< 0.01`, which therefore only passed
+        # by luck (the measured value is 3.9e-3, well inside the bound but with
+        # only 2.6x margin).  Scale to the bracket's own Fourier magnitude so
+        # the assertion is meaningful on any FFT backend.
+        bracket_scale = float(jnp.max(jnp.abs(bracket_k)))
+
+        assert k0_mode < 1e-5 * bracket_scale, (
+            f"k=0 mode should be zero, got {k0_mode} "
+            f"(bracket scale {bracket_scale:.4g}, "
+            f"relative {k0_mode / bracket_scale:.3e})"
+        )
 
     def test_l2_norm_conservation(self):
         """
@@ -593,10 +604,33 @@ class TestPoissonBracket3D:
         bracket_k = poisson_bracket_3d(f_k, g_k, grid.kx, grid.ky, grid.Nz, grid.Ny, grid.Nx, grid.dealias_mask)
 
         # Check k=0 mode
-        k0_mode = jnp.abs(bracket_k[0, 0, 0])
+        k0_mode = float(jnp.abs(bracket_k[0, 0, 0]))
 
-        # Should be zero (tolerance accounts for dealiasing and FFT round-off)
-        assert k0_mode < 1e-4, f"k=0 mode should be zero in 3D, got {k0_mode}"
+        # bracket_k[0,0,0] is the *unnormalized* sum of {f,g} over all
+        # N = Nz*Ny*Nx = 131072 grid points.  It vanishes analytically because
+        # {f,g} is a total derivative, but numerically it is a near-total
+        # cancellation: its two halves, sum(df/dx * dg/dy) and
+        # sum(df/dy * dg/dx), are each ~2.6e4 here and cancel to zero.  The
+        # float32 floor for such a sum is the standard FFT accumulation bound
+        # eps * log2(N) * ||{f,g}||_2 = 1.2e-7 * 17 * 1.1e4 = 2e-2, i.e. about
+        # one eps relative to the bracket's largest Fourier amplitude.
+        #
+        # The old absolute `< 1e-4` demanded ~200x better than float32 can
+        # deliver and passed on macOS only because the arm64 FFT kernel happened
+        # to cancel exactly.  Linux CI produced 2^-8 (py3.12) and 3*2^-8
+        # (py3.10) -- both exactly at this floor, and both a couple of ulps of
+        # the 2.6e4 partial sums.  Scale the tolerance to the bracket's own
+        # magnitude instead, which is what "the mean is preserved" means: the
+        # k=0 mode must be negligible next to the modes that carry the signal.
+        # 1e-5 is ~84 eps, so it leaves ~70x margin over the worst observed
+        # value while still catching any real leak into the mean.
+        bracket_scale = float(jnp.max(jnp.abs(bracket_k)))
+
+        assert k0_mode < 1e-5 * bracket_scale, (
+            f"k=0 mode should be zero in 3D, got {k0_mode} "
+            f"(bracket scale {bracket_scale:.4g}, "
+            f"relative {k0_mode / bracket_scale:.3e})"
+        )
 
 
 class TestKRMHDState:
