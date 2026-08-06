@@ -159,7 +159,6 @@ class TestKzDampingHermiteMoments:
         state = KRMHDState(
             z_plus=zeros,
             z_minus=zeros,
-            B_parallel=zeros,  # required pre-#149; ignored extra kwarg after it merges
             g=g,
             M=M,
             beta_i=1.0,

@@ -977,27 +977,35 @@ class TestKRMHDState:
         # Compute energy using energy() function
         E_auto = energy(state)
 
-        # Manually compute energy in Fourier space for validation
+        # Manually compute energy in Fourier space for validation.
+        # energy() normalizes perpendicular gradient energies by Nx*Ny only,
+        # summing over all z-planes (convention set in PR #77).
         Nx, Ny, Nz = grid.Nx, grid.Ny, grid.Nz
-        N_total = Nx * Ny * Nz
-        norm_factor = 1.0 / N_total
+        norm_factor = 1.0 / (Nx * Ny)
 
         kx_3d = grid.kx[jnp.newaxis, jnp.newaxis, :]
         ky_3d = grid.ky[jnp.newaxis, :, jnp.newaxis]
         k_perp_squared = kx_3d**2 + ky_3d**2
 
-        # Create kx=0 mask
-        kx_zero_mask = (grid.kx[jnp.newaxis, jnp.newaxis, :] == 0.0)
+        # rfft double-counting: factor 2 for 0 < kx < Nyquist (implicit negative-kx
+        # partner), factor 1 for kx=0 and the real-valued kx=Nyquist plane —
+        # mirrors the kx_middle mask in energy()
+        kx_zero = (kx_3d == 0.0)
+        kx_nyquist = (
+            (kx_3d == Nx // 2) if (Nx % 2 == 0)
+            else jnp.zeros_like(kx_3d, dtype=bool)
+        )
+        kx_middle = ~(kx_zero | kx_nyquist)
 
         # Manual calculation
         A_mag_sq = k_perp_squared * jnp.abs(state.A_parallel) ** 2
         E_mag_manual = 0.5 * norm_factor * jnp.sum(
-            jnp.where(kx_zero_mask, A_mag_sq, 2.0 * A_mag_sq)
+            jnp.where(kx_middle, 2.0 * A_mag_sq, A_mag_sq)
         ).real
 
         phi_mag_sq = k_perp_squared * jnp.abs(state.phi) ** 2
         E_kin_manual = 0.5 * norm_factor * jnp.sum(
-            jnp.where(kx_zero_mask, phi_mag_sq, 2.0 * phi_mag_sq)
+            jnp.where(kx_middle, 2.0 * phi_mag_sq, phi_mag_sq)
         ).real
 
         # Should match exactly (same calculation)

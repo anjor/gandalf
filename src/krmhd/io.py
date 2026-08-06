@@ -665,8 +665,9 @@ def save_turbulence_diagnostics(
         f.attrs['format_version'] = IO_FORMAT_VERSION
         f.attrs['created_at'] = datetime.now().isoformat()
         f.attrs['n_samples'] = len(diagnostics_list)
-        f.attrs['time_start'] = float(times[0])
-        f.attrs['time_end'] = float(times[-1])
+        if len(diagnostics_list) > 0:
+            f.attrs['time_start'] = float(times[0])
+            f.attrs['time_end'] = float(times[-1])
 
         if metadata:
             for key, value in metadata.items():
