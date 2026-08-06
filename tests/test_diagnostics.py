@@ -1536,6 +1536,199 @@ class TestHermiteMomentEnergy:
         assert E_m[-1] < E_m[-3], "High moments should be damped"
 
 
+class TestHermiteFreeEnergy:
+    """
+    Test the Λ-weighted Hermite free energy invariant (audit finding F5).
+
+    The streaming matrix T (hermite.compute_streaming_matrix) is asymmetric in
+    the (0,1) block: T[0,1] = √(1/2) but T[1,0] = (1 - 1/Λ)/√2. The quadratic
+    invariant of the streaming dynamics dgₘ/dt = -i√βᵢ·k∥·Σₙ T[m,n]·gₙ is
+    therefore the weighted sum
+
+        W = Σₘ wₘ Σₖ |gₘ,ₖ|²,   w₀ = 1 - 1/Λ,   wₘ = 1 (m ≥ 1),
+
+    fixed by detailed balance wₘ·T[m,n] = wₙ·T[n,m] — NOT the unweighted
+    Σₘ Σₖ |gₘ,ₖ|² returned by hermite_moment_energy().
+    """
+
+    M = 8
+    LAMBDA = -1.0  # thesis α = 1 ⇒ w₀ = 2, maximally distinct from unweighted
+    BETA_I = 1.0
+
+    @staticmethod
+    def _rfft_weighted_moment_sum(field_4d, Nx: int):
+        """
+        Sum a real [Nz, Ny, Nx//2+1, M+1] array over k-space, keeping the
+        moment axis, with proper rfft mode weighting: kx=0 plane counted once,
+        kx=Nyquist plane counted once (even Nx), 0 < kx < Nyquist counted
+        twice. Mirrors the accounting inside hermite_moment_energy().
+        """
+        total = jnp.sum(field_4d[:, :, 0, :], axis=(0, 1))
+        if Nx % 2 == 0:
+            total = total + 2.0 * jnp.sum(field_4d[:, :, 1:-1, :], axis=(0, 1, 2))
+            total = total + jnp.sum(field_4d[:, :, -1, :], axis=(0, 1))
+        else:
+            total = total + 2.0 * jnp.sum(field_4d[:, :, 1:, :], axis=(0, 1, 2))
+        return total
+
+    def _make_streaming_state(self, seed: int = 0, Lambda: float = None) -> KRMHDState:
+        """
+        Random band-limited Hermite moments with zero Elsasser fields.
+
+        With z± = 0 every Poisson bracket in the g-hierarchy vanishes, so
+        krmhd_rhs() reduces to pure parallel streaming.
+
+        Each moment is the rfftn of a real-space random field (guaranteeing
+        the rfft reality structure), band-limited by the dealias mask. g₁
+        additionally receives the Hilbert transform in z of g₀'s real-space
+        field (i·sign(kz)·g₀ in Fourier space — also the rfftn of a real
+        field, and band-limited since g₀ is). This correlation makes the
+        (0,1)-asymmetry violation term Σₖ k∥·Im[g₀*·g₁] accumulate coherently
+        instead of statistically averaging toward zero over the ~400 random
+        modes, so the unweighted non-conservation assertion is deterministic
+        rather than seed-dependent.
+        """
+        if Lambda is None:
+            Lambda = self.LAMBDA
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+
+        key = jax.random.PRNGKey(seed)
+        keys = jax.random.split(key, self.M + 1)
+        g_moments = []
+        for m in range(self.M + 1):
+            real_field = jax.random.normal(keys[m], (grid.Nz, grid.Ny, grid.Nx))
+            g_moments.append(
+                jnp.fft.rfftn(real_field, axes=(0, 1, 2)) * grid.dealias_mask
+            )
+
+        # Correlate g₁ with g₀ (see docstring above)
+        sign_kz = jnp.sign(grid.kz)[:, None, None]
+        g_moments[1] = g_moments[1] + 1j * sign_kz * g_moments[0]
+
+        g = jnp.stack(g_moments, axis=-1).astype(jnp.complex64)
+
+        zeros = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        state = KRMHDState(
+            z_plus=zeros,
+            z_minus=zeros,
+            B_parallel=zeros,
+            g=g,
+            M=self.M,
+            beta_i=self.BETA_I,
+            v_th=1.0,
+            nu=0.0,
+            Lambda=Lambda,
+            time=0.0,
+            grid=grid,
+        )
+
+        # Both g₀ and g₁ must be nonzero for the (0,1) asymmetry to act
+        assert float(jnp.max(jnp.abs(state.g[..., 0]))) > 0.0
+        assert float(jnp.max(jnp.abs(state.g[..., 1]))) > 0.0
+
+        return state
+
+    def test_hermite_free_energy_conserved_under_streaming(self):
+        """Streaming conserves Σₘwₘ|gₘ|² (w₀ = 1-1/Λ) but NOT Σₘ|gₘ|²."""
+        from krmhd.diagnostics import hermite_free_energy, hermite_moment_energy
+        from krmhd.timestepping import krmhd_rhs
+
+        state = self._make_streaming_state(seed=0)
+        grid = state.grid
+
+        # With z± = 0 only streaming remains:
+        # dgₘ/dt = -i√βᵢ·kz·Σₙ T[m,n]·gₙ (η irrelevant for g; ν not in RHS)
+        deriv = krmhd_rhs(state, eta=0.0, v_A=1.0)
+
+        # Per-moment dEₘ/dt = Σₖ 2·Re[gₘ*·(dg/dt)ₘ] with rfft weighting
+        dE_m = self._rfft_weighted_moment_sum(
+            2.0 * jnp.real(jnp.conj(state.g) * deriv.g), grid.Nx
+        )
+        E_m = hermite_moment_energy(state)
+
+        # Detailed-balance weights: w₀ = 1 - 1/Λ = 2 for Λ = -1, wₘ≥₁ = 1
+        w = jnp.ones(self.M + 1).at[0].set(1.0 - 1.0 / self.LAMBDA)
+
+        # The new diagnostic must implement exactly this weighted sum
+        W = hermite_free_energy(state)
+        W_manual = float(jnp.sum(w * E_m))
+        assert W > 0.0
+        assert np.isclose(W, W_manual, rtol=1e-5), (
+            f"hermite_free_energy() = {W} != manual weighted sum {W_manual}"
+        )
+
+        kz_max = float(jnp.max(jnp.abs(grid.kz)))
+        scale = float(np.sqrt(self.BETA_I)) * kz_max
+
+        # Weighted free energy: conserved to float32 roundoff
+        W_dot = float(jnp.sum(w * dE_m))
+        weighted_residual = abs(W_dot) / (scale * W)
+        assert weighted_residual < 1e-4, (
+            f"Weighted free energy not conserved under streaming: "
+            f"|dW/dt|/(√βᵢ·kz_max·W) = {weighted_residual:.3e} ≥ 1e-4"
+        )
+
+        # Unweighted sum: NOT conserved (the mislabeled 'energy' this fixes)
+        E_unweighted = float(jnp.sum(E_m))
+        E_dot_unweighted = float(jnp.sum(dE_m))
+        unweighted_residual = abs(E_dot_unweighted) / (scale * E_unweighted)
+        assert unweighted_residual > 1e-2, (
+            f"Expected unweighted Σ|gₘ|² to visibly violate conservation, "
+            f"got |dE/dt|/(√βᵢ·kz_max·E) = {unweighted_residual:.3e} ≤ 1e-2"
+        )
+
+    def test_free_energy_weight_g0_only(self):
+        """For Λ = -1 (thesis α = 1), a g₀-only state has W = 2·E₀."""
+        from krmhd.diagnostics import hermite_free_energy, hermite_moment_energy
+
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        key = jax.random.PRNGKey(3)
+        real_field = jax.random.normal(key, (grid.Nz, grid.Ny, grid.Nx))
+        g0 = jnp.fft.rfftn(real_field, axes=(0, 1, 2)) * grid.dealias_mask
+
+        g = jnp.zeros(
+            (grid.Nz, grid.Ny, grid.Nx // 2 + 1, self.M + 1), dtype=jnp.complex64
+        )
+        g = g.at[..., 0].set(g0)
+
+        zeros = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
+        state = KRMHDState(
+            z_plus=zeros,
+            z_minus=zeros,
+            B_parallel=zeros,
+            g=g,
+            M=self.M,
+            beta_i=self.BETA_I,
+            v_th=1.0,
+            nu=0.0,
+            Lambda=-1.0,
+            time=0.0,
+            grid=grid,
+        )
+
+        W = hermite_free_energy(state)
+        E_m = hermite_moment_energy(state)
+
+        assert float(E_m[0]) > 0.0
+        assert np.isclose(W, 2.0 * float(E_m[0]), rtol=1e-5), (
+            f"Λ = -1 g₀-only state: W = {W} != 2·E₀ = {2.0 * float(E_m[0])}"
+        )
+
+    def test_free_energy_weight_large_lambda(self):
+        """Λ → ∞ (w₀ → 1) recovers the unweighted sum Σₘ Eₘ."""
+        from krmhd.diagnostics import hermite_free_energy, hermite_moment_energy
+
+        state = self._make_streaming_state(seed=1, Lambda=1e12)
+
+        W = hermite_free_energy(state)
+        E_unweighted = float(jnp.sum(hermite_moment_energy(state)))
+
+        assert E_unweighted > 0.0
+        assert np.isclose(W, E_unweighted, rtol=1e-5), (
+            f"Λ = 1e12: weighted W = {W} != unweighted Σ Eₘ = {E_unweighted}"
+        )
+
+
 class TestPhaseMixingEnergy:
     """Test phase mixing/unmixing energy decomposition."""
 
