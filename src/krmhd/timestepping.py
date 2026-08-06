@@ -315,7 +315,9 @@ def krmhd_rhs(
 # =============================================================================
 
 
-@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n"])
+@partial(
+    jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n", "hyper_rz"]
+)
 def _gandalf_step_lawson_rk4_jit(
     fields: KRMHDFields,
     dt: float,
@@ -334,6 +336,8 @@ def _gandalf_step_lawson_rk4_jit(
     Nx: int,
     hyper_r: int = 1,
     hyper_n: int = 1,
+    eta_z: float = 0.0,
+    hyper_rz: int = 1,
     streaming_eigenvalues: Array = None,
     streaming_P_T: Array = None,
     streaming_P_inv_T: Array = None,
@@ -377,6 +381,15 @@ def _gandalf_step_lawson_rk4_jit(
             - n=3: Strong hyper-collision -νm³ (matches original GANDALF alpha_m=3)
             - n=4: Very strong hyper-collision -νm⁴ (expert use, requires small nu)
             - n=6: Thesis Figure 3.3 benchmark value for strong high-m damping
+        eta_z: Parallel (kz) hyper-resistivity coefficient (default: 0.0, disabled).
+            Post-step multiplicative damping exp(-η_z·(kz²/kz²_max)^rz·dt) applied
+            to ξ± AND all Hermite moments, with kz_max at the 2/3 dealias boundary
+            (idz_max = (Nz-1)//3). Matches original GANDALF dampz
+            (damping_kernel.cu:4-33, applied every step in timestep.cu:94-108).
+        hyper_rz: Parallel hyper-resistivity order (default: 1, static)
+            - rz=1: Standard parallel dissipation ∝ kz²
+            - rz=2: Moderate parallel hyper-dissipation ∝ kz⁴
+            - rz=4, 8: Sharper parallel cutoffs (expert use)
         streaming_eigenvalues: Eigenvalues of streaming matrix T (from compute_streaming_eigensystem).
             Must be provided — None default is only for Python syntax (keyword after default args).
         streaming_P_T: Transposed right eigenvector matrix P.T (from compute_streaming_eigensystem).
@@ -620,6 +633,27 @@ def _gandalf_step_lawson_rk4_jit(
         )  # Shape: [M+1]
         g_new = g_new * collision_factors[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (2) Collisional damping
 
+    # Parallel (kz) hyper-dissipation, the parallel analogue of the normalized
+    # perpendicular hyper-resistivity above. Matches original GANDALF dampz
+    # (damping_kernel.cu:4-33), applied every step to the Elsasser fields and
+    # every Hermite moment (timestep.cu:94-108):
+    #   ξ±, g_m → exp(-η_z·(kz²/kz²_max)^rz·dt) with kz_max at the 2/3 dealias
+    #   boundary, idz_max = (Nz-1)//3 (same pattern as idx_max/idy_max above).
+    # Multiplicative factors commute, so ordering within this section is exact.
+    idz_max = (Nz - 1) // 3  # Python int: Nz is static, resolved at trace time
+    if idz_max >= 1:
+        # Static branch: skipped entirely for tiny Nz (e.g. Nz=2 used by 2D-style
+        # tests) where kz[idz_max]=kz[0]=0 would give a divide-by-zero inf, and
+        # 0·inf = NaN inside exp even for eta_z=0. The original GANDALF likewise
+        # guarded dampz with `if (Nz > 1)`.
+        # fftfreq ordering: idz_max < Nz/2 lands in the positive-kz range.
+        kz_max_squared = kz[idz_max] ** 2
+        kz_2rz_normalized = (kz_3d**2 / kz_max_squared) ** hyper_rz
+        z_dissipation_factor = jnp.exp(-eta_z * kz_2rz_normalized * dt)
+        z_plus_new = z_plus_new * z_dissipation_factor
+        z_minus_new = z_minus_new * z_dissipation_factor
+        g_new = g_new * z_dissipation_factor[:, :, :, jnp.newaxis]
+
     # Project Hermite moments back to the resolved 3D spectral band. The Hermite
     # Poisson-bracket RHS is already dealiased in physics.py, so this is a
     # defensive guarantee against externally injected or checkpointed out-of-band
@@ -665,7 +699,7 @@ _NU_IN_IMPLICIT_OPERATOR: float = 0.0
 # baked into L_per_kz (via _damping_diag) before this JIT kernel is called.
 # Adding it here would force a needless recompile whenever hyper_n changed,
 # even though the traced graph has no direct dependence on it.
-@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r"])
+@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_rz"])
 def _gandalf_step_imex222_jit(
     fields: KRMHDFields,
     dt: float,
@@ -686,6 +720,8 @@ def _gandalf_step_imex222_jit(
     L_per_kz: Array,
     lu: Array,
     piv: Array,
+    eta_z: float = 0.0,
+    hyper_rz: int = 1,
 ) -> KRMHDFields:
     """
     JIT-compiled IMEX-RK222 (Ascher-Ruuth-Spiteri 1997, ARS(2,2,2)) stepper.
@@ -726,6 +762,14 @@ def _gandalf_step_imex222_jit(
     L and its factorization (lu, piv) are precomputed per step outside
     this JIT kernel (see gandalf_step). Hyper-collisional damping is folded
     into L; the exponential collision factor is therefore NOT applied here.
+
+    Parallel (kz) hyper-dissipation (eta_z, hyper_rz): applied post-step as
+    exp(-eta_z*(kz^2/kz_max^2)^hyper_rz*dt) to z+/-, and to all Hermite
+    moments, with kz_max at the 2/3 dealias boundary (idz_max = (Nz-1)//3).
+    Matches original GANDALF dampz (damping_kernel.cu:4-33, applied every
+    step in timestep.cu:94-108) and is applied at the same point as in the
+    Lawson kernel so the two schemes stay equivalent. Default eta_z=0.0 is
+    an exact no-op.
 
     Known limitation — resistivity splitting:
         Resistive damping on g is applied as an exponential post-step factor
@@ -880,6 +924,28 @@ def _gandalf_step_imex222_jit(
     # kernel multiplies uniformly across all Hermite moments of g.
     g_new = g_new * perp_dissipation_factor[:, :, :, jnp.newaxis]
 
+    # Parallel (kz) hyper-dissipation, the parallel analogue of the normalized
+    # perpendicular hyper-resistivity above. Matches original GANDALF dampz
+    # (damping_kernel.cu:4-33), applied every step to the Elsasser fields and
+    # every Hermite moment (timestep.cu:94-108):
+    #   z±, g_m → exp(-η_z·(kz²/kz²_max)^rz·dt) with kz_max at the 2/3 dealias
+    #   boundary, idz_max = (Nz-1)//3 (same pattern as idx_max/idy_max above).
+    # Same placement as in _gandalf_step_lawson_rk4_jit (post-step dissipation,
+    # before the defensive dealias) so the two schemes stay equivalent.
+    idz_max = (Nz - 1) // 3  # Python int: Nz is static, resolved at trace time
+    if idz_max >= 1:
+        # Static branch: skipped entirely for tiny Nz (e.g. Nz=2 used by 2D-style
+        # tests) where kz[idz_max]=kz[0]=0 would give a divide-by-zero inf, and
+        # 0·inf = NaN inside exp even for eta_z=0. The original GANDALF likewise
+        # guarded dampz with `if (Nz > 1)`.
+        # fftfreq ordering: idz_max < Nz/2 lands in the positive-kz range.
+        kz_max_squared = kz[idz_max] ** 2
+        kz_2rz_normalized = (kz_3d**2 / kz_max_squared) ** hyper_rz
+        z_dissipation_factor = jnp.exp(-eta_z * kz_2rz_normalized * dt)
+        z_plus_new = z_plus_new * z_dissipation_factor
+        z_minus_new = z_minus_new * z_dissipation_factor
+        g_new = g_new * z_dissipation_factor[:, :, :, jnp.newaxis]
+
     # Defensive dealias of Hermite moments. z+/- are NOT dealiased here by
     # design: their dealiasing is already done inside _krmhd_rhs_jit via the
     # Poisson-bracket evaluation (spectral.poisson_bracket_3d applies the
@@ -910,6 +976,8 @@ def gandalf_step(
     hyper_r: int = 1,
     hyper_n: int = 1,
     scheme: Scheme = "imex_rk222",
+    eta_z: float = 0.0,
+    hyper_rz: int = 1,
 ) -> KRMHDState:
     """
     Advance KRMHD state using the mixed GANDALF integrating-factor method.
@@ -970,6 +1038,30 @@ def gandalf_step(
             1e-6 per step (~5e-4 over 200 steps; see
             test_imex222_nontrivial_vA_matches_lawson). For bit-level
             reproducibility across reruns, pin `scheme=` explicitly.
+        eta_z: Parallel (kz) hyper-resistivity coefficient (default: 0.0, disabled).
+            Post-step multiplicative damping exp(-η_z·(kz²/kz²_max)^rz·dt)
+            applied to z⁺, z⁻ AND all Hermite moments g, with kz_max at the
+            2/3 dealias boundary (idz_max = (Nz-1)//3). This is the exact
+            parallel analogue of the normalized perpendicular hyper-resistivity
+            eta, and matches original GANDALF dampz (damping_kernel.cu:4-33),
+            which was applied every step to the Elsasser fields and every
+            Hermite moment (timestep.cu:94-108). It regulates the parallel
+            (kz) spectrum, which otherwise has no dissipation channel
+            (relevant to Issues #136 and #137).
+
+            DELIBERATE DEVIATION from original GANDALF: the original used a
+            separate coefficient nu_kz_g (with order alpha_kz_g) for the
+            Hermite moments; here a single coefficient eta_z (and single
+            order hyper_rz) is shared by z± and g, exactly as the existing
+            perpendicular eta is shared across all three fields.
+
+            Default 0.0 gives exactly zero behavior change (the damping
+            factor is identically 1).
+        hyper_rz: Parallel hyper-resistivity order (default: 1)
+            - rz=1: Standard parallel dissipation ∝ kz²
+            - rz=2: Moderate parallel hyper-dissipation ∝ kz⁴
+            - rz=4: Strong parallel hyper-dissipation ∝ kz⁸ (expert use)
+            - rz=8: Maximum parallel hyper-dissipation ∝ kz¹⁶ (expert use)
 
     Returns:
         New KRMHDState at time t + dt
@@ -977,10 +1069,16 @@ def gandalf_step(
     Raises:
         ValueError: If hyper_r not in [1, 2, 4, 8]
         ValueError: If hyper_n not in [1, 2, 3, 4, 6]
+        ValueError: If hyper_rz not in [1, 2, 4, 8]
         ValueError: If scheme not in {"lawson_rk4", "imex_rk222"}
         ValueError: If hyper-collision overflow risk detected (nu·dt >= 50, normalized;
             Lawson path only — the IMEX solve is unconditionally stable)
         ValueError: If hyper-resistivity overflow risk detected (eta·dt >= 50, normalized)
+        ValueError: If parallel hyper-resistivity overflow risk detected
+            (eta_z·dt >= 50, normalized)
+        ValueError: If eta_z > 0 but the grid is too small in z for normalized
+            kz damping ((Nz-1)//3 < 1, i.e. no nonzero kz mode inside the 2/3
+            dealias boundary; the original GANDALF guarded dampz with `if (Nz > 1)`)
 
     Example:
         >>> # Standard dissipation (backward compatible)
@@ -1042,10 +1140,17 @@ def gandalf_step(
         - Maximum damping rate at k⊥=k⊥_max is simply: η·dt (independent of grid!)
         - Must satisfy: η·dt < 50 to avoid underflow
 
+        Parallel hyper-resistivity overflow risk (eta_z > 0):
+        - NORMALIZED formulation: exp(-η_z·(kz²/kz²_max)^rz·dt)
+        - Maximum damping rate at kz=kz_max is simply: η_z·dt (independent of Nz!)
+        - Must satisfy: η_z·dt < 50 to avoid underflow (same thresholds as eta)
+
     Reference:
         - Thesis Chapter 2, §2.4 - GANDALF Algorithm
         - Eqs. 2.13-2.25 - Integrating factor implementation
         - Thesis §2.5.2 - Hyper-dissipation for inertial range studies
+        - Original GANDALF: damping_kernel.cu:4-33 (dampz kernel) and
+          timestep.cu:94-108 (per-step dampz on z± and every Hermite moment)
     """
     # Use provided nu or fall back to state.nu
     nu_effective = nu if nu is not None else state.nu
@@ -1056,6 +1161,9 @@ def gandalf_step(
 
     if hyper_n not in (1, 2, 3, 4, 6):
         raise ValueError(f"hyper_n must be 1, 2, 3, 4, or 6 (got {hyper_n})")
+
+    if hyper_rz not in (1, 2, 4, 8):
+        raise ValueError(f"hyper_rz must be 1, 2, 4, or 8 (got {hyper_rz})")
 
     if scheme not in ("lawson_rk4", "imex_rk222"):
         raise ValueError(
@@ -1121,6 +1229,41 @@ def gandalf_step(
             RuntimeWarning
         )
 
+    # Safety check for parallel (kz) hyper-resistivity overflow, mirroring eta.
+    # NORMALIZED formulation exp(-η_z·(kz²/kz²_max)^rz·dt): maximum rate at
+    # kz=kz_max is simply η_z·dt (matches original GANDALF damping_kernel.cu:4-33)
+    max_kz_resistivity_rate = eta_z * dt
+
+    if max_kz_resistivity_rate >= MAX_DAMPING_RATE_THRESHOLD:
+        safe_eta_z = MAX_DAMPING_RATE_THRESHOLD / dt
+        raise ValueError(
+            f"Parallel hyper-resistivity overflow risk detected!\n"
+            f"  Parameter: eta_z·dt = {eta_z}·{dt} = {max_kz_resistivity_rate:.2e}\n"
+            f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
+            f"  Solution: Reduce eta_z to < {safe_eta_z:.2e} or reduce dt\n"
+            f"  Note: With normalized dissipation, constraint is eta_z·dt < {MAX_DAMPING_RATE_THRESHOLD} (independent of resolution or rz!)"
+        )
+
+    # Warning for moderate risk (20-50)
+    if max_kz_resistivity_rate >= DAMPING_RATE_WARNING_THRESHOLD:
+        warnings.warn(
+            f"Parallel hyper-resistivity damping rate is high: eta_z·dt = {max_kz_resistivity_rate:.2e}. "
+            f"Consider reducing eta_z or dt to improve numerical stability.",
+            RuntimeWarning
+        )
+
+    # Normalized kz damping needs at least one nonzero kz mode inside the 2/3
+    # dealias boundary: idz_max = (Nz-1)//3 >= 1. For tiny Nz (e.g. Nz=2,
+    # the 2D-style grids) kz[idz_max] = 0 and the normalization is undefined.
+    # The original GANDALF guarded dampz with `if (Nz > 1)`; the JIT kernels
+    # skip the kz damping block entirely (static branch) in that case.
+    if eta_z > 0 and (state.grid.Nz - 1) // 3 < 1:
+        raise ValueError(
+            f"eta_z > 0 requires a grid with (Nz-1)//3 >= 1 (got Nz={state.grid.Nz}). "
+            f"Normalized parallel dissipation exp(-eta_z·(kz²/kz²_max)^rz·dt) needs "
+            f"a nonzero kz_max at the 2/3 dealias boundary; use Nz >= 4 or set eta_z=0."
+        )
+
     grid = state.grid
     fields = _fields_from_state(state)
 
@@ -1148,6 +1291,8 @@ def gandalf_step(
             grid.Nx,
             hyper_r,
             hyper_n,
+            eta_z=eta_z,
+            hyper_rz=hyper_rz,
             streaming_eigenvalues=eigenvalues,
             streaming_P_T=P.T,
             streaming_P_inv_T=P_inv.T,
@@ -1186,6 +1331,8 @@ def gandalf_step(
             L_per_kz,
             lu,
             piv,
+            eta_z=eta_z,
+            hyper_rz=hyper_rz,
         )
 
     # Convert back to KRMHDState (Pydantic validation at boundary)

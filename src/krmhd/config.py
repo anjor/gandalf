@@ -79,6 +79,15 @@ class PhysicsConfig(BaseModel):
     hyper_r: int = Field(1, description="Hyper-resistivity order (1, 2, 4, or 8)")
     hyper_n: int = Field(1, description="Hyper-collision order (1, 2, 3, 4, or 6)")
 
+    # Parallel (kz) hyper-dissipation (original GANDALF dampz, damping_kernel.cu:4-33)
+    # One coefficient shared by z± and all Hermite moments (see gandalf_step docstring)
+    eta_z: float = Field(
+        0.0, ge=0, description="Parallel (kz) hyper-resistivity coefficient (0 = disabled)"
+    )
+    hyper_rz: int = Field(
+        1, description="Parallel hyper-resistivity order (1, 2, 4, or 8)"
+    )
+
     @field_validator('hyper_r')
     @classmethod
     def check_hyper_r(cls, v: int) -> int:
@@ -87,6 +96,17 @@ class PhysicsConfig(BaseModel):
             raise ValueError(
                 f"hyper_r must be 1, 2, 4, or 8 (got {v}). "
                 "Use r=1 for standard dissipation, r=2 for typical turbulence studies."
+            )
+        return v
+
+    @field_validator('hyper_rz')
+    @classmethod
+    def check_hyper_rz(cls, v: int) -> int:
+        """Validate hyper_rz matches timestepping.py constraints."""
+        if v not in {1, 2, 4, 8}:
+            raise ValueError(
+                f"hyper_rz must be 1, 2, 4, or 8 (got {v}). "
+                "Use rz=1 for standard parallel dissipation, rz=2 for a sharper kz cutoff."
             )
         return v
 
@@ -528,6 +548,11 @@ class SimulationConfig(BaseModel):
         if self.physics.hyper_r > 1 or self.physics.hyper_n > 1:
             lines.extend([
                 f"  Hyper-dissipation: r = {self.physics.hyper_r}, n = {self.physics.hyper_n}",
+            ])
+
+        if self.physics.eta_z > 0:
+            lines.extend([
+                f"  Parallel (kz) dissipation: η_z = {self.physics.eta_z}, rz = {self.physics.hyper_rz}",
             ])
 
         lines.extend([
