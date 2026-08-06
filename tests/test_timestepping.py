@@ -19,7 +19,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from krmhd.spectral import SpectralGrid3D, rfftn_forward
+from krmhd.spectral import (
+    SpectralGrid3D,
+    rfftn_forward,
+    rfftn_inverse,
+    derivative_x,
+    derivative_y,
+)
 from krmhd.physics import (
     KRMHDState,
     initialize_alfven_wave,
@@ -263,6 +269,48 @@ class TestGandalfStep:
         assert jnp.isclose(f_pos, jnp.conj(f_neg), rtol=1e-5)
 
 
+def _max_perp_gradient(field_hat, grid):
+    """Max over real space of |∇⊥f| (same recipe as compute_cfl_timestep)."""
+    dfdx = rfftn_inverse(derivative_x(field_hat, grid.kx), grid.Nz, grid.Ny, grid.Nx)
+    dfdy = rfftn_inverse(derivative_y(field_hat, grid.ky), grid.Nz, grid.Ny, grid.Nx)
+    return float(jnp.sqrt(dfdx**2 + dfdy**2).max())
+
+
+def _imbalanced_state(grid, M, beta_i, amplitude):
+    """Imbalanced Elsasser state z⁺ = f, z⁻ = -f with φ = (z⁺+z⁻)/2 ≡ 0.
+
+    f is a band-limited (x,y) field with max|∇⊥f| ~ amplitude, so the
+    nonlinear cross-advection (z± advected by ẑ×∇z∓) is large even though
+    the stream function vanishes identically.
+    """
+    x = jnp.linspace(0.0, grid.Lx, grid.Nx, endpoint=False)
+    y = jnp.linspace(0.0, grid.Ly, grid.Ny, endpoint=False)
+    z = jnp.linspace(0.0, grid.Lz, grid.Nz, endpoint=False)
+    Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
+
+    # Few low-k modes (well inside the dealiasing boundary)
+    kx0 = 2.0 * jnp.pi / grid.Lx
+    ky0 = 2.0 * jnp.pi / grid.Ly
+    f_real = amplitude * (
+        jnp.sin(kx0 * X) * jnp.cos(2.0 * ky0 * Y) + 0.3 * jnp.cos(3.0 * ky0 * Y)
+    )
+    f_hat = rfftn_forward(f_real)
+
+    return KRMHDState(
+        z_plus=f_hat,
+        z_minus=-f_hat,
+        B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
+        g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64),
+        M=M,
+        beta_i=beta_i,
+        v_th=1.0,
+        nu=0.0,
+        Lambda=1.0,
+        time=0.0,
+        grid=grid,
+    )
+
+
 class TestCFLCalculator:
     """Test CFL condition calculator."""
 
@@ -347,6 +395,84 @@ class TestCFLCalculator:
         # dt should scale linearly with safety factor
         ratio = dt_aggressive / dt_conservative
         assert jnp.isclose(ratio, 0.5 / 0.1, rtol=0.01)
+
+    def test_cfl_detects_magnetic_advection(self):
+        """CFL must see Elsasser cross-advection even when φ ≡ 0.
+
+        In the Elsasser system z⁺ is advected by ẑ×∇z⁻ and vice versa, so the
+        relevant speeds are |∇⊥z±|, not |∇⊥φ|. The imbalanced state
+        z⁺ = f, z⁻ = -f has φ = (z⁺+z⁻)/2 ≡ 0 while the nonlinear advection
+        is finite — a φ-based estimate returns the v_A-limited dt, blind to
+        arbitrarily fast magnetic (Ψ-gradient) advection.
+        """
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        v_A = 1.0
+        cfl_safety = 0.3
+
+        # Amplitude large enough that max|∇⊥f| >> v_A
+        state = _imbalanced_state(grid, M=0, beta_i=1.0, amplitude=50.0)
+
+        # φ vanishes identically for this state
+        phi = (state.z_plus + state.z_minus) / 2.0
+        assert jnp.allclose(phi, 0.0, atol=1e-4)
+
+        dt = compute_cfl_timestep(state, v_A, cfl_safety)
+
+        dx = grid.Lx / grid.Nx
+        dy = grid.Ly / grid.Ny
+        dz = grid.Lz / grid.Nz
+        min_spacing = min(dx, dy, dz)
+
+        # Expected bound from the true advecting speeds max(|∇⊥z⁺|, |∇⊥z⁻|)
+        v_advect = max(
+            _max_perp_gradient(state.z_plus, grid),
+            _max_perp_gradient(state.z_minus, grid),
+        )
+        assert v_advect > 10.0 * v_A  # sanity: advection dominates v_A
+
+        expected_dt = cfl_safety * min_spacing / v_advect
+        dt_alfven_only = cfl_safety * min_spacing / v_A
+
+        assert jnp.isclose(dt, expected_dt, rtol=1e-5)
+        assert dt < dt_alfven_only
+
+    def test_cfl_fieldline_advection_beta_scaling(self):
+        """Hermite streaming along perturbed field lines scales as √β_i |∇⊥Ψ|.
+
+        With M > 0 the g moments are streamed via √β_i {Ψ, ·}, an effective
+        perpendicular advection at speed √β_i |∇⊥Ψ| that exceeds the Elsasser
+        bound when β_i > 1. For z⁺ = f, z⁻ = -f: Ψ = f and |∇⊥z±| = |∇⊥f|,
+        so with β_i = 9 the expected v_max is 3·max|∇⊥f|. The M = 0 (pure
+        fluid) version of the same state has no field-line constraint and
+        should return a ~3x larger dt.
+        """
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        v_A = 1.0
+        cfl_safety = 0.3
+        beta_i = 9.0
+
+        # Moment slots present but zero — the constraint is structural (M > 0)
+        state_kinetic = _imbalanced_state(grid, M=4, beta_i=beta_i, amplitude=50.0)
+        state_fluid = _imbalanced_state(grid, M=0, beta_i=beta_i, amplitude=50.0)
+
+        dt_kinetic = compute_cfl_timestep(state_kinetic, v_A, cfl_safety)
+        dt_fluid = compute_cfl_timestep(state_fluid, v_A, cfl_safety)
+
+        dx = grid.Lx / grid.Nx
+        dy = grid.Ly / grid.Ny
+        dz = grid.Lz / grid.Nz
+        min_spacing = min(dx, dy, dz)
+
+        # Ψ = (z⁺ - z⁻)/2 = f, so v_fieldline = √β_i max|∇⊥f| = 3 max|∇⊥f|
+        psi = (state_kinetic.z_plus - state_kinetic.z_minus) / 2.0
+        grad_psi = _max_perp_gradient(psi, grid)
+        v_max_expected = jnp.sqrt(beta_i) * grad_psi
+
+        expected_dt = cfl_safety * min_spacing / v_max_expected
+        assert jnp.isclose(dt_kinetic, expected_dt, rtol=1e-5)
+
+        # Pure fluid case: only the Elsasser bound max|∇⊥z±| = max|∇⊥f| applies
+        assert jnp.isclose(dt_fluid / dt_kinetic, 3.0, rtol=1e-4)
 
 
 class TestAlfvenWavePropagation:

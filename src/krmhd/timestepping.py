@@ -1350,9 +1350,15 @@ def compute_cfl_timestep(
     The CFL (Courant-Friedrichs-Lewy) condition ensures numerical stability
     by requiring that information propagates at most one grid cell per timestep:
 
-        dt ≤ C * min(Δx, Δy, Δz) / max(v_A, |v_⊥|)
+        dt ≤ C * min(Δx, Δy, Δz) / v_max
 
-    where C is a safety factor (typically 0.1-0.5 for RK2/RK4).
+    where C is a safety factor (typically 0.1-0.5 for RK2/RK4) and v_max is
+    the maximum signal speed in the system:
+
+        v_max = max(v_A, max|∇⊥z⁺|, max|∇⊥z⁻|, √β_i · max|∇⊥Ψ|)
+
+    with the field-line term √β_i·|∇⊥Ψ| included only when Hermite moments
+    are evolved (M > 0).
 
     Args:
         state: Current KRMHD state (used to compute max velocity)
@@ -1368,9 +1374,22 @@ def compute_cfl_timestep(
         >>> new_state = gandalf_step(state, dt, eta=0.01, v_A=1.0)
 
     Physics:
-        - Alfvén waves propagate at v_A along field lines (parallel)
-        - Perpendicular flows from E×B drift: v_⊥ = ẑ × ∇φ
-        - CFL violation → exponential instability
+        - Alfvén waves propagate at v_A along field lines (parallel).
+        - In the Elsasser system, z⁺ is advected by ẑ×∇z⁻ and z⁻ by ẑ×∇z⁺,
+          so the perpendicular advection speeds are |∇⊥z∓|, NOT |∇⊥φ|.
+          Since φ = (z⁺+z⁻)/2 is their average, |∇⊥φ| ≤ max(|∇⊥z±|), with
+          equality only for purely balanced states. A φ-based bound
+          underestimates the advection by up to 2x when b⊥ ~ u⊥, and by an
+          arbitrary factor in imbalanced states: for z⁺ = -z⁻, φ ≡ 0
+          identically while the nonlinear advection (from Ψ = (z⁺-z⁻)/2)
+          remains finite.
+        - Hermite moments g are advected perpendicular by φ AND streamed
+          along perturbed field lines via the √β_i·{Ψ, ·} term — an
+          effective perpendicular advection at speed √β_i·|∇⊥Ψ|, which
+          exceeds the Elsasser bound max|∇⊥z±| when β_i > ~1.
+        - CFL violation → exponential instability. An eroding CFL margin as
+          forced runs grow in amplitude is a candidate mechanism for the
+          late-time blowups of Issue #136.
 
     Note:
         For typical KRMHD with strong guide field, v_A usually dominates
@@ -1384,26 +1403,34 @@ def compute_cfl_timestep(
     dz = grid.Lz / grid.Nz
     min_spacing = min(dx, dy, dz)
 
-    # Maximum perpendicular velocity: |v_⊥| = |∇φ|
-    # φ = (z⁺ + z⁻) / 2
-    phi = (state.z_plus + state.z_minus) / 2.0
+    def max_perp_gradient(field: Array) -> Array:
+        """Max over real space of |∇⊥f| for a Fourier-space field f."""
+        df_dx = derivative_x(field, grid.kx)
+        df_dy = derivative_y(field, grid.ky)
+        df_dx_real = rfftn_inverse(df_dx, grid.Nz, grid.Ny, grid.Nx)
+        df_dy_real = rfftn_inverse(df_dy, grid.Nz, grid.Ny, grid.Nx)
+        return jnp.sqrt(df_dx_real**2 + df_dy_real**2).max()
 
-    # Compute gradients in Fourier space, then transform to real space
-    dphi_dx = derivative_x(phi, grid.kx)
-    dphi_dy = derivative_y(phi, grid.ky)
+    # Elsasser cross-advection speeds: z± is advected by ẑ×∇z∓, so both
+    # |∇⊥z⁺| and |∇⊥z⁻| bound the perpendicular dynamics. This dominates
+    # the |∇⊥φ| estimate (φ is the average of z±, so its gradient never
+    # exceeds the larger of the two).
+    v_z_plus_max = max_perp_gradient(state.z_plus)
+    v_z_minus_max = max_perp_gradient(state.z_minus)
 
-    # Transform to real space to find maximum
-    dphi_dx_real = rfftn_inverse(dphi_dx, grid.Nz, grid.Ny, grid.Nx)
-    dphi_dy_real = rfftn_inverse(dphi_dy, grid.Nz, grid.Ny, grid.Nx)
+    v_max = jnp.maximum(v_A, jnp.maximum(v_z_plus_max, v_z_minus_max))
 
-    # Maximum velocity magnitude
-    v_perp_max = jnp.sqrt(dphi_dx_real**2 + dphi_dy_real**2).max()
-    v_max = jnp.maximum(v_A, v_perp_max)
+    if state.M > 0:
+        # Field-line streaming of Hermite moments: √β_i·{Ψ, g} acts as
+        # perpendicular advection at speed √β_i·|∇⊥Ψ| with Ψ = (z⁺-z⁻)/2.
+        Psi = (state.z_plus - state.z_minus) / 2.0
+        v_fieldline_max = jnp.sqrt(state.beta_i) * max_perp_gradient(Psi)
+        v_max = jnp.maximum(v_max, v_fieldline_max)
 
     # CFL timestep
     dt_cfl = cfl_safety * min_spacing / v_max
 
-    # Note: No Hermite streaming constraint needed for either scheme.
+    # Note: No parallel Hermite streaming constraint needed for either scheme.
     # - Lawson path: the integrating factor handles oscillatory streaming
     #   terms exactly (unitary propagator).
     # - IMEX path (Issue #137): streaming is part of the implicit operator
