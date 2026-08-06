@@ -710,10 +710,10 @@ def z_plus_rhs(
     This matches the original GANDALF Fortran/CUDA implementation from nonlin.cu:
         bracket1 = {z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺}
         bracket2 = -k⊥²{z⁺, z⁻}
-        RHS_nonlinear = k⊥²^(-1) × [bracket1 - bracket2]
+        RHS_nonlinear = (1/2) k⊥²^(-1) × [bracket1 - bracket2]
 
     Which expands to:
-        ∂z⁺/∂t = k⊥²^(-1)[{z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺} + k⊥²{z⁺, z⁻}] + ∂∥z⁺ + η∇²z⁺
+        ∂z⁺/∂t = (1/2)k⊥²^(-1)[{z⁺, -k⊥²z⁻} + {z⁻, -k⊥²z⁺} + k⊥²{z⁺, z⁻}] + ∂∥z⁺ + η∇²z⁺
 
     Note: Linear term is +ikz·z⁺ (UNCOUPLED - same variable, not opposite!)
 
@@ -732,7 +732,11 @@ def z_plus_rhs(
         Time derivative ∂z⁺/∂t in Fourier space
 
     Reference:
-        Original GANDALF: nonlin.cu and timestep.cu (alf_adv function)
+        Original GANDALF: nonlin.cu and timestep.cu (alf_adv function).
+        The (1/2) on the nonlinear term is applied inside the original
+        GANDALF's inverse-Laplacian kernel multKPerpInv (work_kernel.cu:39,
+        `.5f * f[index] * kPerp2Inv`), even though nonlin.cu itself shows
+        no factor — see the comment at timestep.cu:10.
     """
     # Compute perpendicular Laplacian terms
     lap_perp_z_plus = laplacian(z_plus, kx, ky, kz=None)   # -k⊥²z⁺
@@ -772,7 +776,9 @@ def z_plus_rhs(
 
     # Assemble RHS: ∂z⁺/∂t = ... + ikz·z⁺
     # Note: -inv_laplacian because laplacian() returns -k²f, need negative to get +k⁻²·[...]
-    rhs = -inv_laplacian + parallel_grad_z_plus
+    # The 0.5 is the (1/2) in front of the Elsasser nonlinearity; in the
+    # original GANDALF it lives inside multKPerpInv (work_kernel.cu:39)
+    rhs = -0.5 * inv_laplacian + parallel_grad_z_plus
 
     # Add dissipation
     lap_z_plus = laplacian(z_plus, kx, ky, kz)
@@ -802,7 +808,7 @@ def z_minus_rhs(
 
     This matches the original GANDALF Fortran/CUDA implementation.
     For z⁻, the signs differ from z⁺ in the parallel gradient term:
-        ∂z⁻/∂t = k⊥²^(-1)[{z⁻, -k⊥²z⁺} + {z⁺, -k⊥²z⁻} + k⊥²{z⁻, z⁺}] - ∂∥z⁻ + η∇²z⁻
+        ∂z⁻/∂t = (1/2)k⊥²^(-1)[{z⁻, -k⊥²z⁺} + {z⁺, -k⊥²z⁻} + k⊥²{z⁻, z⁺}] - ∂∥z⁻ + η∇²z⁻
 
     Note: Linear term is -ikz·z⁻ (UNCOUPLED - same variable, not opposite!)
     (Opposite sign on parallel gradient compared to z⁺)
@@ -819,7 +825,11 @@ def z_minus_rhs(
         Time derivative ∂z⁻/∂t in Fourier space
 
     Reference:
-        Original GANDALF: nonlin.cu and timestep.cu (alf_adv function)
+        Original GANDALF: nonlin.cu and timestep.cu (alf_adv function).
+        The (1/2) on the nonlinear term is applied inside the original
+        GANDALF's inverse-Laplacian kernel multKPerpInv (work_kernel.cu:39,
+        `.5f * f[index] * kPerp2Inv`), even though nonlin.cu itself shows
+        no factor — see the comment at timestep.cu:10.
     """
     # Compute perpendicular Laplacian terms
     lap_perp_z_plus = laplacian(z_plus, kx, ky, kz=None)
@@ -855,7 +865,9 @@ def z_minus_rhs(
 
     # Assemble RHS: ∂z⁻/∂t = ... - ikz·z⁻
     # Note: -inv_laplacian because laplacian() returns -k²f, need negative to get +k⁻²·[...]
-    rhs = -inv_laplacian - parallel_grad_z_minus
+    # The 0.5 is the (1/2) in front of the Elsasser nonlinearity; in the
+    # original GANDALF it lives inside multKPerpInv (work_kernel.cu:39)
+    rhs = -0.5 * inv_laplacian - parallel_grad_z_minus
 
     # Add dissipation
     lap_z_minus = laplacian(z_minus, kx, ky, kz)

@@ -1793,6 +1793,113 @@ class TestElsasserRHS:
         assert relative_dissipation < 10.0, \
             f"Dissipation unreasonably strong: |dE/dt|/E = {relative_dissipation} (expected < 10.0)"
 
+    def test_elsasser_nonlinearity_matches_primitive_rmhd(self):
+        """
+        Regression test: Elsasser nonlinearity must equal the primitive
+        (φ, Ψ) vorticity/induction form, including the overall factor 1/2.
+
+        Derivation sketch (v_A = 1, ζ± = φ ± Ψ, w = ∇⊥²φ, j = ∇⊥²Ψ):
+            Vorticity:  ∂w/∂t = -{φ, w} + {Ψ, j} + ∂z j
+            Induction:  ∂Ψ/∂t = -{φ, Ψ} + ∂z φ
+        Apply ∇⊥² to the induction equation: ∂j/∂t = -∇⊥²{φ, Ψ} + ∂z w.
+        Then ∂(∇⊥²ζ±)/∂t = ∂w/∂t ± ∂j/∂t gives
+            ∂ζ±/∂t = ±∂z ζ± + ∇⊥⁻²[-{φ, w} + {Ψ, j} ∓ ∇⊥²{φ, Ψ}]
+
+        Substituting φ = (z⁺+z⁻)/2, Ψ = (z⁺-z⁻)/2 and expanding the brackets
+        shows the code's combined-bracket form must carry a factor 1/2:
+            ∂z±/∂t = ±∂z z± - (1/2)∇⊥⁻²[{z⁺,∇⊥²z⁻} + {z⁻,∇⊥²z⁺} ∓ ∇⊥²{z⁺,z⁻}]
+
+        The original CUDA GANDALF applies this 0.5 inside its inverse-Laplacian
+        kernel (work_kernel.cu:39: `.5f * f[index] * kPerp2Inv(idx,idy)`), as
+        noted in timestep.cu:10, even though nonlin.cu itself shows no factor.
+        A missing 0.5 doubles the nonlinear cascade rate while still conserving
+        energy exactly, so energy-conservation and linear-dispersion tests
+        cannot detect it -- only this direct comparison can. On code missing
+        the 1/2, the relative residual below is exactly 1.0 (code = 2x truth).
+        """
+        from krmhd.physics import z_plus_rhs, z_minus_rhs
+        from krmhd.spectral import derivative_z, laplacian
+
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+
+        # Band-limited random fields (|kx|<=3, |ky|<=3, |kz|<=2) so that all
+        # quadratic products stay strictly inside the 2/3 dealiasing boundary
+        # and the comparison is free of dealiasing/truncation artifacts.
+        kx3d = grid.kx[jnp.newaxis, jnp.newaxis, :]
+        ky3d = grid.ky[jnp.newaxis, :, jnp.newaxis]
+        kz3d = grid.kz[:, jnp.newaxis, jnp.newaxis]
+        band_mask = (
+            (jnp.abs(kx3d) <= 3) & (jnp.abs(ky3d) <= 3) & (jnp.abs(kz3d) <= 2)
+        )
+
+        shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        key = jax.random.PRNGKey(7)
+        k1, k2, k3, k4 = jax.random.split(key, 4)
+        z_plus = (
+            (jax.random.normal(k1, shape) + 1j * jax.random.normal(k2, shape))
+            * band_mask
+        ).astype(jnp.complex64)
+        z_minus = (
+            (jax.random.normal(k3, shape) + 1j * jax.random.normal(k4, shape))
+            * band_mask
+        ).astype(jnp.complex64)
+        z_plus = z_plus.at[0, 0, 0].set(0.0 + 0.0j)
+        z_minus = z_minus.at[0, 0, 0].set(0.0 + 0.0j)
+
+        # Nonlinear part of the code's RHS (eta=0; strip the linear ±ikz term)
+        nl_code_p = z_plus_rhs(
+            z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask,
+            0.0, grid.Nz, grid.Ny, grid.Nx,
+        ) - derivative_z(z_plus, grid.kz)
+        nl_code_m = z_minus_rhs(
+            z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask,
+            0.0, grid.Nz, grid.Ny, grid.Nx,
+        ) + derivative_z(z_minus, grid.kz)
+
+        # Independent assembly of the same nonlinearity from primitive fields
+        phi = (z_plus + z_minus) / 2.0
+        psi = (z_plus - z_minus) / 2.0
+        w = laplacian(phi, grid.kx, grid.ky, kz=None)  # vorticity ∇⊥²φ
+        j = laplacian(psi, grid.kx, grid.ky, kz=None)  # current   ∇⊥²Ψ
+
+        def pb(f, g):
+            return poisson_bracket_3d(
+                f, g, grid.kx, grid.ky, grid.Nz, grid.Ny, grid.Nx,
+                grid.dealias_mask,
+            )
+
+        lap_pb_phi_psi = laplacian(pb(phi, psi), grid.kx, grid.ky, kz=None)
+        num_plus = (-pb(phi, w) + pb(psi, j)) + (-lap_pb_phi_psi)
+        num_minus = (-pb(phi, w) + pb(psi, j)) - (-lap_pb_phi_psi)
+
+        # Apply ∇⊥⁻² (multiply by -1/k⊥²; k⊥=0 column does not evolve)
+        k_perp2 = kx3d**2 + ky3d**2
+        k_perp2_safe = jnp.where(k_perp2 == 0, 1.0, k_perp2)
+        nl_prim_p = jnp.where(
+            k_perp2 == 0, 0.0 + 0.0j, num_plus / (-k_perp2_safe)
+        )
+        nl_prim_m = jnp.where(
+            k_perp2 == 0, 0.0 + 0.0j, num_minus / (-k_perp2_safe)
+        )
+
+        res_p = (
+            jnp.linalg.norm(nl_code_p - nl_prim_p) / jnp.linalg.norm(nl_prim_p)
+        )
+        res_m = (
+            jnp.linalg.norm(nl_code_m - nl_prim_m) / jnp.linalg.norm(nl_prim_m)
+        )
+
+        assert res_p < 1e-4, (
+            f"z_plus nonlinearity disagrees with primitive RMHD form: relative "
+            f"residual {res_p:.6f} (residual ~1.0 means the code term is "
+            f"exactly 2x the correct one, i.e. the factor 1/2 is missing)"
+        )
+        assert res_m < 1e-4, (
+            f"z_minus nonlinearity disagrees with primitive RMHD form: relative "
+            f"residual {res_m:.6f} (residual ~1.0 means the code term is "
+            f"exactly 2x the correct one, i.e. the factor 1/2 is missing)"
+        )
+
 
 # ==============================================================================
 # Hermite Moment RHS Tests
