@@ -9,8 +9,11 @@ Chapter 2, Equations 2.13-2.19:
 - Exponential integration for dissipation
 
 The integrating factor e^(±ikz*t) removes the stiff linear term. The Elsasser
-sector retains the thesis midpoint RK2 update, while the passive Hermite
-sector uses a Lawson-form RK4 update for stable externally driven advection.
+sector uses the midpoint RK2 update in the interaction picture (Lawson form):
+with w(s) = e^(∓ikz*s)·ξ±(s), dw/ds = e^(∓ikz*s)·NL, so each nonlinear
+increment is propagated by exactly one phase factor covering the remaining
+sub-interval. The passive Hermite sector uses a Lawson-form RK4 update for
+stable externally driven advection.
 
 Example usage:
     >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
@@ -453,7 +456,7 @@ def _gandalf_step_lawson_rk4_jit(
         return g_eigen @ streaming_P_T        # project back
 
     # =========================================================================
-    # Step 1: Elsasser half-step (thesis Eq. 2.14-2.17)
+    # Step 1: Elsasser half-step (integrating-factor predictor, cf. thesis §2.4)
     # =========================================================================
 
     # Compute initial RHS (with dissipation temporarily set to 0)
@@ -470,10 +473,16 @@ def _gandalf_step_lawson_rk4_jit(
     nl_plus_0 = rhs_0.z_plus - (1j * kz_3d * fields.z_plus)    # Subtract +ikz·z⁺
     nl_minus_0 = rhs_0.z_minus + (1j * kz_3d * fields.z_minus)  # Subtract -ikz·z⁻
 
-    # Half-step update: ξ±,n+1/2 = e^(±ikz·Δt/2) · [ξ±,n + e^(±ikz·Δt/2) · Δt/2 · NL^n]
-    # Note: the e^(±ikz·Δt/2) factor appears twice (thesis Eq. 2.14)
-    z_plus_half = phase_plus_half * (fields.z_plus + phase_plus_half * (dt / 2.0) * nl_plus_0)
-    z_minus_half = phase_minus_half * (fields.z_minus + phase_minus_half * (dt / 2.0) * nl_minus_0)
+    # Half-step update in the interaction picture (Lawson form): define
+    # w(s) = e^(∓ikz·s)·ξ±(s), so that dw/ds = e^(∓ikz·s)·NL(ξ±(s)).
+    # Forward-Euler predictor over [0, Δt/2] in w, mapped back to ξ±:
+    #   ξ±,n+1/2 = e^(±ikz·Δt/2) · [ξ±,n + Δt/2 · NL^n]
+    # The phase multiplies the whole bracket exactly ONCE. (An earlier version
+    # applied the phase a second time to the nonlinear increment, citing
+    # thesis Eq. 2.14; the original CUDA GANDALF (timestep.cu, alf_adv)
+    # applies linstep to the NL term exactly once, matching this form.)
+    z_plus_half = phase_plus_half * (fields.z_plus + (dt / 2.0) * nl_plus_0)
+    z_minus_half = phase_minus_half * (fields.z_minus + (dt / 2.0) * nl_minus_0)
 
     # Hermite RK4 stage 1: nonlinear-only RHS at t_n
     nl_g_1 = compute_nl_g(fields)
@@ -513,9 +522,16 @@ def _gandalf_step_lawson_rk4_jit(
     # Step 3: Full step using midpoint RHS (Elsasser) and RK4 stage assembly (Hermite)
     # =========================================================================
 
-    # Elsasser full step: ξ±,n+1 = e^(±ikz·Δt) · [ξ±,n + e^(±ikz·Δt) · Δt · NL^(n+1/2)]
-    z_plus_new = phase_plus_full * (fields.z_plus + phase_plus_full * dt * nl_plus_half)
-    z_minus_new = phase_minus_full * (fields.z_minus + phase_minus_full * dt * nl_minus_half)
+    # Elsasser full step (midpoint rule in the interaction picture):
+    #   w^(n+1) = w^n + Δt · e^(∓ikz·Δt/2) · NL^(n+1/2)
+    #   =>  ξ±,n+1 = e^(±ikz·Δt) · ξ±,n + e^(±ikz·Δt/2) · Δt · NL^(n+1/2)
+    # The half phase on the increment propagates the midpoint nonlinear
+    # transfer over the remaining half interval [Δt/2, Δt]. Note: the original
+    # CUDA GANDALF applied the full phase e^(±ikz·Δt) (once) to the corrector
+    # increment; the consistent Lawson midpoint uses e^(±ikz·Δt/2). The
+    # difference is an O(kz·Δt²) local term, so both are formally 2nd order.
+    z_plus_new = phase_plus_full * fields.z_plus + phase_plus_half * dt * nl_plus_half
+    z_minus_new = phase_minus_full * fields.z_minus + phase_minus_half * dt * nl_minus_half
 
     # Hermite RK4 stage 3: same midpoint Elsasser fields, updated Hermite state.
     g_stage_3 = g_base_half + (dt / 2.0) * nl_g_2
@@ -796,8 +812,11 @@ def _gandalf_step_imex222_jit(
     )
     nl_plus_0 = rhs_0.z_plus - (1j * kz_3d * fields.z_plus)
     nl_minus_0 = rhs_0.z_minus + (1j * kz_3d * fields.z_minus)
-    z_plus_half = phase_plus_half * (fields.z_plus + phase_plus_half * (dt / 2.0) * nl_plus_0)
-    z_minus_half = phase_minus_half * (fields.z_minus + phase_minus_half * (dt / 2.0) * nl_minus_0)
+    # Interaction-picture (Lawson) forward-Euler predictor over [0, Δt/2]:
+    # ξ±,n+1/2 = e^(±ikz·Δt/2)·[ξ±,n + Δt/2·NL^n] — single phase application;
+    # see the derivation in _gandalf_step_lawson_rk4_jit (identical block).
+    z_plus_half = phase_plus_half * (fields.z_plus + (dt / 2.0) * nl_plus_0)
+    z_minus_half = phase_minus_half * (fields.z_minus + (dt / 2.0) * nl_minus_0)
 
     # IMEX tableau stage 2 (c=gamma): N evaluated at (g^n, z+/-^n); u^(1)=g^n is trivial
     N_1 = compute_nl_g(fields)
@@ -822,9 +841,12 @@ def _gandalf_step_imex222_jit(
     nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
     nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
 
-    # Elsasser full-step (matches Lawson path exactly given same nl_plus/minus_half)
-    z_plus_new = phase_plus_full * (fields.z_plus + phase_plus_full * dt * nl_plus_half)
-    z_minus_new = phase_minus_full * (fields.z_minus + phase_minus_full * dt * nl_minus_half)
+    # Elsasser full-step: midpoint rule in the interaction picture,
+    # ξ±,n+1 = e^(±ikz·Δt)·ξ±,n + e^(±ikz·Δt/2)·Δt·NL^(n+1/2)
+    # (matches Lawson path exactly given same nl_plus/minus_half; see the
+    # derivation and CUDA-comparison note in _gandalf_step_lawson_rk4_jit)
+    z_plus_new = phase_plus_full * fields.z_plus + phase_plus_half * dt * nl_plus_half
+    z_minus_new = phase_minus_full * fields.z_minus + phase_minus_half * dt * nl_minus_half
 
     # IMEX tableau stage 3 (c=1): N at (g^(1), z+/-^{n+dt/2}).
     # rhs_half.g was evaluated with real kz (includes streaming); we need the
