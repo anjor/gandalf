@@ -1,0 +1,66 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch supersedes the previous run.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Minimum supported version (requires-python = ">=3.10") and the
+        # newest version in the project classifiers.
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # --frozen fails the run if uv.lock is stale relative to pyproject.toml,
+      # so dependency drift shows up here rather than in a later release build.
+      - name: Run test suite
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }}
+          pytest tests/ -q
+          --ignore=tests/test_performance.py
+
+  # Benchmarks are timing-based and meaningless on shared CI runners, so they
+  # are opt-in via the Actions "Run workflow" button rather than part of the
+  # PR gate.
+  benchmarks:
+    name: benchmarks (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Run performance benchmarks
+        run: uv run --frozen pytest tests/test_performance.py -q -s
