@@ -48,7 +48,6 @@ File format:
     Checkpoint files contain:
     - /state/z_plus: Complex Elsasser field (stored as real + imag)
     - /state/z_minus: Complex Elsasser field (stored as real + imag)
-    - /state/B_parallel: Complex parallel magnetic field (stored as real + imag)
     - /state/g: Complex Hermite moments (stored as real + imag)
     - /state attributes: M, beta_i, v_th, nu, Lambda, time
     - /grid attributes: Nx, Ny, Nz, Lx, Ly, Lz
@@ -58,9 +57,16 @@ File format:
     - /times: Time array
     - /E_magnetic: Magnetic energy time series
     - /E_kinetic: Kinetic energy time series
-    - /E_compressive: Compressive energy time series
     - /E_total: Total energy time series
     - attributes: Creation timestamp, version
+
+Backward compatibility:
+    Checkpoints written before the removal of the (never-evolved) B_parallel
+    field additionally contain /state/B_parallel_real and
+    /state/B_parallel_imag datasets, and old timeseries files contain an
+    /E_compressive dataset. Both are silently ignored on load; the format
+    version attribute (IO_FORMAT_VERSION) was intentionally left unchanged
+    because old files remain fully readable.
 
 Physics context:
     Checkpointing is essential for long turbulence runs (t >> τ_nl) where:
@@ -107,7 +113,7 @@ def save_checkpoint(
     """
     Save KRMHD state to HDF5 checkpoint file.
 
-    Saves complete simulation state including all fields (z±, B∥, g), physical
+    Saves complete simulation state including all fields (z±, g), physical
     parameters (β_i, v_th, ν, Λ), grid configuration, and optional metadata.
     Complex arrays are stored as separate real/imaginary parts.
 
@@ -143,7 +149,6 @@ def save_checkpoint(
     File structure:
         /state/z_plus_real, z_plus_imag: Elsasser z+ field
         /state/z_minus_real, z_minus_imag: Elsasser z- field
-        /state/B_parallel_real, B_parallel_imag: Parallel B field
         /state/g_real, g_imag: Hermite moments
         /state (attributes): M, beta_i, v_th, nu, Lambda, time
         /grid (attributes): Nx, Ny, Nz, Lx, Ly, Lz
@@ -173,7 +178,6 @@ def save_checkpoint(
     # Convert JAX arrays to NumPy for h5py compatibility
     z_plus = np.array(state.z_plus)
     z_minus = np.array(state.z_minus)
-    B_parallel = np.array(state.B_parallel)
     g = np.array(state.g)
 
     # Validate complex dtypes
@@ -210,19 +214,6 @@ def save_checkpoint(
         state_group.create_dataset(
             'z_minus_imag',
             data=z_minus.imag.astype(np.float32),
-            compression='gzip',
-            compression_opts=COMPRESSION_LEVEL
-        )
-
-        state_group.create_dataset(
-            'B_parallel_real',
-            data=B_parallel.real.astype(np.float32),
-            compression='gzip',
-            compression_opts=COMPRESSION_LEVEL
-        )
-        state_group.create_dataset(
-            'B_parallel_imag',
-            data=B_parallel.imag.astype(np.float32),
             compression='gzip',
             compression_opts=COMPRESSION_LEVEL
         )
@@ -324,6 +315,11 @@ def load_checkpoint(
     Note:
         Arrays are loaded as float32 and converted to JAX's default precision
         (float32 on GPU, float32/float64 depending on JAX config on CPU).
+
+        Backward compatibility: checkpoints written by older versions contain
+        /state/B_parallel_real and /state/B_parallel_imag datasets for the
+        since-removed (never-evolved) B_parallel field. These datasets are
+        silently ignored; old checkpoints load without error.
     """
     filepath = Path(filename)
 
@@ -360,12 +356,13 @@ def load_checkpoint(
         state_group = f['state']
 
         # Load raw arrays first
+        # Note: legacy checkpoints also contain B_parallel_real/B_parallel_imag
+        # datasets (the field was removed from KRMHDState because it was never
+        # evolved). They are deliberately not read here, so old files load fine.
         z_plus_real = jnp.array(state_group['z_plus_real'][:], dtype=jnp.float32)
         z_plus_imag = jnp.array(state_group['z_plus_imag'][:], dtype=jnp.float32)
         z_minus_real = jnp.array(state_group['z_minus_real'][:], dtype=jnp.float32)
         z_minus_imag = jnp.array(state_group['z_minus_imag'][:], dtype=jnp.float32)
-        B_parallel_real = jnp.array(state_group['B_parallel_real'][:], dtype=jnp.float32)
-        B_parallel_imag = jnp.array(state_group['B_parallel_imag'][:], dtype=jnp.float32)
         g_real = jnp.array(state_group['g_real'][:], dtype=jnp.float32)
         g_imag = jnp.array(state_group['g_imag'][:], dtype=jnp.float32)
 
@@ -382,11 +379,6 @@ def load_checkpoint(
                     f"z_minus shape {z_minus_real.shape} doesn't match grid "
                     f"{expected_shape}"
                 )
-            if B_parallel_real.shape != expected_shape:
-                raise ValueError(
-                    f"B_parallel shape {B_parallel_real.shape} doesn't match grid "
-                    f"{expected_shape}"
-                )
 
             # Validate Hermite moments shape
             M = int(state_group.attrs['M'])
@@ -399,14 +391,12 @@ def load_checkpoint(
         # Reconstruct complex arrays after validation
         z_plus = z_plus_real + 1j * z_plus_imag
         z_minus = z_minus_real + 1j * z_minus_imag
-        B_parallel = B_parallel_real + 1j * B_parallel_imag
         g = g_real + 1j * g_imag
 
         # Load state scalar parameters
         state = KRMHDState(
             z_plus=z_plus,
             z_minus=z_minus,
-            B_parallel=B_parallel,
             g=g,
             M=int(state_group.attrs['M']),
             beta_i=float(state_group.attrs['beta_i']),
@@ -519,7 +509,6 @@ def save_timeseries(
     times = np.array(history.times, dtype=np.float64)
     E_magnetic = np.array(history.E_magnetic, dtype=np.float64)
     E_kinetic = np.array(history.E_kinetic, dtype=np.float64)
-    E_compressive = np.array(history.E_compressive, dtype=np.float64)
     E_total = np.array(history.E_total, dtype=np.float64)
 
     with h5py.File(filename, 'w') as f:
@@ -529,8 +518,6 @@ def save_timeseries(
         f.create_dataset('E_magnetic', data=E_magnetic, compression='gzip',
                         compression_opts=COMPRESSION_LEVEL)
         f.create_dataset('E_kinetic', data=E_kinetic, compression='gzip',
-                        compression_opts=COMPRESSION_LEVEL)
-        f.create_dataset('E_compressive', data=E_compressive, compression='gzip',
                         compression_opts=COMPRESSION_LEVEL)
         f.create_dataset('E_total', data=E_total, compression='gzip',
                         compression_opts=COMPRESSION_LEVEL)
@@ -596,11 +583,13 @@ def load_timeseries(filename: str) -> Tuple[EnergyHistory, Dict[str, Any]]:
             )
 
         # Load time series data
+        # Note: legacy timeseries files also contain an E_compressive dataset
+        # (removed along with the never-evolved B_parallel field); it is
+        # deliberately not read here, so old files load fine.
         history = EnergyHistory(
             times=f['times'][:].tolist(),
             E_magnetic=f['E_magnetic'][:].tolist(),
             E_kinetic=f['E_kinetic'][:].tolist(),
-            E_compressive=f['E_compressive'][:].tolist(),
             E_total=f['E_total'][:].tolist(),
         )
 

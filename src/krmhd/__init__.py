@@ -6,7 +6,11 @@ with kinetic effects such as Landau damping and finite Larmor radius corrections
 
 The KRMHD model describes the evolution of:
 - Active (Alfvénic) fields: stream function φ and parallel vector potential A∥
-- Passive (slow mode) fields: parallel magnetic field δB∥ and electron density/pressure
+- Kinetic sector: Hermite moments g_m of the electron distribution
+
+The compressive/slow-mode observables (δn_e, δB∥) are derived diagnostics of
+the Λ± Hermite hierarchies (thesis; dne_dbpar.cu in the original GANDALF),
+not independently evolved fields.
 
 Key features:
 - Fourier spectral methods (2D and 3D) with 2/3 dealiasing
@@ -90,7 +94,6 @@ from krmhd.forcing import (
     force_alfven_modes_gandalf,
     force_alfven_modes_balanced,
     force_alfven_modes_specific,
-    force_slow_modes,
     force_hermite_moments,
     force_hermite_moments_specific,
     compute_energy_injection_rate,
@@ -176,7 +179,6 @@ __all__ = [
     "gaussian_white_noise_fourier",
     "force_alfven_modes",
     "force_alfven_modes_balanced",
-    "force_slow_modes",
     "force_hermite_moments",
     "force_hermite_moments_specific",
     "compute_energy_injection_rate",

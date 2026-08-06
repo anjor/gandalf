@@ -54,7 +54,6 @@ class KRMHDState(BaseModel):
             Co-propagating Alfvén wave packet along +B₀
         z_minus: Elsasser z⁻ = φ - A∥ in Fourier space (shape: [Nz, Ny, Nx//2+1])
             Counter-propagating Alfvén wave packet along -B₀
-        B_parallel: Parallel magnetic field δB∥ (passive) in Fourier space (shape: [Nz, Ny, Nx//2+1])
         g: Hermite moments of electron distribution (shape: [Nz, Ny, Nx//2+1, M+1])
             Expansion: g(v∥) = Σ_m g_m · ψ_m(v∥/v_th)
         M: Number of Hermite moments (typically 20-30 for converged kinetics)
@@ -75,7 +74,6 @@ class KRMHDState(BaseModel):
         >>> state = KRMHDState(
         ...     z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
         ...     z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
-        ...     B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
         ...     g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, 21), dtype=complex),
         ...     M=20,
         ...     beta_i=1.0,
@@ -89,8 +87,13 @@ class KRMHDState(BaseModel):
         The KRMHD equations in Elsasser form:
         - ∂z⁺/∂t = -∇²⊥{z⁻, z⁺} - ∇∥z⁻ + dissipation
         - ∂z⁻/∂t = -∇²⊥{z⁺, z⁻} + ∇∥z⁺ + dissipation
-        - Passive sector: B∥ is advected by φ = (z⁺ + z⁻)/2
         - Kinetic sector: g moments evolve with Landau damping and collisions
+
+        The compressive/slow-mode observables (δn_e, δB∥) are not evolved
+        fields in this formulation: they are derived diagnostics reconstructed
+        from Hermite-hierarchy runs with the kinetic parameters Λ± (thesis;
+        dne_dbpar.cu postprocessor in the original GANDALF). Reconstruction
+        is not yet implemented here.
 
         The Elsasser formulation simplifies the Alfvén wave dynamics compared
         to the coupled (φ, A∥) formulation used in earlier versions.
@@ -104,7 +107,6 @@ class KRMHDState(BaseModel):
 
     z_plus: Array = Field(description="Elsasser z+ (co-propagating wave) in Fourier space")
     z_minus: Array = Field(description="Elsasser z- (counter-propagating wave) in Fourier space")
-    B_parallel: Array = Field(description="Parallel magnetic field in Fourier space")
     g: Array = Field(description="Hermite moments of electron distribution")
     M: int = Field(ge=0, description="Number of Hermite moments (M=0: pure fluid RMHD, g has 1 slot kept zero; M>=2: kinetic with g_0..g_M)")
     beta_i: float = Field(gt=0.0, description="Ion plasma beta")
@@ -114,7 +116,7 @@ class KRMHDState(BaseModel):
     time: float = Field(ge=0.0, description="Simulation time")
     grid: SpectralGrid3D = Field(description="Spectral grid specification")
 
-    @field_validator("z_plus", "z_minus", "B_parallel")
+    @field_validator("z_plus", "z_minus")
     @classmethod
     def validate_field_shape(cls, v: Array, info) -> Array:
         """Validate that fields have correct 3D Fourier space shape."""
@@ -175,13 +177,13 @@ class KRMHDState(BaseModel):
         # Import energy calculation (defined later in this file)
         from krmhd.physics import energy
 
-        E_mag, E_kin, E_comp = energy(self)
-        E_tot = E_mag + E_kin + E_comp
+        E = energy(self)
 
         return (
             f"KRMHDState(t={self.time:.3f}, "
             f"grid={self.grid.Nx}×{self.grid.Ny}×{self.grid.Nz}, "
-            f"E_tot={E_tot:.3e}, E_mag={E_mag:.3e}, E_kin={E_kin:.3e}, "
+            f"E_tot={E['total']:.3e}, E_mag={E['magnetic']:.3e}, "
+            f"E_kin={E['kinetic']:.3e}, "
             f"M={self.M}, β_i={self.beta_i:.2f})"
         )
 
@@ -191,14 +193,14 @@ def _krmhd_state_flatten(state: KRMHDState):
     """
     Flatten KRMHDState into arrays (children) and static data (aux_data).
 
-    Arrays (children): z_plus, z_minus, B_parallel, g, grid (itself a pytree)
+    Arrays (children): z_plus, z_minus, g, grid (itself a pytree)
     Static data (aux_data): M, beta_i, v_th, nu, Lambda, time
 
     The grid field is treated as a child (pytree) rather than aux_data
     because it contains JAX arrays (kx, ky, kz, dealias_mask) and is
     registered as a pytree.
     """
-    children = (state.z_plus, state.z_minus, state.B_parallel, state.g, state.grid)
+    children = (state.z_plus, state.z_minus, state.g, state.grid)
     aux_data = (state.M, state.beta_i, state.v_th, state.nu, state.Lambda, state.time)
     return children, aux_data
 
@@ -211,11 +213,10 @@ def _krmhd_state_unflatten(aux_data, children):
     from JAX tree operations (including grid as a pytree).
     """
     M, beta_i, v_th, nu, Lambda, time = aux_data
-    z_plus, z_minus, B_parallel, g, grid = children
+    z_plus, z_minus, g, grid = children
     return KRMHDState(
         z_plus=z_plus,
         z_minus=z_minus,
-        B_parallel=B_parallel,
         g=g,
         M=M,
         beta_i=beta_i,
@@ -1255,7 +1256,7 @@ def initialize_alfven_wave(
 
     The wave is initialized with correct phase relationship:
     - phi and A_parallel in quadrature (90° phase difference)
-    - B_parallel = 0 (pure Alfvén wave has no compressibility)
+    - Pure Alfvén wave has no compressibility
 
     Args:
         grid: SpectralGrid3D defining spatial dimensions
@@ -1285,7 +1286,6 @@ def initialize_alfven_wave(
     # Initialize empty fields
     phi = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
     A_parallel = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
-    B_parallel = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
 
     # Find indices corresponding to desired wavenumber
     # This is approximate - we pick the closest wavenumber on the grid
@@ -1308,7 +1308,6 @@ def initialize_alfven_wave(
     return KRMHDState(
         z_plus=z_plus,
         z_minus=z_minus,
-        B_parallel=B_parallel,
         g=g,
         M=M,
         beta_i=beta_i,
@@ -1423,9 +1422,6 @@ def initialize_random_spectrum(
     # Convert to Elsasser variables
     z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
 
-    # Passive scalar B_parallel (initially zero, will be excited by cascade)
-    B_parallel = jnp.zeros_like(phi)
-
     # Initialize Hermite moments (equilibrium, or with small perturbations for kinetic physics)
     # Use fold_in to derive an independent seed for g, avoiding collisions with other seeds
     g_key = jax.random.fold_in(jax.random.PRNGKey(seed), 1)
@@ -1439,7 +1435,6 @@ def initialize_random_spectrum(
     return KRMHDState(
         z_plus=z_plus,
         z_minus=z_minus,
-        B_parallel=B_parallel,
         g=g,
         M=M,
         beta_i=beta_i,
@@ -1469,7 +1464,6 @@ def energy(state: KRMHDState) -> Dict[str, float]:
     Calculates energy contributions from:
     - Magnetic energy: E_mag = (1/2) ∫ |B⊥|² dx = (1/2) ∫ |∇A∥|² dx
     - Kinetic energy: E_kin = (1/2) ∫ |v⊥|² dx = (1/2) ∫ |∇φ|² dx
-    - Compressive energy: E_comp = (1/2) ∫ |δB∥|² dx
 
     All energies are computed in Fourier space using Parseval's theorem:
         ∫ |f(x)|² dx = ∫ |f̂(k)|² dk
@@ -1481,8 +1475,7 @@ def energy(state: KRMHDState) -> Dict[str, float]:
         Dictionary with energy components:
         - 'magnetic': Magnetic energy from perpendicular field
         - 'kinetic': Kinetic energy from perpendicular flow
-        - 'compressive': Compressive energy from parallel field
-        - 'total': Sum of fluid components (excludes Hermite energy)
+        - 'total': E_magnetic + E_kinetic (excludes Hermite energy)
 
     Example:
         >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=64)
@@ -1494,10 +1487,15 @@ def energy(state: KRMHDState) -> Dict[str, float]:
     Physics:
         - For Alfvén waves: E_mag ≈ E_kin (equipartition)
         - For decaying turbulence: E_mag/E_kin increases (selective decay)
-        - E_comp should remain small (passive, no back-reaction)
 
         Energy should be conserved in inviscid (nu=eta=0) simulations to
         within numerical precision (~1e-10 relative error).
+
+    Note:
+        There is no compressive energy component: δB∥ is not an evolved
+        field in this formulation. The slow-mode observables (δn_e, δB∥)
+        are derived diagnostics of the Λ± Hermite hierarchies (thesis;
+        dne_dbpar.cu in the original GANDALF), not yet implemented.
     """
     grid = state.grid
 
@@ -1561,14 +1559,8 @@ def energy(state: KRMHDState) -> Dict[str, float]:
         jnp.sum(jnp.where(kx_middle, 2.0 * A_par_grad_squared, A_par_grad_squared))
     ).real
 
-    # Compressive energy: E_comp = (1/2) ∫ |δB∥|² dx
-    B_mag_squared = jnp.abs(state.B_parallel) ** 2
-    E_compressive = 0.5 * norm_factor * (
-        jnp.sum(jnp.where(kx_middle, 2.0 * B_mag_squared, B_mag_squared))
-    ).real
-
     # Total energy
-    E_total = E_magnetic + E_kinetic + E_compressive
+    E_total = E_magnetic + E_kinetic
 
     # NOTE: We're not including kinetic (Hermite moment) energy here yet
     # That would require integrating over velocity space as well
@@ -1577,7 +1569,6 @@ def energy(state: KRMHDState) -> Dict[str, float]:
     return {
         "magnetic": float(E_magnetic),
         "kinetic": float(E_kinetic),
-        "compressive": float(E_compressive),
         "total": float(E_total),
     }
 
@@ -1721,9 +1712,6 @@ def initialize_orszag_tang(
     # which are well-resolved on the grid. Dealiasing is only required AFTER
     # nonlinear operations (Poisson brackets) to prevent aliasing errors.
 
-    # Initialize parallel magnetic field (passive, set to zero for pure Alfvén mode)
-    B_parallel = jnp.zeros_like(z_plus_k)
-
     # Initialize Hermite moments (kinetic distribution)
     # g = 0 represents fluid limit: no kinetic response
     # This is appropriate for Orszag-Tang, which tests fluid nonlinear dynamics
@@ -1732,7 +1720,6 @@ def initialize_orszag_tang(
     return KRMHDState(
         z_plus=z_plus_k,
         z_minus=z_minus_k,
-        B_parallel=B_parallel,
         g=g,
         M=M,
         beta_i=beta_i,

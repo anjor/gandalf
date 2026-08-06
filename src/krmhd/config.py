@@ -482,7 +482,6 @@ class SimulationConfig(BaseModel):
             return KRMHDState(
                 z_plus=zeros_3d,
                 z_minus=zeros_3d,
-                B_parallel=zeros_3d,
                 g=zeros_moments,
                 M=M,
                 beta_i=self.physics.beta_i,

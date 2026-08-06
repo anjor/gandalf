@@ -398,7 +398,6 @@ def main():
         state = KRMHDState(
             z_plus=jnp.zeros((Nz, Ny, Nx//2+1), dtype=complex),
             z_minus=jnp.zeros((Nz, Ny, Nx//2+1), dtype=complex),
-            B_parallel=jnp.zeros((Nz, Ny, Nx//2+1), dtype=complex),
             g=jnp.zeros((Nz, Ny, Nx//2+1, M+1), dtype=complex),
             grid=grid,
             time=0.0,

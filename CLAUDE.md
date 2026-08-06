@@ -16,15 +16,17 @@ The user is an expert plasma physicist familiar with gyrokinetics, Landau dampin
   - These drive the turbulent cascade
   
 - **Passive (slow mode) sector**:
-  - Parallel magnetic field perturbation δB∥
-  - Electron density/pressure perturbations n_e, p_e
+  - Electron density/pressure perturbations n_e, p_e (via Hermite moments)
   - These are advected by Alfvénic turbulence but don't back-react
+  - The compressive/slow-mode observables (δn_e, δB∥) are derived from the
+    Hermite hierarchies with the kinetic parameters Λ± (thesis; dne_dbpar.cu
+    postprocessor in the original GANDALF) rather than evolved as independent
+    fields
 
 ### Key Equations
 
 ```
 ∂A∥/∂t + {φ, A∥} = -∇∥φ + η∇²A∥
-∂δB∥/∂t + {φ, δB∥} = -∇∥u∥ + D∇²δB∥
 ∂n_e/∂t + {φ, n_e} = -∇∥u∥ + Landau damping terms
 ```
 where {f,g} = ẑ·(∇f × ∇g) is the Poisson bracket.
@@ -68,7 +70,7 @@ RMHD is an asymptotic expansion in the small parameter ε:
 **Field Normalization:**
 - **Magnetic field**: B = B₀ẑ + δB where δB comes from perturbations
   - Perpendicular: δB⊥ = ∇ × (Ψ ẑ) with Ψ = (z⁺ - z⁻)/2
-  - Parallel: Bz = 1 + δB∥ (state.B_parallel in Fourier space)
+  - Parallel: Bz = 1 (δB∥ is a derived diagnostic, not an evolved field)
 - **Field line following**: Requires full B field, so B₀ must be added in real space
 - **Important**: Never add constants in Fourier space - only k=0 mode is affected!
 
@@ -140,7 +142,7 @@ checkpoints to return to.
 - 128³ resolution should run efficiently on M1 Pro (matches original GANDALF)
 
 ### Energy Conservation
-- Alfven energy E = E_magnetic + E_kinetic. Slow modes are conserved separately: E_compressive
+- Alfven energy E = E_magnetic + E_kinetic
 - GANDALF formulation conserves perpendicular gradient energy exactly
 - Inviscid (η=0) runs: ~0.0086% relative error (200× better than simplified formulation)
 - Viscous (η>0) runs: Exponential energy decay E(t) = E₀ exp(-2ηk⊥²t)

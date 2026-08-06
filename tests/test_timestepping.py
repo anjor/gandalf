@@ -48,7 +48,6 @@ class TestKRMHDRHS:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 21), dtype=jnp.complex64),
             M=20,
             beta_i=1.0,
@@ -65,7 +64,6 @@ class TestKRMHDRHS:
         # All derivatives should be zero
         assert jnp.allclose(rhs.z_plus, 0.0, atol=1e-10)
         assert jnp.allclose(rhs.z_minus, 0.0, atol=1e-10)
-        assert jnp.allclose(rhs.B_parallel, 0.0, atol=1e-10)
         assert jnp.allclose(rhs.g, 0.0, atol=1e-10)
 
     def test_rhs_shape_preservation(self):
@@ -81,7 +79,6 @@ class TestKRMHDRHS:
                    1j * jax.random.normal(keys[0], (grid.Nz, grid.Ny, grid.Nx // 2 + 1)),
             z_minus=jax.random.normal(keys[1], (grid.Nz, grid.Ny, grid.Nx // 2 + 1)) +
                     1j * jax.random.normal(keys[1], (grid.Nz, grid.Ny, grid.Nx // 2 + 1)),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 21), dtype=jnp.complex64),
             M=20,
             beta_i=1.0,
@@ -98,7 +95,6 @@ class TestKRMHDRHS:
         # Check shapes
         assert rhs.z_plus.shape == state.z_plus.shape
         assert rhs.z_minus.shape == state.z_minus.shape
-        assert rhs.B_parallel.shape == state.B_parallel.shape
         assert rhs.g.shape == state.g.shape
 
     def test_rhs_nonzero_output(self):
@@ -126,7 +122,6 @@ class TestGandalfStep:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 21), dtype=jnp.complex64),
             M=20,
             beta_i=1.0,
@@ -144,7 +139,6 @@ class TestGandalfStep:
         # Fields should remain zero
         assert jnp.allclose(new_state.z_plus, 0.0, atol=1e-10)
         assert jnp.allclose(new_state.z_minus, 0.0, atol=1e-10)
-        assert jnp.allclose(new_state.B_parallel, 0.0, atol=1e-10)
         assert jnp.allclose(new_state.g, 0.0, atol=1e-10)
 
         # Time should advance
@@ -162,7 +156,6 @@ class TestGandalfStep:
                    1j * jax.random.normal(keys[0], (grid.Nz, grid.Ny, grid.Nx // 2 + 1)),
             z_minus=jax.random.normal(keys[1], (grid.Nz, grid.Ny, grid.Nx // 2 + 1)) +
                     1j * jax.random.normal(keys[1], (grid.Nz, grid.Ny, grid.Nx // 2 + 1)),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 21), dtype=jnp.complex64),
             M=20,
             beta_i=1.0,
@@ -179,7 +172,6 @@ class TestGandalfStep:
         # Check shapes
         assert new_state.z_plus.shape == state.z_plus.shape
         assert new_state.z_minus.shape == state.z_minus.shape
-        assert new_state.B_parallel.shape == state.B_parallel.shape
         assert new_state.g.shape == state.g.shape
 
     def test_gandalf_time_increment(self):
@@ -322,7 +314,6 @@ class TestCFLCalculator:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 21), dtype=jnp.complex64),
             M=20,
             beta_i=1.0,
@@ -1169,7 +1160,6 @@ class TestHyperdissipationDegenerateCases:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64),
             M=M,
             beta_i=1.0,
@@ -1199,7 +1189,6 @@ class TestHyperdissipationDegenerateCases:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1, M+1), dtype=jnp.complex64),
             M=M,
             beta_i=1.0,
@@ -1288,7 +1277,6 @@ class TestHyperdissipationDegenerateCases:
         state = KRMHDState(
             z_plus=z_plus,
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx//2+1), dtype=jnp.complex64),
             g=g,
             M=M,
             beta_i=1.0,
@@ -1479,14 +1467,12 @@ class TestHermiteIntegratingFactor:
         # Initialize with zero z± (no nonlinear terms) and small g perturbation
         z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
         z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
-        B_parallel = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
 
         g = initialize_hermite_moments(grid, M, perturbation_amplitude=1e-3, seed=42)
 
         state = KRMHDState(
             z_plus=z_plus,
             z_minus=z_minus,
-            B_parallel=B_parallel,
             g=g,
             M=M,
             beta_i=1.0,
@@ -1531,11 +1517,10 @@ class TestHermiteIntegratingFactor:
 
         z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
         z_minus = jnp.zeros_like(z_plus)
-        B_parallel = jnp.zeros_like(z_plus)
         g = initialize_hermite_moments(grid, M, perturbation_amplitude=1e-4, seed=123)
 
         state = KRMHDState(
-            z_plus=z_plus, z_minus=z_minus, B_parallel=B_parallel, g=g,
+            z_plus=z_plus, z_minus=z_minus, g=g,
             M=M, beta_i=beta_i, v_th=1.0, nu=0.0, Lambda=1.0,
             time=0.0, grid=grid,
         )
@@ -1564,7 +1549,6 @@ class TestHermiteIntegratingFactor:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=initialize_hermite_moments(grid, M, perturbation_amplitude=1e-3, seed=7),
             M=M,
             beta_i=1.0,
@@ -1605,7 +1589,6 @@ class TestHermiteIntegratingFactor:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=g,
             M=M,
             beta_i=1.0,
@@ -1646,7 +1629,6 @@ class TestHermiteIntegratingFactor:
         state = KRMHDState(
             z_plus=phi_fourier,
             z_minus=phi_fourier,
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=g,
             M=M,
             beta_i=1.0,
@@ -1691,7 +1673,6 @@ class TestHermiteIntegratingFactor:
         state = KRMHDState(
             z_plus=phi,
             z_minus=phi,
-            B_parallel=jnp.zeros_like(phi),
             g=g,
             M=M,
             beta_i=1.0,
@@ -1812,7 +1793,6 @@ class TestIMEX222:
         state = KRMHDState(
             z_plus=z_plus,
             z_minus=z_minus,
-            B_parallel=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
             g=g,
             M=M,
             beta_i=beta_i,
@@ -1908,7 +1888,6 @@ class TestIMEX222:
         state = KRMHDState(
             z_plus=jnp.zeros((Nz, Ny, Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((Nz, Ny, Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((Nz, Ny, Nx // 2 + 1), dtype=jnp.complex64),
             g=g,
             M=M,
             beta_i=1.0,
@@ -1972,7 +1951,6 @@ class TestIMEX222:
         state = KRMHDState(
             z_plus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
             z_minus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
             g=g,
             M=M,
             beta_i=1.0,
@@ -2049,7 +2027,6 @@ class TestIMEX222:
         state = KRMHDState(
             z_plus=z_plus,
             z_minus=z_minus,
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, Nxh), dtype=jnp.complex64),
             g=g,
             M=M,
             beta_i=1.0,
@@ -2089,28 +2066,6 @@ class TestIMEX222:
         diff_minus = float(jnp.max(jnp.abs(state_l.z_minus - state_i.z_minus)))
         assert diff_plus < 5e-4, f"z_plus parity broken at nu=2.5: {diff_plus}"
         assert diff_minus < 5e-4, f"z_minus parity broken at nu=2.5: {diff_minus}"
-
-    def test_imex222_bparallel_parity_with_lawson(self):
-        """B_parallel is a passive-slot pass-through in both schemes today
-        (Issue #7). Verify both paths leave it bit-identical so a future
-        slow-mode evolution lands in both schemes at once, not silently one
-        at a time."""
-        state0 = self._make_random_state(M=3, nu=0.0, z_amp=0.02, g_amp=0.01)
-        # Seed B_parallel with a nonzero pattern so pass-through is observable.
-        key = jax.random.PRNGKey(99)
-        kr, ki = jax.random.split(key)
-        Bp_shape = state0.B_parallel.shape
-        Bp = (0.05 * (jax.random.normal(kr, Bp_shape)
-                     + 1j * jax.random.normal(ki, Bp_shape))).astype(jnp.complex64)
-        state0 = state0.model_copy(update={"B_parallel": Bp})
-
-        state_l = gandalf_step(state0, dt=0.01, eta=0.01, v_A=1.0,
-                               nu=0.0, scheme="lawson_rk4")
-        state_i = gandalf_step(state0, dt=0.01, eta=0.01, v_A=1.0,
-                               nu=0.0, scheme="imex_rk222")
-        # Both paths pass fields.B_parallel through unchanged.
-        assert jnp.array_equal(state_l.B_parallel, state0.B_parallel)
-        assert jnp.array_equal(state_i.B_parallel, state0.B_parallel)
 
     def test_imex222_adaptive_dt_rebuilds_operator(self):
         """Changing dt between calls must trigger a fresh L/LU factorization.
@@ -2156,7 +2111,6 @@ class TestIMEX222:
         state = KRMHDState(
             z_plus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
             z_minus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
             g=g,
             M=M,
             beta_i=beta_i,
@@ -2225,7 +2179,6 @@ class TestIMEX222:
         state = KRMHDState(
             z_plus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
             z_minus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex64),
             g=g,
             M=M,
             beta_i=beta_i,

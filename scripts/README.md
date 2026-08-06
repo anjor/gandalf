@@ -134,7 +134,6 @@ Energy history is saved as a Python pickle file containing:
     'E_total': np.array,      # Total energy
     'E_magnetic': np.array,   # Magnetic energy
     'E_kinetic': np.array,    # Kinetic energy
-    'E_compressive': np.array,# Compressive energy
     'v_A': float,             # Alfvén velocity
     'Lx': float,              # Domain size
 }

@@ -130,7 +130,6 @@ class TestEnergySpectrum1D:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
             M=10,
             beta_i=1.0,
@@ -203,7 +202,6 @@ class TestEnergySpectrumPerpendicular:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
             M=10,
             beta_i=1.0,
@@ -298,7 +296,6 @@ class TestEnergySpectrumPerpendicularKinetic:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
             M=10,
             beta_i=1.0,
@@ -384,7 +381,6 @@ class TestEnergySpectrumPerpendicularMagnetic:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
             M=10,
             beta_i=1.0,
@@ -464,7 +460,6 @@ class TestAlfvenicEquipartition:
 
         state_kin = KRMHDState(
             grid=grid, z_plus=z_plus, z_minus=z_minus,
-            B_parallel=jnp.zeros_like(z_plus),
             g=jnp.zeros((10, grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
             M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0, time=0.0,
         )
@@ -483,7 +478,6 @@ class TestAlfvenicEquipartition:
 
         state_mag = KRMHDState(
             grid=grid, z_plus=z_plus, z_minus=z_minus,
-            B_parallel=jnp.zeros_like(z_plus),
             g=jnp.zeros((10, grid.Nz, grid.Ny, grid.Nx//2+1), dtype=complex),
             M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0, time=0.0,
         )
@@ -543,7 +537,6 @@ class TestEnergySpectrumParallel:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
             M=10,
             beta_i=1.0,
@@ -582,7 +575,6 @@ class TestEnergySpectrum2D:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
             M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0, time=0.0, grid=grid,
         )
@@ -666,7 +658,6 @@ class TestEnergyHistory:
         assert len(history.times) == 0
         assert len(history.E_magnetic) == 0
         assert len(history.E_kinetic) == 0
-        assert len(history.E_compressive) == 0
         assert len(history.E_total) == 0
 
     def test_energy_history_append(self):
@@ -680,14 +671,12 @@ class TestEnergyHistory:
         assert len(history.times) == 1
         assert len(history.E_magnetic) == 1
         assert len(history.E_kinetic) == 1
-        assert len(history.E_compressive) == 1
         assert len(history.E_total) == 1
 
         # Values should match direct energy calculation
         energies = compute_energy(state)
         assert jnp.isclose(history.E_magnetic[0], energies['magnetic'])
         assert jnp.isclose(history.E_kinetic[0], energies['kinetic'])
-        assert jnp.isclose(history.E_compressive[0], energies['compressive'])
         assert jnp.isclose(history.E_total[0], energies['total'])
 
     def test_energy_history_multiple_appends(self):
@@ -720,7 +709,6 @@ class TestEnergyHistory:
         assert 'times' in data
         assert 'E_magnetic' in data
         assert 'E_kinetic' in data
-        assert 'E_compressive' in data
         assert 'E_total' in data
 
         assert len(data['times']) == 1
@@ -1158,13 +1146,11 @@ class TestComputeMagneticFieldComponents:
         # Create state with zero perturbations
         z_plus = jnp.zeros((32, 32, 17), dtype=complex)
         z_minus = jnp.zeros((32, 32, 17), dtype=complex)
-        B_parallel = jnp.zeros((32, 32, 17), dtype=complex)
         g = jnp.zeros((32, 32, 17, 11), dtype=complex)
 
         state = KRMHDState(
             z_plus=z_plus,
             z_minus=z_minus,
-            B_parallel=B_parallel,
             g=g,
             M=10,
             beta_i=1.0,
@@ -1213,11 +1199,10 @@ class TestFollowFieldLine:
         # Zero perturbations → straight field
         z_plus = jnp.zeros((32, 32, 17), dtype=complex)
         z_minus = jnp.zeros((32, 32, 17), dtype=complex)
-        B_parallel = jnp.zeros((32, 32, 17), dtype=complex)
         g = jnp.zeros((32, 32, 17, 11), dtype=complex)
 
         state = KRMHDState(
-            z_plus=z_plus, z_minus=z_minus, B_parallel=B_parallel, g=g,
+            z_plus=z_plus, z_minus=z_minus, g=g,
             M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0, time=0.0, grid=grid
         )
 
@@ -1273,11 +1258,10 @@ class TestFollowFieldLine:
         # Straight field for exact solution
         z_plus = jnp.zeros((16, 16, 9), dtype=complex)
         z_minus = jnp.zeros((16, 16, 9), dtype=complex)
-        B_parallel = jnp.zeros((16, 16, 9), dtype=complex)
         g = jnp.zeros((16, 16, 9, 11), dtype=complex)
 
         state = KRMHDState(
-            z_plus=z_plus, z_minus=z_minus, B_parallel=B_parallel, g=g,
+            z_plus=z_plus, z_minus=z_minus, g=g,
             M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0, time=0.0, grid=grid
         )
 
@@ -1342,7 +1326,6 @@ class TestHermiteFlux:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
             M=10,
             beta_i=1.0,
@@ -1410,7 +1393,6 @@ class TestHermiteFlux:
         state = KRMHDState(
             z_plus=jnp.zeros((8, 16, 9), dtype=complex),
             z_minus=jnp.zeros((8, 16, 9), dtype=complex),
-            B_parallel=jnp.zeros((8, 16, 9), dtype=complex),
             g=g,
             M=5,
             beta_i=1.0,
@@ -1475,7 +1457,6 @@ class TestHermiteMomentEnergy:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
             M=10,
             beta_i=1.0,
@@ -1513,7 +1494,6 @@ class TestHermiteMomentEnergy:
         state = KRMHDState(
             z_plus=state.z_plus,
             z_minus=state.z_minus,
-            B_parallel=state.B_parallel,
             g=g,
             M=15,
             beta_i=state.beta_i,
@@ -1788,7 +1768,6 @@ class TestPhaseMixingEnergy:
         state = KRMHDState(
             z_plus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             z_minus=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
-            B_parallel=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64),
             g=jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, 11), dtype=jnp.complex64),
             M=10,
             beta_i=1.0,
@@ -1884,7 +1863,6 @@ class TestTurbulenceDiagnostics:
         state = KRMHDState(
             z_plus=jnp.zeros((8, 16, 9), dtype=complex),
             z_minus=jnp.zeros((8, 16, 9), dtype=complex),
-            B_parallel=jnp.zeros((8, 16, 9), dtype=complex),
             g=jnp.zeros((10, 8, 16, 9), dtype=complex),
             M=10,
             beta_i=1.0,
@@ -1947,7 +1925,7 @@ class TestTurbulenceDiagnostics:
 
         # Compute energy via physics module (returns dict)
         energy_dict = energy(state)
-        E_total = energy_dict["magnetic"] + energy_dict["kinetic"] + energy_dict["compressive"]
+        E_total = energy_dict["magnetic"] + energy_dict["kinetic"]
 
         # Should match (within numerical precision)
         rel_error = jnp.abs(diag.energy_total - E_total) / (E_total + 1e-30)
@@ -2122,7 +2100,6 @@ class TestComputeDissipationRate:
         state = KRMHDState(
             z_plus=jnp.zeros((8, 16, 9), dtype=complex),
             z_minus=jnp.zeros((8, 16, 9), dtype=complex),
-            B_parallel=jnp.zeros((8, 16, 9), dtype=complex),
             g=jnp.zeros((8, 16, 9, 11), dtype=complex),
             M=10, beta_i=1.0, v_th=1.0, nu=0.01, Lambda=1.0,
             time=0.0, grid=grid,

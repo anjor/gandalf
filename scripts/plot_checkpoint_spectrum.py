@@ -118,11 +118,9 @@ def main():
     # The energy() function computes volume integrals of:
     # - Kinetic: E_kin = ∫ |∇⊥φ|²/2 dV (perpendicular flow energy)
     # - Magnetic: E_mag = ∫ |∇⊥A∥|²/2 dV (perpendicular field energy)
-    # - Compressive: E_comp = ∫ |δB∥|²/2 dV (parallel field perturbations)
     energy_dict = energy(state)
     E_mag = energy_dict["magnetic"]
     E_kin = energy_dict["kinetic"]
-    E_comp = energy_dict["compressive"]
     E_total = energy_dict["total"]
     f_mag = E_mag / E_total if E_total > 0 else 0.0
 

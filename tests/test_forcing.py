@@ -15,7 +15,6 @@ from krmhd import (
     gaussian_white_noise_fourier,
     force_alfven_modes,
     force_alfven_modes_specific,
-    force_slow_modes,
     compute_energy_injection_rate,
     gandalf_step,
     energy,
@@ -400,61 +399,6 @@ class TestAlfvenForcing:
 
         # Hermite moments should be unchanged
         assert jnp.allclose(state_forced.g, g_old)
-
-
-class TestSlowModeForcing:
-    """Test slow mode forcing (δB∥)."""
-
-    def test_B_parallel_increases(self):
-        """Slow mode forcing should increase |B∥|."""
-        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
-        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
-        key = jax.random.PRNGKey(42)
-
-        B_parallel_magnitude_old = jnp.sum(jnp.abs(state.B_parallel)**2)
-
-        state_forced, key = force_slow_modes(
-            state, amplitude=0.5, n_min=1, n_max=2, dt=0.01, key=key
-        )
-
-        B_parallel_magnitude_new = jnp.sum(jnp.abs(state_forced.B_parallel)**2)
-
-        # B∥ magnitude should increase
-        assert B_parallel_magnitude_new > B_parallel_magnitude_old
-
-    def test_independent_from_alfven_forcing(self):
-        """Slow mode forcing should not affect Elsasser variables."""
-        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
-        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.1)
-        key = jax.random.PRNGKey(42)
-
-        z_plus_old = state.z_plus.copy()
-        z_minus_old = state.z_minus.copy()
-
-        state_forced, key = force_slow_modes(
-            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
-        )
-
-        # Elsasser variables should be unchanged
-        assert jnp.allclose(state_forced.z_plus, z_plus_old)
-        assert jnp.allclose(state_forced.z_minus, z_minus_old)
-
-    def test_slow_mode_energy_injection(self):
-        """Slow mode forcing should inject energy."""
-        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
-        state = initialize_alfven_wave(grid, M=10, kz_mode=1, amplitude=0.01)
-        key = jax.random.PRNGKey(42)
-
-        E_before = energy(state)["total"]
-
-        state_forced, key = force_slow_modes(
-            state, amplitude=0.5, n_min=1, n_max=2, dt=0.01, key=key
-        )
-
-        E_after = energy(state_forced)["total"]
-
-        # Energy should increase
-        assert E_after > E_before
 
 
 class TestEnergyInjection:

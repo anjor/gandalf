@@ -85,7 +85,6 @@ class KRMHDFields(NamedTuple):
     """
     z_plus: Array
     z_minus: Array
-    B_parallel: Array
     g: Array  # Shape: [Nz, Ny, Nx//2+1, M+1]
     time: float  # Python float at public API; JAX Array inside JIT context
 
@@ -95,7 +94,6 @@ def _fields_from_state(state: KRMHDState) -> KRMHDFields:
     return KRMHDFields(
         z_plus=state.z_plus,
         z_minus=state.z_minus,
-        B_parallel=state.B_parallel,
         g=state.g,
         time=state.time,
     )
@@ -110,7 +108,6 @@ def _state_from_fields(fields: KRMHDFields, state_template: KRMHDState) -> KRMHD
     return KRMHDState(
         z_plus=fields.z_plus,
         z_minus=fields.z_minus,
-        B_parallel=fields.B_parallel,
         g=fields.g,
         M=state_template.M,
         beta_i=state_template.beta_i,
@@ -172,9 +169,6 @@ def _krmhd_rhs_jit(
         Ny,
         Nx,
     )
-
-    # Passive scalar B∥ evolution (Issue #7 - not yet implemented)
-    dB_parallel_dt = jnp.zeros_like(fields.B_parallel)
 
     # Hermite moment evolution (Issue #49 - now fully implemented!)
     # **OPTIMIZATION**: For M=0 (pure fluid mode), skip all kinetic physics computation.
@@ -247,7 +241,6 @@ def _krmhd_rhs_jit(
     return KRMHDFields(
         z_plus=dz_plus_dt,
         z_minus=dz_minus_dt,
-        B_parallel=dB_parallel_dt,
         g=dg_dt,
         time=0.0,  # Not a derivative
     )
@@ -266,7 +259,6 @@ def krmhd_rhs(
 
     Currently implements:
     - Elsasser fields: z⁺, z⁻ (Alfvénic sector)
-    - B∥: Passive parallel magnetic field (Issue #7 - not yet implemented)
     - g: Hermite moments (Issues #22-24, #49 - fully implemented!)
 
     Args:
@@ -508,7 +500,6 @@ def _gandalf_step_lawson_rk4_jit(
     fields_half = KRMHDFields(
         z_plus=z_plus_half,
         z_minus=z_minus_half,
-        B_parallel=fields.B_parallel,
         g=g_stage_2,
         time=fields.time + dt / 2.0,
     )
@@ -551,7 +542,6 @@ def _gandalf_step_lawson_rk4_jit(
     fields_half_rk4 = KRMHDFields(
         z_plus=z_plus_half,
         z_minus=z_minus_half,
-        B_parallel=fields.B_parallel,
         g=g_stage_3,
         time=fields.time + dt / 2.0,
     )
@@ -564,7 +554,6 @@ def _gandalf_step_lawson_rk4_jit(
     fields_full_rk4 = KRMHDFields(
         z_plus=z_plus_new,
         z_minus=z_minus_new,
-        B_parallel=fields.B_parallel,
         g=g_stage_4,
         time=fields.time + dt,
     )
@@ -663,7 +652,6 @@ def _gandalf_step_lawson_rk4_jit(
     return KRMHDFields(
         z_plus=z_plus_new,
         z_minus=z_minus_new,
-        B_parallel=fields.B_parallel,  # TODO: Issue #7
         g=g_new,
         time=fields.time + dt,
     )
@@ -873,7 +861,6 @@ def _gandalf_step_imex222_jit(
     fields_half = KRMHDFields(
         z_plus=z_plus_half,
         z_minus=z_minus_half,
-        B_parallel=fields.B_parallel,
         g=g_1,
         time=fields.time + dt / 2.0,
     )
@@ -956,12 +943,6 @@ def _gandalf_step_imex222_jit(
     return KRMHDFields(
         z_plus=z_plus_new,
         z_minus=z_minus_new,
-        # B_parallel is passed through unchanged, matching the Lawson path
-        # byte-for-byte (see Lawson kernel end-of-body with `TODO: Issue #7`).
-        # Slow-mode evolution is a separate, pre-existing TODO tracked in
-        # https://github.com/anjor/gandalf/issues/7 ; this PR does not change
-        # its handling in either scheme.
-        B_parallel=fields.B_parallel,
         g=g_new,
         time=fields.time + dt,
     )
