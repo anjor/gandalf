@@ -640,8 +640,23 @@ def check_hermite_convergence(
 # =============================================================================
 
 
+HERMITE_CLOSURES: tuple[str, ...] = ("zero", "symmetric")
+
+
+def validate_closure(closure: str, M: int) -> None:
+    """Raise ValueError unless `closure` is a supported closure valid for this M."""
+    if closure not in HERMITE_CLOSURES:
+        raise ValueError(
+            f"closure must be one of {HERMITE_CLOSURES} (got {closure!r})"
+        )
+    if closure == "symmetric" and M < 2:
+        raise ValueError(
+            f"closure='symmetric' requires M >= 2 (g_(M+1) = g_(M-1)), got M={M}"
+        )
+
+
 @lru_cache(maxsize=None)
-def compute_streaming_matrix(M: int, Lambda: float = 1.0):
+def compute_streaming_matrix(M: int, Lambda: float = 1.0, closure: str = "zero"):
     """
     Build the (M+1)x(M+1) parallel streaming coupling matrix T.
 
@@ -658,14 +673,24 @@ def compute_streaming_matrix(M: int, Lambda: float = 1.0):
     Note: T is NOT symmetric when Lambda != infinity due to the kinetic
     correction in the g1 equation.
 
+    The closure for the unretained g_(M+1) sets the last row:
+        "zero":      g_(M+1) = 0        -> T[M, M-1] = sqrt(M/2)
+        "symmetric": g_(M+1) = g_(M-1)  -> T[M, M-1] = sqrt(M/2) + sqrt((M+1)/2)
+    The symmetric closure breaks the symmetry of T in the last row, so the
+    unweighted sum of |g_m|^2 is no longer conserved by streaming alone; the
+    m = M boundary term must be accounted for in free-energy budgets.
+
     Args:
         M: Maximum Hermite moment index (array has M+1 moments: g0..gM)
         Lambda: Kinetic closure parameter (default 1.0)
+        closure: Truncation closure, "zero" (default) or "symmetric"
 
     Returns:
         numpy.ndarray: (M+1, M+1) coupling matrix
     """
     import numpy as np
+
+    validate_closure(closure, M)
 
     size = M + 1
     T = np.zeros((size, size), dtype=np.float64)
@@ -686,12 +711,15 @@ def compute_streaming_matrix(M: int, Lambda: float = 1.0):
             T[m, m + 1] = np.sqrt((m + 1) / 2.0)
         T[m, m - 1] = np.sqrt(m / 2.0)
 
+    if closure == "symmetric":
+        T[M, M - 1] += np.sqrt((M + 1) / 2.0)
+
     return T
 
 
 @lru_cache(maxsize=None)
 def compute_streaming_eigensystem(
-    M: int, Lambda: float = 1.0
+    M: int, Lambda: float = 1.0, closure: str = "zero"
 ) -> tuple[Array, Array, Array, Array]:
     """
     Precompute eigendecomposition of the streaming matrix T = P @ diag(evals) @ P_inv.
@@ -705,6 +733,7 @@ def compute_streaming_eigensystem(
     Args:
         M: Maximum Hermite moment index
         Lambda: Kinetic closure parameter
+        closure: Truncation closure, "zero" (default) or "symmetric"
 
     Returns:
         T_jax: (M+1, M+1) JAX array of the streaming matrix
@@ -714,7 +743,7 @@ def compute_streaming_eigensystem(
     """
     import numpy as np
 
-    T = compute_streaming_matrix(M, Lambda)
+    T = compute_streaming_matrix(M, Lambda, closure)
 
     # Use symmetric solver when T is symmetric (real eigenvalues guaranteed)
     if np.allclose(T, T.T, atol=1e-14):
@@ -778,6 +807,7 @@ def build_implicit_operator(
     M: int,
     Lambda: float,
     hyper_n: int,
+    closure: str = "zero",
 ) -> Array:
     """
     Build the per-k_z implicit operator L = -i*sqrt(beta_i)*kz*T + D.
@@ -806,11 +836,12 @@ def build_implicit_operator(
         M: Maximum Hermite moment index.
         Lambda: Kinetic closure parameter (enters T via g1 kinetic correction).
         hyper_n: Hyper-collision exponent.
+        closure: Truncation closure, "zero" (default) or "symmetric".
 
     Returns:
         L: (Nz, M+1, M+1) complex JAX array.
     """
-    T = compute_streaming_matrix(M, Lambda)  # (M+1, M+1) float64
+    T = compute_streaming_matrix(M, Lambda, closure)  # (M+1, M+1) float64
     D_diag = nu * _damping_diag(M, hyper_n)  # (M+1,) float64, zeros at m=0,1
 
     kz_np = np.asarray(kz, dtype=np.float64)

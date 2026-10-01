@@ -57,6 +57,7 @@ from krmhd.hermite import (
     build_implicit_operator,
     factor_imex_operator,
     imex_solve,
+    validate_closure,
 )
 from krmhd.spectral import derivative_x, derivative_y, rfftn_inverse
 
@@ -64,6 +65,9 @@ from krmhd.spectral import derivative_x, derivative_y, rfftn_inverse
 # =============================================================================
 # Module Constants
 # =============================================================================
+
+# Closure for the unretained g_(M+1) (see hermite.compute_streaming_matrix).
+HermiteClosure = Literal["zero", "symmetric"]
 
 # Maximum safe damping rate threshold for exp() operations
 # Beyond this value, exp(-rate) underflows to zero (causes numerical issues)
@@ -119,7 +123,7 @@ def _state_from_fields(fields: KRMHDFields, state_template: KRMHDState) -> KRMHD
     )
 
 
-@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M"])
+@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "closure"])
 def _krmhd_rhs_jit(
     fields: KRMHDFields,
     kx: Array,
@@ -135,6 +139,7 @@ def _krmhd_rhs_jit(
     Nz: int,
     Ny: int,
     Nx: int,
+    closure: str = "zero",
 ) -> KRMHDFields:
     """
     JIT-compiled RHS function operating on lightweight KRMHDFields.
@@ -235,6 +240,7 @@ def _krmhd_rhs_jit(
                 Nz,
                 Ny,
                 Nx,
+                closure=closure,
             )
             dg_dt = dg_dt.at[:, :, :, m].set(dg_dt_m)
 
@@ -250,6 +256,7 @@ def krmhd_rhs(
     state: KRMHDState,
     eta: float,
     v_A: float,
+    closure: HermiteClosure = "zero",
 ) -> KRMHDState:
     """
     Compute time derivatives for all KRMHD fields.
@@ -265,6 +272,7 @@ def krmhd_rhs(
         state: Current KRMHD state with all fields
         eta: Resistivity coefficient for dissipation
         v_A: Alfvén velocity (for normalization)
+        closure: Hermite closure for g_(M+1), "zero" (default) or "symmetric"
 
     Returns:
         KRMHDState with time derivatives (time field set to 0.0)
@@ -296,6 +304,7 @@ def krmhd_rhs(
         grid.Nz,
         grid.Ny,
         grid.Nx,
+        closure=closure,
     )
 
     # Convert back to KRMHDState (Pydantic validation at boundary)
@@ -308,7 +317,8 @@ def krmhd_rhs(
 
 
 @partial(
-    jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n", "hyper_rz"]
+    jax.jit,
+    static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n", "hyper_rz", "closure"],
 )
 def _gandalf_step_lawson_rk4_jit(
     fields: KRMHDFields,
@@ -333,6 +343,7 @@ def _gandalf_step_lawson_rk4_jit(
     streaming_eigenvalues: Array = None,
     streaming_P_T: Array = None,
     streaming_P_inv_T: Array = None,
+    closure: str = "zero",
 ) -> KRMHDFields:
     """
     JIT-compiled mixed integrating-factor timestepper.
@@ -440,6 +451,7 @@ def _gandalf_step_lawson_rk4_jit(
             Nz,
             Ny,
             Nx,
+            closure=closure,
         ).g
 
     # Streaming integrating-factor phases for Hermite moments:
@@ -469,7 +481,8 @@ def _gandalf_step_lawson_rk4_jit(
     # to remove the linear streaming term exactly. Reusing rhs_0.g here would
     # reintroduce the float32 cancellation that motivated the split path.
     rhs_0 = _krmhd_rhs_jit(
-        fields, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
+        fields, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx,
+        closure=closure,
     )
 
     # Extract ONLY nonlinear terms by subtracting linear propagation terms
@@ -509,7 +522,8 @@ def _gandalf_step_lawson_rk4_jit(
     # =========================================================================
 
     rhs_half = _krmhd_rhs_jit(
-        fields_half, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx
+        fields_half, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i, nu, Lambda, M, Nz, Ny, Nx,
+        closure=closure,
     )
 
     # Extract ONLY nonlinear terms (UNCOUPLED)
@@ -687,7 +701,9 @@ _NU_IN_IMPLICIT_OPERATOR: float = 0.0
 # baked into L_per_kz (via _damping_diag) before this JIT kernel is called.
 # Adding it here would force a needless recompile whenever hyper_n changed,
 # even though the traced graph has no direct dependence on it.
-@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_rz"])
+@partial(
+    jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_rz", "closure"]
+)
 def _gandalf_step_imex222_jit(
     fields: KRMHDFields,
     dt: float,
@@ -710,6 +726,7 @@ def _gandalf_step_imex222_jit(
     piv: Array,
     eta_z: float = 0.0,
     hyper_rz: int = 1,
+    closure: str = "zero",
 ) -> KRMHDFields:
     """
     JIT-compiled IMEX-RK222 (Ascher-Ruuth-Spiteri 1997, ARS(2,2,2)) stepper.
@@ -831,6 +848,7 @@ def _gandalf_step_imex222_jit(
             Nz,
             Ny,
             Nx,
+            closure=closure,
         ).g
 
     # Elsasser half-step. Passing nu=0.0 explicitly (not nu) makes it visible
@@ -840,7 +858,7 @@ def _gandalf_step_imex222_jit(
     # the IMEX path needs separate handling.
     rhs_0 = _krmhd_rhs_jit(
         fields, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i,
-        _NU_IN_IMPLICIT_OPERATOR, Lambda, M, Nz, Ny, Nx
+        _NU_IN_IMPLICIT_OPERATOR, Lambda, M, Nz, Ny, Nx, closure=closure,
     )
     nl_plus_0 = rhs_0.z_plus - (1j * kz_3d * fields.z_plus)
     nl_minus_0 = rhs_0.z_minus + (1j * kz_3d * fields.z_minus)
@@ -867,7 +885,7 @@ def _gandalf_step_imex222_jit(
     # nu=0.0 here for the same reason as in the half-step call above.
     rhs_half = _krmhd_rhs_jit(
         fields_half, kx, ky, kz, dealias_mask, 0.0, v_A, beta_i,
-        _NU_IN_IMPLICIT_OPERATOR, Lambda, M, Nz, Ny, Nx
+        _NU_IN_IMPLICIT_OPERATOR, Lambda, M, Nz, Ny, Nx, closure=closure,
     )
     nl_plus_half = rhs_half.z_plus - (1j * kz_3d * fields_half.z_plus)
     nl_minus_half = rhs_half.z_minus + (1j * kz_3d * fields_half.z_minus)
@@ -959,6 +977,7 @@ def gandalf_step(
     scheme: Scheme = "imex_rk222",
     eta_z: float = 0.0,
     hyper_rz: int = 1,
+    closure: HermiteClosure = "zero",
 ) -> KRMHDState:
     """
     Advance KRMHD state using the mixed GANDALF integrating-factor method.
@@ -1043,6 +1062,14 @@ def gandalf_step(
             - rz=2: Moderate parallel hyper-dissipation ∝ kz⁴
             - rz=4: Strong parallel hyper-dissipation ∝ kz⁸ (expert use)
             - rz=8: Maximum parallel hyper-dissipation ∝ kz¹⁶ (expert use)
+        closure: Hermite truncation closure for the unretained g_(M+1)
+            (default: "zero").
+            - "zero": g_(M+1) = 0 (original GANDALF behaviour)
+            - "symmetric": g_(M+1) = g_(M-1); requires M >= 2
+            Applied consistently to the explicit RHS (streaming and the
+            {Ψ, ·} field-line term at m = M), the Lawson streaming
+            eigensystem, and the IMEX implicit operator. Like `scheme`, this
+            is a per-call argument and is NOT stored on the state.
 
     Returns:
         New KRMHDState at time t + dt
@@ -1050,6 +1077,7 @@ def gandalf_step(
     Raises:
         ValueError: If hyper_r not in [1, 2, 4, 8]
         ValueError: If hyper_n not in [1, 2, 3, 4, 6]
+        ValueError: If closure is unknown, or "symmetric" with M < 2
         ValueError: If hyper_rz not in [1, 2, 4, 8]
         ValueError: If scheme not in {"lawson_rk4", "imex_rk222"}
         ValueError: If hyper-collision overflow risk detected (nu·dt >= 50, normalized;
@@ -1151,6 +1179,8 @@ def gandalf_step(
             f"scheme must be 'lawson_rk4' or 'imex_rk222' (got {scheme!r})"
         )
 
+    validate_closure(closure, state.M)
+
     # Validate M for collision operator (prevents division by zero)
     # Collision damping rate = ν·(m/M)^n requires M >= 2 for well-defined rates
     # M=0 (and M=1) are allowed for pure fluid RMHD runs when collisions are disabled (nu=0)
@@ -1251,7 +1281,7 @@ def gandalf_step(
     if scheme == "lawson_rk4":
         # Precompute Hermite streaming eigensystem for integrating factor (cached)
         _, eigenvalues, P, P_inv = compute_streaming_eigensystem(
-            state.M, state.Lambda
+            state.M, state.Lambda, closure
         )
 
         new_fields = _gandalf_step_lawson_rk4_jit(
@@ -1277,6 +1307,7 @@ def gandalf_step(
             streaming_eigenvalues=eigenvalues,
             streaming_P_T=P.T,
             streaming_P_inv_T=P_inv.T,
+            closure=closure,
         )
     else:  # scheme == "imex_rk222"
         # Build the implicit operator L(k_z) = -i*sqrt(beta_i)*kz*T + D(nu, M, hyper_n)
@@ -1289,6 +1320,7 @@ def gandalf_step(
             state.M,
             state.Lambda,
             hyper_n,
+            closure,
         )
         lu, piv = factor_imex_operator(L_per_kz, dt, _IMEX_GAMMA)
 
@@ -1314,6 +1346,7 @@ def gandalf_step(
             piv,
             eta_z=eta_z,
             hyper_rz=hyper_rz,
+            closure=closure,
         )
 
     # Convert back to KRMHDState (Pydantic validation at boundary)

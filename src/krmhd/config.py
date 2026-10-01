@@ -88,6 +88,11 @@ class PhysicsConfig(BaseModel):
         1, description="Parallel hyper-resistivity order (1, 2, 4, or 8)"
     )
 
+    # Hermite truncation closure for g_(M+1) (see timestepping.gandalf_step)
+    closure: Literal["zero", "symmetric"] = Field(
+        "zero", description="Hermite closure: 'zero' (g_(M+1)=0) or 'symmetric' (g_(M+1)=g_(M-1))"
+    )
+
     @field_validator('hyper_r')
     @classmethod
     def check_hyper_r(cls, v: int) -> int:
@@ -553,6 +558,9 @@ class SimulationConfig(BaseModel):
             lines.extend([
                 f"  Parallel (kz) dissipation: η_z = {self.physics.eta_z}, rz = {self.physics.hyper_rz}",
             ])
+
+        if self.physics.closure != "zero":
+            lines.append(f"  Hermite closure: {self.physics.closure}")
 
         lines.extend([
             "",

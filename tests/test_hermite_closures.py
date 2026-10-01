@@ -514,3 +514,147 @@ class TestClosureIntegration:
 if __name__ == "__main__":
     # Allow running tests directly
     pytest.main([__file__, "-v"])
+
+
+# ============================================================================
+# Test: Runtime Closure Selection in the Solver
+# ============================================================================
+
+
+def _linear_g_state(M: int, Lambda: float = 1.0, seed: int = 0) -> KRMHDState:
+    """z± = 0 (no nonlinearity), random dealiased g, k=0 mode zeroed."""
+    import numpy as np
+
+    grid = SpectralGrid3D.create(Nx=8, Ny=8, Nz=8)
+    shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1)
+    rng = np.random.default_rng(seed)
+    g = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(np.complex64)
+    g = g * np.asarray(grid.dealias_mask)[..., None]
+    g[0, 0, 0, :] = 0.0
+    zeros = jnp.zeros(shape[:3], dtype=jnp.complex64)
+    return KRMHDState(
+        z_plus=zeros, z_minus=zeros, g=jnp.asarray(g), M=M, beta_i=1.0,
+        v_th=1.0, nu=0.0, Lambda=Lambda, time=0.0, grid=grid,
+    )
+
+
+class TestSelectableClosure:
+    """Runtime closure selection (closure="zero" | "symmetric") in RHS and steppers."""
+
+    def test_streaming_matrix_symmetric_closure_row(self):
+        """Symmetric closure folds the g_{M+1} coupling into T[M, M-1]."""
+        import numpy as np
+        from krmhd.hermite import compute_streaming_matrix
+
+        M = 6
+        T_zero = compute_streaming_matrix(M, 1.5)
+        T_sym = compute_streaming_matrix(M, 1.5, closure="symmetric")
+
+        expected = np.sqrt(M / 2.0) + np.sqrt((M + 1) / 2.0)
+        assert T_sym[M, M - 1] == pytest.approx(expected)
+        assert T_zero[M, M - 1] == pytest.approx(np.sqrt(M / 2.0))
+        diff = T_sym - T_zero
+        diff[M, M - 1] = 0.0
+        assert np.all(diff == 0.0)
+
+    def test_gm_rhs_symmetric_matches_extended_hierarchy(self):
+        """gm_rhs(m=M, symmetric) == gm_rhs on an M+1 hierarchy with g_{M+1} := g_{M-1}."""
+        from krmhd.physics import gm_rhs, initialize_random_spectrum
+
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        M = 5
+        state = initialize_random_spectrum(grid, M=M, amplitude=0.5, seed=3)
+        key_re, key_im = jax.random.split(jax.random.PRNGKey(7))
+        g = (jax.random.normal(key_re, state.g.shape)
+             + 1j * jax.random.normal(key_im, state.g.shape)).astype(jnp.complex64)
+        g = g * grid.dealias_mask[..., None]
+        g_ext = jnp.concatenate([g, g[..., M - 1:M]], axis=-1)
+        args = (state.z_plus, state.z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask)
+
+        rhs_sym = gm_rhs(g, *args, M, 1.0, grid.Nz, grid.Ny, grid.Nx, closure="symmetric")
+        rhs_ext = gm_rhs(g_ext, *args, M, 1.0, grid.Nz, grid.Ny, grid.Nx)
+        rhs_zero = gm_rhs(g, *args, M, 1.0, grid.Nz, grid.Ny, grid.Nx)
+
+        scale = float(jnp.max(jnp.abs(rhs_ext)))
+        assert float(jnp.max(jnp.abs(rhs_sym - rhs_ext))) < 1e-5 * scale
+        assert float(jnp.max(jnp.abs(rhs_sym - rhs_zero))) > 1e-2 * scale
+
+    @pytest.mark.parametrize("closure", ["zero", "symmetric"])
+    def test_lawson_pure_streaming_matches_expm(self, closure):
+        """With z±=0 the Lawson step is exact streaming: g(dt) = expm(-i√β kz T dt) g."""
+        import numpy as np
+        import scipy.linalg
+        from krmhd.hermite import compute_streaming_matrix
+        from krmhd.timestepping import gandalf_step
+
+        M, Lambda, dt = 6, 2.236, 0.05
+        state = _linear_g_state(M, Lambda)
+        new = gandalf_step(state, dt, eta=0.0, v_A=1.0, nu=0.0,
+                           scheme="lawson_rk4", closure=closure)
+
+        T = compute_streaming_matrix(M, Lambda, closure=closure)
+        g0 = np.asarray(state.g, dtype=np.complex128)
+        expected = np.empty_like(g0)
+        for iz, kz in enumerate(np.asarray(state.grid.kz)):
+            U = scipy.linalg.expm(-1j * np.sqrt(state.beta_i) * kz * T * dt)
+            expected[iz] = g0[iz] @ U.T
+        err = np.max(np.abs(np.asarray(new.g) - expected)) / np.max(np.abs(expected))
+        assert err < 1e-4
+
+    def test_imex_pure_streaming_converges_to_symmetric_expm(self):
+        """IMEX with closure='symmetric' converges at 2nd order to the symmetric-closure propagator."""
+        import numpy as np
+        import scipy.linalg
+        from krmhd.hermite import compute_streaming_matrix
+        from krmhd.timestepping import gandalf_step
+
+        M, Lambda, t_end = 6, 2.236, 0.2
+        state = _linear_g_state(M, Lambda)
+        T = compute_streaming_matrix(M, Lambda, closure="symmetric")
+        g0 = np.asarray(state.g, dtype=np.complex128)
+        exact = np.empty_like(g0)
+        for iz, kz in enumerate(np.asarray(state.grid.kz)):
+            exact[iz] = g0[iz] @ scipy.linalg.expm(-1j * kz * T * t_end).T
+
+        errs = []
+        for n_steps in (4, 8):
+            s = state
+            for _ in range(n_steps):
+                s = gandalf_step(s, t_end / n_steps, eta=0.0, v_A=1.0, nu=0.0,
+                                 scheme="imex_rk222", closure="symmetric")
+            errs.append(np.max(np.abs(np.asarray(s.g) - exact)))
+        assert errs[1] < errs[0]
+        assert np.log2(errs[0] / errs[1]) > 1.7
+
+    def test_default_closure_is_zero(self):
+        """Omitting closure reproduces closure='zero' bit-for-bit on both schemes."""
+        from krmhd.timestepping import gandalf_step
+
+        state = _linear_g_state(M=6, Lambda=1.5)
+        for scheme in ("imex_rk222", "lawson_rk4"):
+            a = gandalf_step(state, 0.05, eta=0.0, v_A=1.0, nu=0.0, scheme=scheme)
+            b = gandalf_step(state, 0.05, eta=0.0, v_A=1.0, nu=0.0, scheme=scheme,
+                             closure="zero")
+            assert jnp.array_equal(a.g, b.g)
+
+    def test_invalid_closure_raises(self):
+        from krmhd.timestepping import gandalf_step
+
+        state = _linear_g_state(M=6)
+        with pytest.raises(ValueError, match="closure"):
+            gandalf_step(state, 0.05, eta=0.0, v_A=1.0, closure="bogus")
+
+    def test_symmetric_closure_requires_M_ge_2(self):
+        from krmhd.timestepping import gandalf_step
+
+        state = _linear_g_state(M=1)
+        with pytest.raises(ValueError, match="M"):
+            gandalf_step(state, 0.05, eta=0.0, v_A=1.0, nu=0.0, closure="symmetric")
+
+    def test_physics_config_closure_field(self):
+        from krmhd.config import PhysicsConfig
+
+        assert PhysicsConfig().closure == "zero"
+        assert PhysicsConfig(closure="symmetric").closure == "symmetric"
+        with pytest.raises(ValueError):
+            PhysicsConfig(closure="bogus")
