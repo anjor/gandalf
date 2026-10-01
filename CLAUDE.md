@@ -90,8 +90,12 @@ RMHD is an asymptotic expansion in the small parameter ε:
   - Perpendicular (x,y): Standard 2D FFT with 2/3 dealiasing
   - Parallel (z): 1D FFT for ∂/∂z operations and field line following
   - Grid structure: Nz × Ny × (Nx//2+1) in Fourier space (rfft in x)
-- **Parallel velocity**: Hermite polynomials (if fully kinetic) or fluid closure
-- **Time stepping**: GANDALF integrating factor + RK2 (exact linear propagation, 2nd-order nonlinear)
+- **Parallel velocity**: Hermite moments g_0..g_M; truncation closure for g_(M+1)
+  selectable via `closure="zero"` (default, g_(M+1)=0) or `"symmetric"` (g_(M+1)=g_(M-1))
+- **Time stepping**:
+  - Elsasser z±: integrating factor (exact linear propagation) + Lawson midpoint RK2
+  - Hermite g: `scheme="imex_rk222"` (default; ARS(2,2,2), streaming + hyper-collisions
+    implicit, advection explicit) or `"lawson_rk4"` (integrating factor + RK4)
 - **Poisson solver**: k²φ = ∇²⊥A∥ in Fourier space
 - **Field line following**: Requires full 3D for interpolation across z-planes
 
@@ -102,7 +106,7 @@ RMHD is an asymptotic expansion in the small parameter ε:
 krmhd/
 ├── spectral.py      # ✅ COMPLETE: FFT operations, derivatives, dealiasing (2D/3D)
 ├── physics.py       # ✅ COMPLETE: Poisson bracket, Elsasser RHS, Hermite moment RHS
-├── timestepping.py  # ✅ COMPLETE: GANDALF integrating factor + RK2 timestepper (includes collisions)
+├── timestepping.py  # ✅ COMPLETE: gandalf_step (IF+RK2 for z±; IMEX-RK222 or Lawson-RK4 for g), CFL
 ├── hermite.py       # ✅ COMPLETE: Hermite basis for kinetic physics
 ├── diagnostics.py   # ✅ COMPLETE: Energy spectra (1D, k⊥, k∥), history, visualization
 ├── forcing.py       # ✅ COMPLETE: Gaussian white noise forcing, energy injection diagnostics (Issue #29)
@@ -203,7 +207,7 @@ See Diagnostics section for full details on compute_turbulence_diagnostics().
 - **Energy conservation**: Modified to E(t) = E₀·exp(-2η⟨(k⊥²/k⊥²_max)^r⟩·t) for hyper-viscous decay
 - **References**:
   - Original GANDALF: damping_kernel.cu:50 (resistivity), timestep.cu:111 (collisions)
-  - This implementation: timestepping.py:366-371 (k_max calculation), :444-456 (application)
+  - This implementation: `_gandalf_step_lawson_rk4_jit` / `_gandalf_step_imex222_jit` in timestepping.py
 
 ## Validation Suite
 

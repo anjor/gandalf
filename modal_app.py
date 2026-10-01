@@ -66,7 +66,7 @@ VOLUME_NAME = os.environ.get("MODAL_VOLUME_NAME", "gandalf-results")
 
 # JAX CUDA version (configurable for different Modal GPU types)
 # CUDA 12 is the default, but CUDA 11.8 may be needed for older GPUs
-JAX_CUDA_VERSION = os.environ.get("JAX_CUDA_VERSION", "cuda12_pip")
+JAX_CUDA_VERSION = os.environ.get("JAX_CUDA_VERSION", "cuda12")
 
 # =============================================================================
 # Modal Configuration
@@ -82,21 +82,13 @@ volume = modal.Volume.from_name(
 )
 
 # Define the container image with all dependencies
-# JAX version pinning rationale:
-#   - Pinned to 0.4.x series (specifically >=0.4.20,<0.5.0)
-#   - JAX 0.5.x introduces breaking API changes:
-#     * Changed semantics for JIT compilation and static arguments
-#     * Modified vmap behavior for pytree structures
-#     * Updated PRNGKey generation (backward-incompatible)
-#     * Deprecated/removed legacy random API functions
-#   - GANDALF codebase is extensively validated against JAX 0.4.x
-#   - Upgrading to 0.5.x requires comprehensive testing and potential code changes
-#   - Conservative pinning prevents unexpected failures in production cloud runs
-#   - See: https://jax.readthedocs.io/en/latest/changelog.html for JAX 0.5.x changes
+# JAX version: no upper pin. The test suite runs in CI against the versions
+# uv.lock resolves (JAX 0.6.x on Python 3.10, 0.9.x on 3.11+), and the
+# krmhd-research production Modal runs use unpinned jax[cuda12].
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "jax[cpu]>=0.4.20,<0.5.0",  # Pin to 0.4.x series (see comment above)
+        "jax[cpu]>=0.6",
         "h5py>=3.11.0",
         "matplotlib>=3.7.0",
         "numpy>=1.24.0",
@@ -114,12 +106,11 @@ image = (
 
 # GPU image (optional - use for large simulations)
 # Note: JAX CUDA version is configurable via JAX_CUDA_VERSION environment variable
-#       (defaults to 'cuda12_pip', can override with e.g., 'cuda11_pip')
-# JAX version pinning: Same rationale as CPU image (see comment above)
+#       (defaults to 'cuda12', can override with e.g., 'cuda13')
 gpu_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        f"jax[{JAX_CUDA_VERSION}]>=0.4.20,<0.5.0",  # Pin to 0.4.x, CUDA version configurable
+        f"jax[{JAX_CUDA_VERSION}]>=0.6",  # CUDA extra configurable
         "h5py>=3.11.0",
         "matplotlib>=3.7.0",
         "numpy>=1.24.0",
