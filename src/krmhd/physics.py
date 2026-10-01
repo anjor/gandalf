@@ -34,6 +34,7 @@ from krmhd.spectral import (
     rfftn_inverse,
     dealias,
 )
+from krmhd.hermite import closure_symmetric, closure_zero
 
 
 class KRMHDState(BaseModel):
@@ -1036,7 +1037,7 @@ def g1_rhs(
     return rhs
 
 
-@partial(jax.jit, static_argnums=(7, 9, 10, 11))
+@partial(jax.jit, static_argnums=(7, 9, 10, 11), static_argnames=("closure",))
 def gm_rhs(
     g: Array,
     z_plus: Array,
@@ -1050,6 +1051,7 @@ def gm_rhs(
     Nz: int,
     Ny: int,
     Nx: int,
+    closure: str = "zero",
 ) -> Array:
     """
     Compute RHS for higher Hermite moments (m ≥ 2):
@@ -1078,20 +1080,19 @@ def gm_rhs(
         m: Moment index (2 ≤ m < M for interior moments, m = M requires closure)
         beta_i: Ion plasma beta
         Nz, Ny, Nx: Grid dimensions (static)
+        closure: Closure for the unretained gₘ₊₁ at m = M (static):
+            - "zero" (default): gₘ₊₁ = 0 (krmhd.hermite.closure_zero)
+            - "symmetric": gₘ₊₁ = gₘ₋₁ (krmhd.hermite.closure_symmetric)
+            The closure enters both the streaming and the {Ψ, ·} field-line
+            advection terms. Use krmhd.hermite.check_hermite_convergence(g) to
+            verify the truncation is valid.
 
     Returns:
         Time derivative ∂gₘ/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
 
     Warning:
-        For m = M (highest retained moment), gₘ₊₁ is assumed zero (truncation closure).
-        This is only valid when collision damping ensures gₘ is negligible.
-
-        Alternative closures are available (Issue #24):
-        - krmhd.hermite.closure_zero(g, M): Returns gₘ₊₁ = 0 (current default)
-        - krmhd.hermite.closure_symmetric(g, M): Returns gₘ₊₁ = gₘ₋₁ (better convergence)
-        - krmhd.hermite.check_hermite_convergence(g): Verify truncation is valid
-
-        TODO: Add runtime closure selection parameter to gm_rhs()
+        The closure matters only when gₘ is not negligible; with collisional
+        damping and sufficiently large M the two closures should agree.
 
     Reference:
         Thesis §2.2, Eq. 2.9
@@ -1105,9 +1106,10 @@ def gm_rhs(
     M = g.shape[3] - 1  # Maximum moment index
     if m + 1 <= M:
         gm_plus = g[:, :, :, m + 1]
+    elif closure == "symmetric":
+        gm_plus = closure_symmetric(g, M)
     else:
-        # Truncation closure: gₘ₊₁ = 0 for highest moment
-        gm_plus = jnp.zeros_like(gm)
+        gm_plus = closure_zero(g, M)
 
     # Compute Φ and Ψ
     phi = (z_plus + z_minus) / 2.0
