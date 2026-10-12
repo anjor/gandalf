@@ -18,6 +18,12 @@ Physics context:
     The forcing is white noise in time (uncorrelated between timesteps) and
     band-limited in k-space to concentrate energy injection at large scales.
 
+    Timestep scaling: each step adds the increment (amplitude/√dt)·ξ with
+    ξ ~ N(0,1), not a force multiplied by dt. The energy injected per step is
+    ∝ amplitude²/dt, so the injection rate per unit time is ∝ amplitude²/dt².
+    Halving dt at fixed amplitude raises the injection rate by 4×. Rescale
+    amplitude ∝ dt to keep the injection rate fixed when changing dt.
+
     Mode numbers n are integers (n=1,2,3,...) that correspond to physical wavenumbers
     k = 2πn/L, where L is the domain size. This eliminates confusion about 2π factors.
 
@@ -135,7 +141,7 @@ def _gaussian_white_noise_fourier_perp_lowkz_jit(
 
     Args:
         kx, ky, kz: 1D wavenumber arrays
-        amplitude: Forcing amplitude (energy injection ~ amplitude²)
+        amplitude: Forcing amplitude (injection rate ∝ amplitude²/dt², see module docstring)
         kperp_min, kperp_max: Perpendicular band limits
         kz_allowed: Boolean mask over kz (shape [Nz]) selecting allowed kz planes
         dt: Timestep
@@ -190,7 +196,7 @@ def _gaussian_white_noise_fourier_jit(
 
     Args:
         kx, ky, kz: Wavenumber arrays (broadcast-compatible shapes)
-        amplitude: Forcing amplitude (energy injection rate ~ amplitude²)
+        amplitude: Forcing amplitude (injection rate ∝ amplitude²/dt², see module docstring)
         k_min: Minimum wavenumber for forcing band
         k_max: Maximum wavenumber for forcing band
         dt: Timestep (for proper dimensional scaling)
@@ -215,8 +221,8 @@ def _gaussian_white_noise_fourier_jit(
     # Create spectral mask: force only modes with k ∈ [k_min, k_max]
     forcing_mask = (k_mag >= k_min) & (k_mag <= k_max)
 
-    # Scale amplitude by √dt for proper white noise in time
-    # Energy injection: dE/dt ~ amplitude² (independent of dt)
+    # Per-step increment (amplitude/√dt)·ξ: energy per step ∝ amplitude²/dt,
+    # so the injection rate dE/dt ∝ amplitude²/dt² (Issue #159)
     scale = amplitude / jnp.sqrt(dt)
 
     # Generate complex noise field
@@ -536,12 +542,13 @@ def gaussian_white_noise_fourier(
     Mode numbers are converted to physical wavenumbers via k = 2πn/L_min,
     where L_min = min(Lx, Ly, Lz) ensures consistency in anisotropic domains.
 
-    The noise amplitude is scaled by 1/√dt to ensure that the energy injection
-    rate ε_inj = ⟨F·u⟩ is independent of timestep size.
+    The noise is scaled by 1/√dt and added as a per-step increment. The
+    injection rate therefore scales as amplitude²/dt² and depends on the
+    timestep (see module docstring).
 
     Args:
         grid: SpectralGrid3D defining wavenumber arrays and grid dimensions
-        amplitude: Forcing amplitude (sets energy injection rate ~ amplitude²)
+        amplitude: Forcing amplitude (injection rate ∝ amplitude²/dt², see module docstring)
         n_min: Minimum mode number for forcing band (typically n=1 or n=2)
         n_max: Maximum mode number for forcing band (typically n=2 to n=5)
         dt: Timestep size (for proper white noise scaling)
@@ -566,9 +573,11 @@ def gaussian_white_noise_fourier(
     Physics:
         The forcing field F(k,t) has statistics:
         - ⟨F(k,t)⟩ = 0 (zero mean)
-        - ⟨F(k,t)F*(k',t')⟩ = amplitude² δ(t-t') δ(k-k') for modes n ∈ [n_min, n_max]
+        - Per call, ⟨|F(k)|²⟩ ∝ amplitude²/dt for modes n ∈ [n_min, n_max]
 
-        Energy injection rate: ε_inj = amplitude² × N_modes (independent of dt)
+        F is added to the state as a per-step increment, not multiplied by dt.
+        Energy per step ∝ amplitude²/dt, so ε_inj ∝ amplitude² × N_modes / dt².
+        Halving dt at fixed amplitude raises ε_inj by 4×.
 
         Mode number convention:
         - n=1: Fundamental mode (largest wavelength λ = L)
@@ -647,7 +656,7 @@ def force_alfven_modes(
 
     Args:
         state: Current KRMHD state with Elsasser variables
-        amplitude: Forcing amplitude (energy injection ~ amplitude²)
+        amplitude: Forcing amplitude (injection rate ∝ amplitude²/dt², see module docstring)
         n_min: Minimum mode number for forcing band (typically n=1 or n=2)
         n_max: Maximum mode number for forcing band (typically n=2 to n=5)
         dt: Timestep size (for white noise scaling)
@@ -1094,7 +1103,7 @@ def force_hermite_moments(
 
     Args:
         state: Current KRMHD state with Hermite moments
-        amplitude: Forcing amplitude (energy injection ~ amplitude²)
+        amplitude: Forcing amplitude (injection rate ∝ amplitude²/dt², see module docstring)
         n_min: Minimum mode number for forcing band (typically n=1 or n=2)
         n_max: Maximum mode number for forcing band (typically n=2 to n=5)
         dt: Timestep size (for white noise scaling)
@@ -1212,13 +1221,14 @@ def force_hermite_moments_specific(
     Each mode is forced with Gaussian white noise amplitude:
         amp = amplitude / sqrt(dt)
 
-    This ensures time-independent energy injection rate: dE/dt ~ amplitude²
+    The increment is added once per step, so dE/dt ∝ amplitude²/dt² and
+    depends on the timestep (see module docstring).
 
     Args:
         state: Current KRMHD state
         mode_triplets: List of (nx, ny, nz) integer mode number triplets to force
             Example: [(0, 0, 1)] for single fundamental k_z mode
-        amplitude: Forcing amplitude (sets energy injection rate ~ amplitude²)
+        amplitude: Forcing amplitude (injection rate ∝ amplitude²/dt², see module docstring)
         dt: Timestep
         key: JAX random key
         forced_moments: Tuple of Hermite moment indices to force (default: (0,) for g₀ only)
@@ -1390,8 +1400,9 @@ def compute_energy_injection_rate(
         >>> print(f"Time-averaged: {eps_inj_avg:.3e}")
 
     Physics:
-        For white noise forcing with amplitude A at N_modes:
-        ⟨ε_inj⟩ ≈ A² × N_modes (time-averaged expectation value)
+        For white noise forcing with amplitude A at N_modes, applied as a
+        per-step increment (A/√dt)·ξ:
+        ⟨ε_inj⟩ ∝ A² × N_modes / dt² (time-averaged expectation value)
 
         Individual realizations fluctuate: ε_inj(t) = ⟨ε_inj⟩ ± O(⟨ε_inj⟩)
 

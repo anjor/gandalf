@@ -43,7 +43,7 @@ class KRMHDState(BaseModel):
 
     This dataclass represents the full state of the Kinetic Reduced MHD system,
     using Elsasser variables (z⁺, z⁻) for the Alfvénic sector and Hermite moments
-    for the kinetic electron distribution function.
+    for the ion compressive (slow-mode) distribution function.
 
     All field arrays are stored in Fourier space for efficient spectral operations.
     The fields satisfy:
@@ -52,14 +52,16 @@ class KRMHDState(BaseModel):
 
     Attributes:
         z_plus: Elsasser z⁺ = φ + A∥ in Fourier space (shape: [Nz, Ny, Nx//2+1])
-            Co-propagating Alfvén wave packet along +B₀
+            Linear part ∂z⁺/∂t = +∂z z⁺: propagates toward -z (anti-parallel to B₀)
         z_minus: Elsasser z⁻ = φ - A∥ in Fourier space (shape: [Nz, Ny, Nx//2+1])
-            Counter-propagating Alfvén wave packet along -B₀
-        g: Hermite moments of electron distribution (shape: [Nz, Ny, Nx//2+1, M+1])
-            Expansion: g(v∥) = Σ_m g_m · ψ_m(v∥/v_th)
+            Linear part ∂z⁻/∂t = -∂z z⁻: propagates toward +z (parallel to B₀)
+        g: Hermite moments of the ion compressive distribution G± of KRMHD
+            (shape: [Nz, Ny, Nx//2+1, M+1]).
+            Expansion in physicists' Hermite polynomials H_m(v∥/v_th) with
+            Maxwellian weight exp(-v∥²/v_th²)
         M: Number of Hermite moments (typically 20-30 for converged kinetics)
         beta_i: Ion plasma beta β_i = 8πn_i T_i / B₀²
-        v_th: Electron thermal velocity v_th = √(T_e/m_e)
+        v_th: Ion thermal velocity v_th = √(2T_i/m_i)
         nu: Collision frequency ν (Lenard-Bernstein operator)
         time: Simulation time
         grid: Reference to SpectralGrid3D for spatial dimensions
@@ -106,12 +108,12 @@ class KRMHDState(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    z_plus: Array = Field(description="Elsasser z+ (co-propagating wave) in Fourier space")
-    z_minus: Array = Field(description="Elsasser z- (counter-propagating wave) in Fourier space")
-    g: Array = Field(description="Hermite moments of electron distribution")
+    z_plus: Array = Field(description="Elsasser z+ (propagates toward -z) in Fourier space")
+    z_minus: Array = Field(description="Elsasser z- (propagates toward +z) in Fourier space")
+    g: Array = Field(description="Hermite moments of the ion compressive distribution G±")
     M: int = Field(ge=0, description="Number of Hermite moments (M=0: pure fluid RMHD, g has 1 slot kept zero; M>=2: kinetic with g_0..g_M)")
     beta_i: float = Field(gt=0.0, description="Ion plasma beta")
-    v_th: float = Field(gt=0.0, description="Electron thermal velocity")
+    v_th: float = Field(gt=0.0, description="Ion thermal velocity √(2T_i/m_i)")
     nu: float = Field(ge=0.0, description="Collision frequency")
     Lambda: float = Field(description="Kinetic closure parameter Λ (α = -1/Λ, can be negative)")
     time: float = Field(ge=0.0, description="Simulation time")
@@ -550,8 +552,8 @@ def physical_to_elsasser(phi: Array, A_parallel: Array) -> tuple[Array, Array]:
     Convert from physical variables (φ, A∥) to Elsasser variables (z⁺, z⁻).
 
     The Elsasser variables represent counter-propagating Alfvén wave packets:
-    - z⁺ = φ + A∥  (co-propagating wave along +B₀)
-    - z⁻ = φ - A∥  (counter-propagating wave along -B₀)
+    - z⁺ = φ + A∥  (∂z⁺/∂t = +∂z z⁺: propagates toward -z)
+    - z⁻ = φ - A∥  (∂z⁻/∂t = -∂z z⁻: propagates toward +z)
 
     This transformation diagonalizes the linear Alfvén wave dynamics and
     simplifies the nonlinear evolution equations in RMHD.
@@ -611,9 +613,9 @@ def elsasser_to_physical(z_plus: Array, z_minus: Array) -> tuple[Array, Array]:
 
     Args:
         z_plus: Elsasser z⁺ variable in Fourier space (shape: [..., Ny, Nx//2+1])
-            Represents co-propagating Alfvén wave packet along +B₀
+            Alfvén wave packet propagating toward -z
         z_minus: Elsasser z⁻ variable in Fourier space (same shape as z_plus)
-            Represents counter-propagating wave packet along -B₀
+            Alfvén wave packet propagating toward +z
 
     Returns:
         Tuple of (phi, A_parallel) in Fourier space with same shape as inputs
@@ -882,7 +884,7 @@ def z_minus_rhs(
 
 
 # =============================================================================
-# Hermite Moment RHS Functions (Kinetic Electron Response)
+# Hermite Moment RHS Functions (Ion Compressive Hierarchy G±)
 # =============================================================================
 
 
@@ -904,7 +906,7 @@ def g0_rhs(
     Compute RHS for zeroth Hermite moment: dg₀/dt + √βᵢ∇∥(g₁/√2) = 0.
 
     This implements thesis Eq. 2.7 for the density perturbation moment.
-    g₀ represents the electron density perturbation δn_e/n₀.
+    g₀ is the density moment of the ion compressive distribution G±.
 
     The full equation including convective derivatives (Eq. 2.10) is:
         [∂/∂t + {Φ,...}]g₀ + √βᵢ[∂/∂z + {Ψ,...}](g₁/√2) = 0
@@ -980,7 +982,7 @@ def g1_rhs(
     Compute RHS for first Hermite moment: dg₁/dt + √βᵢ∇∥(g₂ + (1-1/Λ)/√2·g₀) = 0.
 
     This implements thesis Eq. 2.8 for the parallel velocity moment.
-    g₁ represents the parallel electron velocity perturbation u∥_e.
+    g₁ is the parallel-velocity moment of the ion compressive distribution G±.
 
     The (1-1/Λ) term couples g₁ back to g₀, representing kinetic corrections.
 
@@ -1155,7 +1157,7 @@ def initialize_hermite_moments(
     seed: int = 42,
 ) -> Array:
     """
-    Initialize Hermite moments for electron distribution function.
+    Initialize Hermite moments of the ion compressive distribution G±.
 
     Creates initial condition for Hermite moment array g with:
     - g_0 = equilibrium (Maxwellian, corresponding to constant in velocity space)
@@ -1170,7 +1172,7 @@ def initialize_hermite_moments(
     Args:
         grid: SpectralGrid3D defining spatial dimensions
         M: Number of Hermite moments (g_0, g_1, ..., g_M)
-        v_th: Electron thermal velocity (default: 1.0)
+        v_th: Ion thermal velocity √(2T_i/m_i) (default: 1.0)
         perturbation_amplitude: Amplitude of higher moment perturbations (default: 0.0)
         seed: Random seed for perturbations (default: 42, for reproducibility)
 
@@ -1267,7 +1269,7 @@ def initialize_alfven_wave(
         ky_mode: Wavenumber in y direction (default: 0.0)
         kz_mode: Wavenumber in z (parallel) direction (default: 1.0)
         amplitude: Wave amplitude (default: 0.1, small for linear regime)
-        v_th: Electron thermal velocity (default: 1.0)
+        v_th: Ion thermal velocity √(2T_i/m_i) (default: 1.0)
         beta_i: Ion plasma beta (default: 1.0)
         nu: Collision frequency (default: 0.01)
 
@@ -1357,7 +1359,7 @@ def initialize_random_spectrum(
         amplitude: Overall amplitude scale (default: 1.0)
         k_min: Minimum wavenumber for energy injection (default: 1.0)
         k_max: Maximum wavenumber for energy injection (default: None, uses k_max/3 for dealiasing)
-        v_th: Electron thermal velocity (default: 1.0)
+        v_th: Ion thermal velocity √(2T_i/m_i) (default: 1.0)
         beta_i: Ion plasma beta (default: 1.0)
         nu: Collision frequency (default: 0.01)
         seed: Random seed for reproducibility (default: 42)
@@ -1618,7 +1620,7 @@ def initialize_orszag_tang(
             **M=20-30**: Full kinetic KRMHD. For Landau damping, phase mixing studies.
         B0: Magnetic field amplitude (default: 1/√(4π) ≈ 0.282)
             Standard Orszag-Tang normalization from original paper
-        v_th: Electron thermal velocity (default: 1.0)
+        v_th: Ion thermal velocity √(2T_i/m_i) (default: 1.0)
         beta_i: Ion plasma beta (default: 1.0)
         nu: Collision frequency (default: 0.0 for inviscid test)
             Set nu=0 with M=0 for exact energy conservation.

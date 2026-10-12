@@ -1226,6 +1226,31 @@ class TestFollowFieldLine:
         assert z_traj[0] < -grid.Lz/2 + 0.5, "Should start near z_min"
         assert z_traj[-1] > grid.Lz/2 - 0.5, "Should end near z_max"
 
+    def test_field_line_sign_matches_dynamics(self):
+        """Field lines follow b⊥ = ẑ×∇Ψ, the direction in ∇∥ = ∂z + {Ψ,·} (Issue #159).
+
+        Static Ψ = a·sin(2πx) gives b⊥ = (0, 2πa·cos(2πx)). From x = 0 the
+        line moves by dy = +2πa·Lz.
+        """
+        from krmhd.spectral import rfftn_forward
+
+        N, a = 16, 0.01
+        grid = SpectralGrid3D.create(Nx=N, Ny=N, Nz=N, Lx=1.0, Ly=1.0, Lz=1.0)
+        x = jnp.arange(N) / N
+        psi_real = jnp.broadcast_to(a * jnp.sin(2 * jnp.pi * x)[None, None, :], (N, N, N))
+        psi = rfftn_forward(psi_real)
+
+        state = KRMHDState(
+            z_plus=psi, z_minus=-psi, g=jnp.zeros((N, N, N // 2 + 1, 3), dtype=complex),
+            M=2, beta_i=1.0, v_th=1.0, nu=0.0, Lambda=1.0, time=0.0, grid=grid,
+        )
+
+        traj = follow_field_line(state, 0.0, 0.5, padding_factor=1)
+        dy = float(traj[-1, 1] - traj[0, 1])
+        expected = 2 * jnp.pi * a * grid.Lz
+
+        assert abs(dy - expected) < 0.05 * expected, f"dy = {dy}, expected +{expected}"
+
     def test_periodic_boundaries_respected(self):
         """Test that field line respects periodic boundaries in x, y."""
         grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
@@ -1379,23 +1404,21 @@ class TestHermiteFlux:
             f"Flux conservation violated: relative error = {relative_error}"
 
     def test_hermite_flux_formula(self):
-        """Test flux formula against manual calculation."""
+        """Test the ∂z part of the flux against a manual calculation (Ψ = 0)."""
         grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
 
-        # Create simple state with known moments
+        # Single kz mode in g1 and g2 so the m=1 link has a nonzero k_z part
         g = jnp.zeros((8, 16, 9, 6), dtype=complex)
+        g = g.at[1, 0, 0, 1].set(1.0 + 0.0j)
+        g = g.at[1, 0, 0, 2].set(0.0 + 1.0j)
 
-        # Set g0 and g1 to simple values for testing
-        # g0[0,0,0] = 1+0j, g1[0,0,0] = 0+1j
-        g = g.at[0, 0, 0, 0].set(1.0 + 0.0j)
-        g = g.at[0, 0, 0, 1].set(0.0 + 1.0j)
-
+        beta_i = 2.0
         state = KRMHDState(
             z_plus=jnp.zeros((8, 16, 9), dtype=complex),
             z_minus=jnp.zeros((8, 16, 9), dtype=complex),
             g=g,
             M=5,
-            beta_i=1.0,
+            beta_i=beta_i,
             v_th=1.0,
             nu=0.01,
             Lambda=1.0,
@@ -1407,20 +1430,83 @@ class TestHermiteFlux:
 
         flux = hermite_flux(state)
 
-        # Manual calculation for m=0 transition at k=(0,0,0)
-        # Γ₀ = -k∥·√(2·1)·Im[g₁·g₀*]
-        # g₀ = 1, g₁ = i
-        # g₁·g₀* = i·1* = i
-        # Im[i] = 1
-        # k∥ = kz[0] (should be 0 or small)
-        k_parallel = grid.kz[0]
-        coupling = jnp.sqrt(2.0 * 1)
-        expected_flux_00 = -k_parallel * coupling * 1.0
+        # F = √βᵢ·√((m+1)/2)·Re[gₘ*·i k_z gₘ₊₁] at m=1:
+        # g₁ = 1, g₂ = i → Re[1·i k_z·i] = -k_z
+        kz = grid.kz[1]
+        expected = jnp.sqrt(beta_i) * 1.0 * (-kz)
 
-        computed_flux_00 = flux[0, 0, 0, 0]
+        assert jnp.allclose(flux[1, 0, 0, 1], expected, atol=1e-5), \
+            f"Flux formula mismatch: {flux[1, 0, 0, 1]} != {expected}"
 
-        assert jnp.allclose(computed_flux_00, expected_flux_00, atol=1e-6), \
-            f"Flux formula mismatch: {computed_flux_00} != {expected_flux_00}"
+        # Λ = 1 → p₀ = 0: the g₀ → g₁ link carries no free energy
+        assert jnp.allclose(flux[..., 0], 0.0)
+
+    @pytest.mark.parametrize("Lambda", [-2.0, 3.0])
+    def test_hermite_flux_closes_free_energy_budget(self, Lambda):
+        """Per-moment budget d/dt ½pₘ⟨|gₘ|²⟩ = F_{m-½} - F_{m+½} (Issue #159).
+
+        With φ = 0 and Ψ ≠ 0, the budget closes only if the flux includes the
+        {Ψ, ·} part of ∇∥. Fields are restricted to low k so the
+        pseudo-spectral products are exact.
+        """
+        from krmhd.diagnostics import hermite_flux
+        from krmhd.physics import g0_rhs, g1_rhs, gm_rhs
+        from krmhd.spectral import rfftn_forward
+
+        N, M, beta_i = 16, 4, 1.5
+        grid = SpectralGrid3D.create(Nx=N, Ny=N, Nz=N, Lx=1.0, Ly=1.0, Lz=1.0)
+        key = jax.random.PRNGKey(0)
+
+        # Keep |n| ≤ 2 in every direction: cubic products stay below N/2
+        nx = jnp.fft.rfftfreq(N, 1.0 / N)
+        ny = jnp.fft.fftfreq(N, 1.0 / N)
+        low = (jnp.abs(ny)[None, :, None] <= 2) & (jnp.abs(ny)[:, None, None] <= 2) \
+            & (nx[None, None, :] <= 2)
+        low = low.at[0, 0, 0].set(False)
+
+        def random_field(k):
+            f = rfftn_forward(jax.random.normal(k, (N, N, N)))
+            return jnp.where(low, f, 0.0)
+
+        keys = jax.random.split(key, M + 2)
+        psi = 0.5 * random_field(keys[0])
+        g = jnp.stack([random_field(keys[i + 1]) for i in range(M + 1)], axis=-1)
+
+        state = KRMHDState(
+            z_plus=psi, z_minus=-psi, g=g, M=M, beta_i=beta_i,
+            v_th=1.0, nu=0.0, Lambda=Lambda, time=0.0, grid=grid,
+        )
+
+        args = (state.z_plus, state.z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask)
+        rhs = [g0_rhs(g, *args, beta_i, N, N, N), g1_rhs(g, *args, beta_i, Lambda, N, N, N)]
+        rhs += [gm_rhs(g, *args, m, beta_i, N, N, N) for m in range(2, M + 1)]
+
+        # rfft weights: kx>0 counted twice, kx=0 (and Nyquist) once
+        w = jnp.full(N // 2 + 1, 2.0).at[0].set(1.0).at[-1].set(1.0)[None, None, :]
+
+        def ksum(a):
+            return float(jnp.sum(w * a))
+
+        flux = hermite_flux(state)
+        F = [ksum(flux[..., m]) for m in range(M)]
+        p = [1.0 - 1.0 / Lambda] + [1.0] * M
+
+        for m in range(M + 1):
+            dW = p[m] * ksum(jnp.real(jnp.conj(g[..., m]) * rhs[m]))
+            F_in = F[m - 1] if m > 0 else 0.0
+            F_out = F[m] if m < M else 0.0  # closure="zero": no flux out of g_M
+            scale = max(abs(F_in), abs(F_out))
+            assert scale > 0
+            assert abs(dW - (F_in - F_out)) < 1e-5 * scale, \
+                f"m={m}: dW={dW}, F_in-F_out={F_in - F_out}"
+
+        # The {Ψ, ·} part must matter here: dropping it breaks the budget
+        state_kz = KRMHDState(
+            z_plus=jnp.zeros_like(psi), z_minus=jnp.zeros_like(psi), g=g, M=M,
+            beta_i=beta_i, v_th=1.0, nu=0.0, Lambda=Lambda, time=0.0, grid=grid,
+        )
+        F_kz = ksum(hermite_flux(state_kz)[..., 1])
+        assert abs(F_kz - F[1]) > 1e-3 * abs(F[1])
 
 
 class TestHermiteMomentEnergy:

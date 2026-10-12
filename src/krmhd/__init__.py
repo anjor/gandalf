@@ -6,7 +6,7 @@ with kinetic effects such as Landau damping and finite Larmor radius corrections
 
 The KRMHD model describes the evolution of:
 - Active (Alfvénic) fields: stream function φ and parallel vector potential A∥
-- Kinetic sector: Hermite moments g_m of the electron distribution
+- Kinetic sector: Hermite moments g_m of the ion compressive distribution G±
 
 The compressive/slow-mode observables (δn_e, δB∥) are derived diagnostics of
 the Λ± Hermite hierarchies (thesis; dne_dbpar.cu in the original GANDALF),
@@ -20,7 +20,7 @@ Key features:
 
 Physical processes:
 - Poisson bracket nonlinearities: {f,g} = ẑ·(∇⊥f × ∇⊥g)
-- Parallel electron kinetic effects (Landau damping)
+- Parallel ion kinetic effects on slow modes (Landau damping, phase mixing)
 - Spectral energy cascade from injection to dissipation scales
 - Field line following for curved magnetic field geometry
 
