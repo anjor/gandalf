@@ -235,7 +235,7 @@ See Diagnostics section for full details on compute_turbulence_diagnostics().
 3. **Parallel gradient**: ∇∥ = ik∥ only valid for periodic boundary conditions
 4. **Initial conditions**: Must satisfy ∇·B = 0 and reality conditions
 5. **Slow mode coupling**: Any back-reaction indicates coding error
-6. **Hermitian symmetry in forcing**: When adding forcing directly in Fourier space, must explicitly enforce reality on kx=0 and kx=Nyquist planes (rfft format requirement). JAX's irfftn doesn't get called to fix violations automatically.
+6. **Hermitian symmetry in forcing**: When adding forcing directly in Fourier space, the kx=0 and kx=Nyquist planes need Hermitian pairs f(0,-ky,-kz) = f*(0,ky,kz). Taking the real part of each entry is NOT enough. Use `forcing._enforce_rfft_hermitian`. irfftn silently drops the anti-Hermitian part, but it stays in the Fourier state and pollutes diagnostics (Issue #156).
 
 ## Reference Parameters
 Typical astrophysical parameters:

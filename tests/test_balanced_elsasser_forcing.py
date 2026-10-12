@@ -19,6 +19,17 @@ from krmhd.physics import KRMHDState
 from krmhd.spectral import SpectralGrid3D
 
 
+def assert_hermitian_plane(plane, name: str) -> None:
+    """Entries at (ky, kz) and (-ky, -kz) must be complex conjugates (Issue #156).
+
+    Being real is not enough: two independent real values are conjugates only
+    if they are equal.
+    """
+    partner = jnp.roll(jnp.flip(plane, axis=(0, 1)), shift=1, axis=(0, 1))
+    assert jnp.allclose(plane, jnp.conj(partner), atol=1e-10), \
+        f"{name} violates Hermitian pairing f(-ky, -kz) = f*(ky, kz)"
+
+
 def create_zero_state(grid: SpectralGrid3D, M: int = 10) -> KRMHDState:
     """Helper to create a zero-initialized KRMHDState for testing."""
     z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=complex)
@@ -40,7 +51,7 @@ def create_zero_state(grid: SpectralGrid3D, M: int = 10) -> KRMHDState:
 
 
 def test_hermitian_symmetry_kx_zero_plane():
-    """Test that kx=0 plane is real-valued (Hermitian symmetry)."""
+    """Test that kx=0 plane holds Hermitian pairs."""
     grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
     state = create_zero_state(grid, M=10)
 
@@ -64,15 +75,13 @@ def test_hermitian_symmetry_kx_zero_plane():
     z_plus_kx0 = state_forced.z_plus[:, :, 0]
     z_minus_kx0 = state_forced.z_minus[:, :, 0]
 
-    # Imaginary parts should be zero (within numerical precision)
-    assert jnp.allclose(jnp.imag(z_plus_kx0), 0.0, atol=1e-10), \
-        "kx=0 plane in z+ has non-zero imaginary part (violates Hermitian symmetry)"
-    assert jnp.allclose(jnp.imag(z_minus_kx0), 0.0, atol=1e-10), \
-        "kx=0 plane in z- has non-zero imaginary part (violates Hermitian symmetry)"
+    assert jnp.any(jnp.abs(z_plus_kx0) > 0)
+    assert_hermitian_plane(z_plus_kx0, "kx=0 plane in z+")
+    assert_hermitian_plane(z_minus_kx0, "kx=0 plane in z-")
 
 
 def test_hermitian_symmetry_kx_nyquist_plane():
-    """Test that kx=Nyquist plane is real-valued (if Nx is even)."""
+    """Test that kx=Nyquist plane holds Hermitian pairs (if Nx is even)."""
     grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)  # Nx=32 is even
     state = create_zero_state(grid, M=10)
 
@@ -95,10 +104,8 @@ def test_hermitian_symmetry_kx_nyquist_plane():
     z_plus_nyquist = state_forced.z_plus[:, :, kx_nyquist_idx]
     z_minus_nyquist = state_forced.z_minus[:, :, kx_nyquist_idx]
 
-    assert jnp.allclose(jnp.imag(z_plus_nyquist), 0.0, atol=1e-10), \
-        "kx=Nyquist plane in z+ has non-zero imaginary part"
-    assert jnp.allclose(jnp.imag(z_minus_nyquist), 0.0, atol=1e-10), \
-        "kx=Nyquist plane in z- has non-zero imaginary part"
+    assert_hermitian_plane(z_plus_nyquist, "kx=Nyquist plane in z+")
+    assert_hermitian_plane(z_minus_nyquist, "kx=Nyquist plane in z-")
 
 
 def test_max_nz_restriction():
