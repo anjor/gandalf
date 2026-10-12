@@ -763,7 +763,10 @@ def _gandalf_step_imex222_jit(
             (I - dt·γ·L) g^(n+1) = g^n
                 + dt·(1-γ)·L·g^(1)
                 + dt·δ·N(g^n, z±^n)
-                + dt·(1-δ)·N(g^(1), z±^(n+dt/2))
+                + dt·(1-δ)·N(g^(1), z±^(γ))
+
+    where z±^(γ) = e^(±ikz·γ·dt)·[z±^n + γ·dt·NL±^n] is the Lawson
+    predictor to t+γ·dt.
 
     L and its factorization (lu, piv) are precomputed per step outside
     this JIT kernel (see gandalf_step). Hyper-collisional damping is folded
@@ -786,19 +789,18 @@ def _gandalf_step_imex222_jit(
         interaction. For eta*dt*|k_perp|^(2r) << 1 (the typical turbulence
         regime), the extra splitting error is negligible.
 
-    Known limitation — z+/- coupling time:
-        Stage B evaluates N(g^(1), z+/-^{n+dt/2}) using the Elsasser midpoint,
-        but the ARS(2,2,2) tableau places stage 2 at c=gamma*dt ~= 0.293*dt.
-        The resulting O(dt^2*|gamma-1/2|) phase mismatch in the z+/-<->g
-        cross-coupling is absorbed by the scheme's global O(dt^2) truncation,
-        and pure-g convergence remains second-order (see
-        test_imex222_order_of_accuracy_*). If future work needs sub-O(dt^2)
-        accuracy on the coupled nonlinearity, a true RK evaluation of z+/- at
-        gamma*dt would be needed. This same mismatch would propagate to any
-        time-dependent forcing term that inspects `stage_fields.time` inside
-        `_krmhd_rhs_jit` — if such forcing is added (krmhd.forcing is
-        currently time-independent), the forcing time sampled at stage B
-        will also be `t+dt/2` rather than `t+gamma*dt`.
+    z+/- coupling time (Issue #158):
+        Stage B evaluates N(g^(1), z+/-^(γ)) with z+/- sampled at t+γ·dt,
+        the same time as g^(1). z+/-^(γ) comes from an interaction-picture
+        (Lawson) forward-Euler predictor over [0, γ·dt]. That is the
+        explicit tableau's own stage-2 update applied to z+/-. Before #158,
+        stage B reused the Elsasser midpoint at t+dt/2. That left a local
+        error of O(dt²·(1/2-γ)·∂_t z·∂N/∂z), so the coupled g-z+/-
+        trajectory converged at first order only (see
+        test_imex222_coupled_g_zpm_second_order). The Elsasser full step
+        still uses its own midpoint predictor at t+dt/2. The stage-B fields
+        carry time=t+γ·dt, so a time-dependent term in `_krmhd_rhs_jit`
+        would also be sampled at the correct stage time.
     """
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
     kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
@@ -819,6 +821,9 @@ def _gandalf_step_imex222_jit(
     phase_minus_half = jnp.exp(-1j * kz_3d * dt / 2.0)
     phase_plus_full = jnp.exp(+1j * kz_3d * dt)
     phase_minus_full = jnp.exp(-1j * kz_3d * dt)
+    # Stage-B coupling time t+γ·dt (Issue #158); see the docstring.
+    phase_plus_gamma = jnp.exp(+1j * kz_3d * (_IMEX_GAMMA * dt))
+    phase_minus_gamma = jnp.exp(-1j * kz_3d * (_IMEX_GAMMA * dt))
 
     # In g's RHS (physics.g0_rhs, g1_rhs, gm_rhs), kz enters only through the
     # linear streaming term derivative_z(...) that couples m to m+/-1. The
@@ -876,7 +881,7 @@ def _gandalf_step_imex222_jit(
     rhs_1 = fields.g + (dt * _IMEX_GAMMA) * N_1
     g_1 = imex_solve(lu, piv, rhs_1)
 
-    # Elsasser midpoint RHS (needed for the full-step update and stage-2 N)
+    # Elsasser midpoint RHS (needed for the z+/- full-step update only)
     fields_half = KRMHDFields(
         z_plus=z_plus_half,
         z_minus=z_minus_half,
@@ -898,10 +903,21 @@ def _gandalf_step_imex222_jit(
     z_plus_new = phase_plus_full * fields.z_plus + phase_plus_half * dt * nl_plus_half
     z_minus_new = phase_minus_full * fields.z_minus + phase_minus_half * dt * nl_minus_half
 
-    # IMEX tableau stage 3 (c=1): N at (g^(1), z+/-^{n+dt/2}).
-    # rhs_half.g was evaluated with real kz (includes streaming); we need the
-    # nonlinear-only Hermite RHS here, so reuse compute_nl_g on the midpoint fields.
-    N_2 = compute_nl_g(fields_half)
+    # IMEX tableau stage 3 (c=1): N at (g^(1), z+/-^(γ)), both at t+γ·dt
+    # (Issue #158). z+/-^(γ) is the Lawson forward-Euler predictor over
+    # [0, γ·dt], i.e. the explicit tableau's stage-2 row applied to z+/-.
+    # Sampling z+/- at the midpoint t+dt/2 instead drops the coupled g-z+/-
+    # trajectory to first order. Reuses nl_plus_0/nl_minus_0, so no extra
+    # RHS evaluation. compute_nl_g strips streaming (kz=0), unlike rhs_half.g.
+    z_plus_gamma = phase_plus_gamma * (fields.z_plus + (dt * _IMEX_GAMMA) * nl_plus_0)
+    z_minus_gamma = phase_minus_gamma * (fields.z_minus + (dt * _IMEX_GAMMA) * nl_minus_0)
+    fields_gamma = KRMHDFields(
+        z_plus=z_plus_gamma,
+        z_minus=z_minus_gamma,
+        g=g_1,
+        time=fields.time + _IMEX_GAMMA * dt,
+    )
+    N_2 = compute_nl_g(fields_gamma)
 
     # Explicit L*g^(1) mat-vec (per-kz; (M+1, M+1) @ (M+1,) for each (ky, kx))
     L_g1 = jnp.einsum("zij,zyxj->zyxi", L_per_kz, g_1)
@@ -1039,6 +1055,9 @@ def gandalf_step(
             1e-6 per step (~5e-4 over 200 steps; see
             test_imex222_nontrivial_vA_matches_lawson). For bit-level
             reproducibility across reruns, pin `scheme=` explicitly.
+            Issue #158 moved the IMEX stage-B z+/- sample from t+dt/2 to
+            t+γ·dt. IMEX g trajectories therefore differ from pre-#158
+            runs by O(dt); z+/- trajectories are unchanged.
         eta_z: Parallel (kz) hyper-resistivity coefficient (default: 0.0, disabled).
             Post-step multiplicative damping exp(-η_z·(kz²/kz²_max)^rz·dt)
             applied to z⁺, z⁻ AND all Hermite moments g, with kz_max at the
