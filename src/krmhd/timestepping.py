@@ -34,6 +34,7 @@ References:
     - Eqs. 2.13-2.25 - Integrating factor + RK2 timestepping
 """
 
+import functools
 import math
 import warnings
 from functools import partial
@@ -1353,10 +1354,34 @@ def gandalf_step(
     return _state_from_fields(new_fields, state)
 
 
+@functools.lru_cache(maxsize=64)
+def _streaming_eigenvalue_extremes(
+    M: int, Lambda: float, closure: str
+) -> Tuple[float, float, float]:
+    """Extreme eigenvalues of the Hermite ladder matrix T (Issue #157).
+
+    Returns (λ_lo, λ_hi, |λ|_complex): the smallest and largest real
+    eigenvalues of compute_streaming_matrix(M, Λ, closure), and the largest
+    modulus among complex eigenvalues (0.0 if all are real). Complex pairs
+    appear only for Λ in (0, 1), where the g0-g1 block turns oscillatory;
+    they sit near zero and never set the bound in practice.
+    """
+    import numpy as np
+
+    eigs = np.linalg.eigvals(compute_streaming_matrix(M, Lambda, closure))
+    is_real = np.abs(eigs.imag) <= 1e-10 * max(1.0, np.abs(eigs).max())
+    real_eigs = eigs.real[is_real]
+    lam_lo = float(real_eigs.min()) if real_eigs.size else 0.0
+    lam_hi = float(real_eigs.max()) if real_eigs.size else 0.0
+    lam_complex = float(np.abs(eigs[~is_real]).max()) if (~is_real).any() else 0.0
+    return lam_lo, lam_hi, lam_complex
+
+
 def compute_cfl_timestep(
     state: KRMHDState,
     v_A: float,
     cfl_safety: float = 0.3,
+    closure: HermiteClosure = "zero",
 ) -> float:
     """
     Compute maximum stable timestep from CFL condition.
@@ -1369,15 +1394,21 @@ def compute_cfl_timestep(
     where C is a safety factor (typically 0.1-0.5 for RK2/RK4) and v_max is
     the maximum signal speed in the system:
 
-        v_max = max(v_A, max|∇⊥z⁺|, max|∇⊥z⁻|, √β_i · max|∇⊥Ψ|)
+        v_max = max(v_A, max|∇⊥z⁺|, max|∇⊥z⁻|, v_g)
 
-    with the field-line term √β_i·|∇⊥Ψ| included only when Hermite moments
-    are evolved (M > 0).
+    where, when Hermite moments are evolved (M > 0),
+
+        v_g = max_j max|∇⊥(Φ + √β_i λ_j Ψ)|
+
+    with λ_j the eigenvalues of the Hermite ladder matrix T
+    (hermite.compute_streaming_matrix). See Physics below.
 
     Args:
         state: Current KRMHD state (used to compute max velocity)
         v_A: Alfvén velocity (parallel wave speed)
         cfl_safety: Safety factor C ∈ (0, 1), default 0.3
+        closure: Hermite closure used by the time stepper, "zero" (default)
+            or "symmetric". It changes the eigenvalues of T and hence v_g.
 
     Returns:
         Maximum safe timestep dt
@@ -1397,10 +1428,15 @@ def compute_cfl_timestep(
           arbitrary factor in imbalanced states: for z⁺ = -z⁻, φ ≡ 0
           identically while the nonlinear advection (from Ψ = (z⁺-z⁻)/2)
           remains finite.
-        - Hermite moments g are advected perpendicular by φ AND streamed
-          along perturbed field lines via the √β_i·{Ψ, ·} term — an
-          effective perpendicular advection at speed √β_i·|∇⊥Ψ|, which
-          exceeds the Elsasser bound max|∇⊥z±| when β_i > ~1.
+        - Hermite moments g obey ∂g/∂t + {Φ, g} + √β_i {Ψ, T g} + ... = 0.
+          In the eigenbasis of T each eigencombination is advected by the
+          stream function Φ + √β_i λ_j Ψ. The largest |λ_j| grows like
+          √(2M) (≈ 4.9 at M = 16, 15.4 at M = 128), so a bound using
+          √β_i·|∇⊥Ψ| alone underestimates the speed by up to λ_max
+          (Issue #157). Since |∇⊥(Φ + λΨ)|² is convex in λ, the max over
+          real λ_j is attained at the extreme eigenvalues, so only two
+          gradient magnitudes are evaluated. Complex eigenvalues (Λ < 1)
+          use the triangle bound |∇⊥Φ| + √β_i |λ| |∇⊥Ψ|.
         - CFL violation → exponential instability. An eroding CFL margin as
           forced runs grow in amplitude is a candidate mechanism for the
           late-time blowups of Issue #136.
@@ -1417,12 +1453,18 @@ def compute_cfl_timestep(
     dz = grid.Lz / grid.Nz
     min_spacing = min(dx, dy, dz)
 
-    def max_perp_gradient(field: Array) -> Array:
-        """Max over real space of |∇⊥f| for a Fourier-space field f."""
+    def perp_gradient(field: Array) -> Tuple[Array, Array]:
+        """Real-space (∂x f, ∂y f) for a Fourier-space field f."""
         df_dx = derivative_x(field, grid.kx)
         df_dy = derivative_y(field, grid.ky)
-        df_dx_real = rfftn_inverse(df_dx, grid.Nz, grid.Ny, grid.Nx)
-        df_dy_real = rfftn_inverse(df_dy, grid.Nz, grid.Ny, grid.Nx)
+        return (
+            rfftn_inverse(df_dx, grid.Nz, grid.Ny, grid.Nx),
+            rfftn_inverse(df_dy, grid.Nz, grid.Ny, grid.Nx),
+        )
+
+    def max_perp_gradient(field: Array) -> Array:
+        """Max over real space of |∇⊥f| for a Fourier-space field f."""
+        df_dx_real, df_dy_real = perp_gradient(field)
         return jnp.sqrt(df_dx_real**2 + df_dy_real**2).max()
 
     # Elsasser cross-advection speeds: z± is advected by ẑ×∇z∓, so both
@@ -1435,11 +1477,34 @@ def compute_cfl_timestep(
     v_max = jnp.maximum(v_A, jnp.maximum(v_z_plus_max, v_z_minus_max))
 
     if state.M > 0:
-        # Field-line streaming of Hermite moments: √β_i·{Ψ, g} acts as
-        # perpendicular advection at speed √β_i·|∇⊥Ψ| with Ψ = (z⁺-z⁻)/2.
+        # Hermite advection (Issue #157): each eigencombination of the ladder
+        # matrix T moves with stream function Φ + √β_i λ_j Ψ. |∇⊥(Φ + cΨ)|²
+        # is convex in c, so over real λ_j the max sits at λ_lo or λ_hi.
+        validate_closure(closure, state.M)
+        lam_lo, lam_hi, lam_complex = _streaming_eigenvalue_extremes(
+            state.M, float(state.Lambda), closure
+        )
+        sqrt_beta = math.sqrt(state.beta_i)
+        Phi = (state.z_plus + state.z_minus) / 2.0
         Psi = (state.z_plus - state.z_minus) / 2.0
-        v_fieldline_max = jnp.sqrt(state.beta_i) * max_perp_gradient(Psi)
-        v_max = jnp.maximum(v_max, v_fieldline_max)
+        dPhi_dx, dPhi_dy = perp_gradient(Phi)
+        dPsi_dx, dPsi_dy = perp_gradient(Psi)
+
+        def max_speed(c: float) -> Array:
+            return jnp.sqrt(
+                (dPhi_dx + c * dPsi_dx) ** 2 + (dPhi_dy + c * dPsi_dy) ** 2
+            ).max()
+
+        v_hermite = jnp.maximum(
+            max_speed(sqrt_beta * lam_lo), max_speed(sqrt_beta * lam_hi)
+        )
+        if lam_complex > 0.0:
+            v_complex = (
+                jnp.sqrt(dPhi_dx**2 + dPhi_dy**2).max()
+                + sqrt_beta * lam_complex * jnp.sqrt(dPsi_dx**2 + dPsi_dy**2).max()
+            )
+            v_hermite = jnp.maximum(v_hermite, v_complex)
+        v_max = jnp.maximum(v_max, v_hermite)
 
     # CFL timestep
     dt_cfl = cfl_safety * min_spacing / v_max

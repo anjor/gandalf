@@ -35,6 +35,7 @@ from krmhd.physics import (
     energy,
 )
 from krmhd.timestepping import krmhd_rhs, gandalf_step, compute_cfl_timestep
+from krmhd.hermite import compute_streaming_matrix
 
 
 class TestKRMHDRHS:
@@ -454,16 +455,82 @@ class TestCFLCalculator:
         dz = grid.Lz / grid.Nz
         min_spacing = min(dx, dy, dz)
 
-        # Ψ = (z⁺ - z⁻)/2 = f, so v_fieldline = √β_i max|∇⊥f| = 3 max|∇⊥f|
+        # Ψ = (z⁺ - z⁻)/2 = f and Φ = 0, so the fastest Hermite
+        # eigencombination moves at √β_i λ_max max|∇⊥f| (Issue #157).
+        lam_max = np.abs(np.linalg.eigvals(compute_streaming_matrix(4, 1.0))).max()
         psi = (state_kinetic.z_plus - state_kinetic.z_minus) / 2.0
         grad_psi = _max_perp_gradient(psi, grid)
-        v_max_expected = jnp.sqrt(beta_i) * grad_psi
+        v_max_expected = jnp.sqrt(beta_i) * lam_max * grad_psi
 
         expected_dt = cfl_safety * min_spacing / v_max_expected
         assert jnp.isclose(dt_kinetic, expected_dt, rtol=1e-5)
 
         # Pure fluid case: only the Elsasser bound max|∇⊥z±| = max|∇⊥f| applies
-        assert jnp.isclose(dt_fluid / dt_kinetic, 3.0, rtol=1e-4)
+        assert jnp.isclose(dt_fluid / dt_kinetic, 3.0 * lam_max, rtol=1e-4)
+
+    @pytest.mark.parametrize("closure", ["zero", "symmetric"])
+    @pytest.mark.parametrize("M", [8, 32, 128])
+    def test_cfl_hermite_ladder_eigenvalue(self, M, closure):
+        """Hermite advection speed includes the largest ladder eigenvalue (Issue #157).
+
+        {Φ, g} + √β_i {Ψ, T g} advects each eigencombination of T with the
+        stream function Φ + √β_i λ_j Ψ. For a state with both Φ and Ψ nonzero,
+        dt must match the exact max_j max|∇⊥(Φ + √β_i λ_j Ψ)|, evaluated here
+        by brute force over every eigenvalue.
+        """
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=8, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        v_A = 1.0
+        cfl_safety = 0.3
+        beta_i = 1.0
+        Lambda = 5.0 ** 0.5
+
+        base = _imbalanced_state(grid, M=M, beta_i=beta_i, amplitude=1.0)
+        # Add a Φ component with a different spatial pattern so the λ > 0 and
+        # λ < 0 branches give different speeds.
+        x = jnp.linspace(0.0, grid.Lx, grid.Nx, endpoint=False)
+        y = jnp.linspace(0.0, grid.Ly, grid.Ny, endpoint=False)
+        z = jnp.linspace(0.0, grid.Lz, grid.Nz, endpoint=False)
+        Z, Y, X = jnp.meshgrid(z, y, x, indexing="ij")
+        phi_hat = rfftn_forward(0.7 * jnp.cos(X + Y) + 0.4 * jnp.sin(2.0 * X))
+        state = base.model_copy(update={
+            "z_plus": base.z_plus + phi_hat,
+            "z_minus": base.z_minus + phi_hat,
+            "Lambda": Lambda,
+        })
+
+        dt = compute_cfl_timestep(state, v_A, cfl_safety, closure=closure)
+
+        phi = (state.z_plus + state.z_minus) / 2.0
+        psi = (state.z_plus - state.z_minus) / 2.0
+        eigs = np.linalg.eigvals(compute_streaming_matrix(M, Lambda, closure)).real
+        v_hermite = max(
+            _max_perp_gradient(phi + np.sqrt(beta_i) * lam * psi, grid) for lam in eigs
+        )
+        v_elsasser = max(
+            _max_perp_gradient(state.z_plus, grid),
+            _max_perp_gradient(state.z_minus, grid),
+        )
+        v_max = max(v_A, v_elsasser, v_hermite)
+        assert v_hermite > v_elsasser  # the ladder term sets the bound
+
+        min_spacing = min(grid.Lx / grid.Nx, grid.Ly / grid.Ny, grid.Lz / grid.Nz)
+        assert jnp.isclose(dt, cfl_safety * min_spacing / v_max, rtol=1e-4)
+
+    def test_cfl_hermite_complex_eigenvalues(self):
+        """Λ < 1 gives complex ladder eigenvalues; dt stays finite and bounded."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=8, Lx=2*jnp.pi, Ly=2*jnp.pi, Lz=2*jnp.pi)
+        base = _imbalanced_state(grid, M=16, beta_i=1.0, amplitude=1.0)
+        state = base.model_copy(update={"Lambda": 0.5})
+        eigs = np.linalg.eigvals(compute_streaming_matrix(16, 0.5))
+        assert np.abs(eigs.imag).max() > 1e-3  # sanity: complex pair present
+
+        dt = compute_cfl_timestep(state, v_A=1.0, cfl_safety=0.3)
+
+        psi = (state.z_plus - state.z_minus) / 2.0
+        v_bound = np.abs(eigs).max() * _max_perp_gradient(psi, grid)
+        min_spacing = min(grid.Lx / grid.Nx, grid.Ly / grid.Ny, grid.Lz / grid.Nz)
+        assert np.isfinite(dt)
+        assert jnp.isclose(dt, 0.3 * min_spacing / v_bound, rtol=1e-4)
 
 
 class TestAlfvenWavePropagation:

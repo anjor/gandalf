@@ -140,7 +140,8 @@ def run_simulation(
         dt_cfl = compute_cfl_timestep(
             state,
             v_A=config.physics.v_A,
-            cfl_safety=config.time_integration.cfl_safety
+            cfl_safety=config.time_integration.cfl_safety,
+            closure=config.physics.closure,
         )
 
         # Error on severe CFL violations (>10× CFL limit)
@@ -167,7 +168,8 @@ def run_simulation(
         dt = compute_cfl_timestep(
             state,
             v_A=config.physics.v_A,
-            cfl_safety=config.time_integration.cfl_safety
+            cfl_safety=config.time_integration.cfl_safety,
+            closure=config.physics.closure,
         )
         if verbose:
             print(f"CFL timestep: dt = {dt:.6e}")
