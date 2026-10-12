@@ -73,7 +73,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import numpy as np
 
-from krmhd.physics import KRMHDState, energy as compute_energy
+from krmhd.physics import KRMHDState, energy as compute_energy, poisson_bracket_3d
 from krmhd.spectral import (
     SpectralGrid3D,
     rfftn_inverse,
@@ -1410,7 +1410,7 @@ def compute_magnetic_field_components(
     Compute magnetic field components B = (Bx, By, Bz) on fine grid.
 
     Computes the full 3D magnetic field including:
-    - Perpendicular components from vector potential: B⊥ = ∇ × (Ψ ẑ)
+    - Perpendicular components from the flux function: B⊥ = ẑ × ∇Ψ
     - Parallel component: Bz = B₀ (uniform guide field)
 
     All components are computed on a spectrally-padded fine grid for
@@ -1429,7 +1429,8 @@ def compute_magnetic_field_components(
         B = B₀ẑ + δB⊥
 
         where:
-        - B⊥ = ∇ × (Ψ ẑ) = (∂yΨ, -∂xΨ, 0)
+        - B⊥ = ẑ × ∇Ψ = (-∂yΨ, ∂xΨ, 0), so that B⊥·∇⊥f = {Ψ, f} and
+          ∇∥ = ∂z + {Ψ, ·} as in the Elsasser and Hermite RHS
         - Bz = B₀ (the δB∥ fluctuation is taken to be zero)
 
         Here Ψ = (z⁺ - z⁻)/2 is the parallel vector potential (up to normalization).
@@ -1458,11 +1459,12 @@ def compute_magnetic_field_components(
     # Compute Ψ = (z⁺ - z⁻)/2 (parallel vector potential)
     Psi = (state.z_plus - state.z_minus) / 2.0
 
-    # Compute perpendicular B components: B⊥ = ∇ × (Ψ ẑ)
-    # Bx = ∂yΨ
-    # By = -∂xΨ
-    Bx_fourier = derivative_y(Psi, grid.ky)
-    By_fourier = -derivative_x(Psi, grid.kx)
+    # Compute perpendicular B components: B⊥ = ẑ × ∇Ψ, matching the dynamics'
+    # ∇∥ = ∂z + {Ψ, ·} = ∂z + B⊥·∇⊥ with {f, g} = ∂xf ∂yg - ∂yf ∂xg (Issue #159)
+    # Bx = -∂yΨ
+    # By = ∂xΨ
+    Bx_fourier = -derivative_y(Psi, grid.ky)
+    By_fourier = derivative_x(Psi, grid.kx)
 
     # Pad and transform perpendicular components to real space
     Bx_fine = spectral_pad_and_ifft(Bx_fourier, padding_factor)
@@ -2328,45 +2330,46 @@ def plot_parallel_spectrum_comparison(
 
 def hermite_flux(state: KRMHDState) -> Array:
     """
-    Compute Hermite moment flux Γₘ,ₖ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ].
+    Compute the per-mode Hermite free-energy flux from moment m to m+1.
 
-    The Hermite flux measures energy transfer between adjacent moments in
-    velocity space. It diagnoses phase mixing (fine-scale generation in v∥)
-    versus phase unmixing (coarse-graining in v∥).
+        F_{m+½,k} = √βᵢ · pₘ · √((m+1)/2) · Re[gₘ*(k) · (∇∥gₘ₊₁)(k)]
+
+    with the full field-line derivative ∇∥ = ∂z + {Ψ, ·} and Ψ = (z⁺ - z⁻)/2.
+    The weights are p₀ = 1 - 1/Λ and pₘ = 1 for m ≥ 1.
 
     Args:
         state: KRMHD state with Hermite moments g[Nz, Ny, Nx//2+1, M+1]
 
     Returns:
         flux: Hermite flux array, shape [Nz, Ny, Nx//2+1, M]
-              flux[:,:,:,m] is the energy flux from moment m to m+1
+              flux[:,:,:,m] is the free-energy flux from moment m to m+1
               Positive flux → phase mixing (energy flows to higher m)
               Negative flux → phase unmixing (energy flows back to lower m)
 
     Physics:
-        The Hermite flux appears in the energy conservation equation for
-        each moment (Thesis §2.5.3, Eq 2.30):
+        The hierarchy evolved by physics.g0_rhs/g1_rhs/gm_rhs couples
+        moments m and m+1 through √βᵢ·√((m+1)/2)·∇∥ (with the (1 - 1/Λ)
+        factor on the g₁ ← g₀ link). The free energy
+        W = ½[(1 - 1/Λ)|g₀|² + Σ_{m≥1} |gₘ|²] then obeys, per moment,
 
-            ∂|gₘ|²/∂t = ... + (Γₘ₋₁ - Γₘ) + ...
+            d/dt ½pₘ⟨|gₘ|²⟩ = F_{m-½} - F_{m+½} + (advection, dissipation)
 
-        where Γₘ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ] is the flux from m to m+1.
+        with F_{m+½} = Σₖ w_k F_{m+½,k} (w_k the rfft mode weights). The
+        {Φ, ·} advection term integrates to zero over the box.
 
-        Conservation: In the absence of external sources/sinks,
-        ∑ₖ Γₘ,ₖ = 0 for each m (energy flows through moment space).
+        Both parts of ∇∥ are needed. The ∂z part alone, ik_z gₘ₊₁, gives
+        -k_z·Im[gₘ₊₁·gₘ*]. The {Ψ, ·} part carries the transfer along the
+        perturbed field and is comparable to the backward flux once the
+        turbulence is not weak (Issue #159).
 
         Phase mixing cascade:
-        - Positive Γₘ: Energy flows from m → m+1 (fine-scale generation)
-        - Negative Γₘ: Energy flows from m+1 → m (coarse-graining)
-        - Net direction determined by competition between:
-          * Phase mixing: Landau damping, free streaming
-          * Phase unmixing: Nonlinear advection, "anti-phase-mixing"
+        - Positive F: Energy flows from m → m+1 (fine-scale generation)
+        - Negative F: Energy flows from m+1 → m (coarse-graining)
 
     Example:
         >>> flux = hermite_flux(state)
-        >>> # Total flux at each moment transition
-        >>> flux_total = jnp.sum(jnp.abs(flux)**2, axis=(0,1,2))  # [M]
-        >>> # Flux should be real (imaginary part of complex product)
-        >>> assert jnp.isrealobj(flux)
+        >>> # Net flux through each moment transition
+        >>> flux_net = jnp.sum(flux, axis=(0, 1, 2))  # [M]
 
     References:
         - Thesis §2.5.3, Eq 2.30 - Hermite moment flux definition
@@ -2376,40 +2379,37 @@ def hermite_flux(state: KRMHDState) -> Array:
           "A solvable model of Vlasov-kinetic plasma turbulence"
 
     Note:
-        - Uses k∥ = kz (simple parallel wavenumber in z-direction)
-        - For curved field lines, k∥ should be computed along field lines
-          (Issue #25 infrastructure available, future enhancement)
-        - Flux is real-valued (imaginary part of gₘ₊₁·g*ₘ)
-        - Shape: [Nz, Ny, Nx//2+1, M] for M moment transitions
-        - Vectorized implementation for JIT compilation performance
+        - The per-mode values are not rfft-weighted. Weight kx>0 modes by 2
+          (kx=0 and Nyquist by 1) when summing over k.
+        - Flux is real-valued.
+        - Shape: [Nz, Ny, Nx//2+1, M] for M moment transitions.
+        - Cost: one Poisson bracket per moment transition.
     """
     grid = state.grid
     M = state.M  # Number of moments (g has shape [..., M+1])
 
-    # Get parallel wavenumber k∥ = kz
-    # Shape: [Nz, 1, 1, 1] for broadcasting
-    k_parallel = grid.kz[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
-
-    # Vectorized computation over all moments
-    # Extract all adjacent moment pairs using slicing
-    g_m = state.g[:, :, :, :-1]       # Shape: [Nz, Ny, Nx//2+1, M]
+    g_m = state.g[:, :, :, :-1]        # Shape: [Nz, Ny, Nx//2+1, M]
     g_m_plus_1 = state.g[:, :, :, 1:]  # Shape: [Nz, Ny, Nx//2+1, M]
 
-    # Compute coupling factors for all moments: √(2(m+1))
-    m_indices = jnp.arange(M)  # Shape: [M]
-    coupling = jnp.sqrt(2.0 * (m_indices + 1))  # Shape: [M]
+    # ∇∥gₘ₊₁ = ∂z gₘ₊₁ + {Ψ, gₘ₊₁}
+    psi = (state.z_plus - state.z_minus) / 2.0
+    k_parallel = grid.kz[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
+    grad_z = 1j * k_parallel * g_m_plus_1
+    bracket_psi = jax.vmap(
+        lambda h: poisson_bracket_3d(
+            psi, h, grid.kx, grid.ky, grid.Nz, grid.Ny, grid.Nx, grid.dealias_mask
+        ),
+        in_axes=-1,
+        out_axes=-1,
+    )(g_m_plus_1)
+    grad_par = grad_z + bracket_psi
 
-    # Broadcast coupling to match flux shape: [1, 1, 1, M]
-    coupling = coupling[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
+    # Link coefficient √βᵢ·pₘ·√((m+1)/2), with p₀ = 1 - 1/Λ, pₘ = 1 (m ≥ 1)
+    m_indices = jnp.arange(M)
+    p_m = jnp.where(m_indices == 0, 1.0 - 1.0 / state.Lambda, 1.0)
+    coupling = jnp.sqrt(state.beta_i) * p_m * jnp.sqrt((m_indices + 1) / 2.0)
 
-    # Compute complex product gₘ₊₁·g*ₘ for all moments
-    product = g_m_plus_1 * jnp.conj(g_m)  # Shape: [Nz, Ny, Nx//2+1, M]
-
-    # Extract imaginary part: Im[gₘ₊₁·g*ₘ]
-    im_product = jnp.imag(product)
-
-    # Compute flux for all moments: Γₘ = -k∥·√(2(m+1))·Im[gₘ₊₁·g*ₘ]
-    flux = -k_parallel * coupling * im_product  # Shape: [Nz, Ny, Nx//2+1, M]
+    flux = coupling * jnp.real(jnp.conj(g_m) * grad_par)  # [Nz, Ny, Nx//2+1, M]
 
     return flux
 

@@ -2,8 +2,8 @@
 Hermite basis functions for kinetic velocity-space representation.
 
 This module implements orthonormal Hermite functions (quantum harmonic oscillator
-eigenfunctions) for expanding the electron distribution function along the parallel
-direction:
+eigenfunctions) for expanding the ion compressive distribution G± of KRMHD in
+parallel velocity:
 
     g(v∥) = Σ_m g_m · ψ_m(v∥/v_th)
 
@@ -28,8 +28,14 @@ automatic differentiation compatibility.
 Physical context (Thesis §2.2, Eq 2.1):
 The Hermite representation captures Landau damping and phase mixing in
 velocity space, essential for kinetic plasma physics. The orthonormal basis
-with Maxwellian weight exp(-v²/2) ensures proper treatment of the thermal
-distribution and enables efficient moment truncation.
+ensures proper treatment of the thermal distribution and enables efficient
+moment truncation.
+
+Normalization: v = v∥/v_th with v_th = √(2T_i/m_i), so the Maxwellian weight is
+exp(-v∥²/v_th²) = exp(-v²). Each ψ_m carries half of it, exp(-v²/2). The
+streaming coefficients √((m+1)/2), √(m/2) in physics.gm_rhs follow from
+v·H_m = H_{m+1}/2 + m·H_{m-1} in this normalization. The least-damped
+eigenvalue of the hierarchy then converges to the root of Λ = 1 + ζZ(ζ).
 """
 
 from functools import lru_cache, partial
@@ -45,7 +51,8 @@ def hermite_normalization(m: int) -> Array:
     """
     Compute normalization constant for orthonormal Hermite functions.
 
-    Returns 1/√(2^m · m! · √π) for Hermite functions with Maxwellian weight exp(-v²/2).
+    Returns 1/√(2^m · m! · √π) for Hermite functions ψ_m = N_m·H_m(v)·exp(-v²/2)
+    (half of the Maxwellian weight exp(-v²), v = v∥/v_th, v_th = √(2T_i/m_i)).
 
     These are the standard quantum harmonic oscillator wavefunctions and satisfy:
         ∫ ψ_m(v) · ψ_n(v) dv = δ_{mn}
@@ -193,7 +200,7 @@ def hermite_basis_function(m: int, v: Array, v_th: float = 1.0) -> Array:
     Args:
         m: Basis function order
         v: Velocity values
-        v_th: Thermal velocity (default 1.0)
+        v_th: Ion thermal velocity √(2T_i/m_i) (default 1.0)
 
     Returns:
         Normalized Hermite function ψ_m(v)

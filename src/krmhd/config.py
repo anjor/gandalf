@@ -72,7 +72,13 @@ class PhysicsConfig(BaseModel):
     eta: float = Field(0.01, ge=0, description="Resistivity coefficient")
     nu: float = Field(0.01, ge=0, description="Collision frequency")
     beta_i: float = Field(1.0, gt=0, description="Ion plasma beta")
-    Lambda: float = Field(1.0, gt=0, description="Kinetic parameter Λ (controls kinetic vs adiabatic response, thesis Eq. 2.9)")
+    Lambda: float = Field(
+        1.0,
+        description=(
+            "Kinetic parameter Λ (thesis Eq. 2.9). Both compressive branches are "
+            "allowed: Λ⁺ ≥ 1 and Λ⁻ < 0. 0 ≤ Λ < 1 is rejected."
+        ),
+    )
 
     # Hyper-dissipation parameters (Issue #28)
     # Constraints match timestepping.py:564 and timestepping.py:570
@@ -92,6 +98,24 @@ class PhysicsConfig(BaseModel):
     closure: Literal["zero", "symmetric"] = Field(
         "zero", description="Hermite closure: 'zero' (g_(M+1)=0) or 'symmetric' (g_(M+1)=g_(M-1))"
     )
+
+    @field_validator('Lambda')
+    @classmethod
+    def check_Lambda(cls, v: float) -> float:
+        """Reject 0 ≤ Λ < 1, where the Hermite hierarchy is linearly unstable.
+
+        The free-energy weight on g₀ is 1 - 1/Λ. It is non-negative for Λ ≥ 1
+        and positive for Λ < 0. For 0 < Λ < 1 it is negative, and the Penrose
+        criterion on 1 - (1 + ζZ(ζ))/Λ gives an unstable root. Λ = 0 is singular.
+        The second compressive branch Λ⁻ = -τ/Z + 1/β_i - √((1+τ/Z)² + 1/β_i²)
+        is negative, so negative Λ must be accepted.
+        """
+        if 0.0 <= v < 1.0:
+            raise ValueError(
+                f"Lambda must satisfy Λ ≥ 1 or Λ < 0 (got {v}). "
+                "For 0 < Λ < 1 the Hermite hierarchy is linearly unstable; Λ = 0 is singular."
+            )
+        return v
 
     @field_validator('hyper_r')
     @classmethod

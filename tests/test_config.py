@@ -165,6 +165,18 @@ class TestPhysicsConfig:
         assert "hyper_n must be 1, 2, 3, 4, or 6" in str(exc_info.value)
 
 
+    @pytest.mark.parametrize("Lambda", [1.0, 2.5, -2.236, -0.5])
+    def test_Lambda_both_branches_allowed(self, Lambda):
+        """Λ⁺ ≥ 1 and negative Λ⁻ are both valid (Issue #159)."""
+        assert PhysicsConfig(Lambda=Lambda).Lambda == Lambda
+
+    @pytest.mark.parametrize("Lambda", [0.0, 0.5, 0.999])
+    def test_Lambda_unstable_range_rejected(self, Lambda):
+        """0 ≤ Λ < 1 is linearly unstable or singular and must be rejected."""
+        with pytest.raises(ValueError, match="Lambda"):
+            PhysicsConfig(Lambda=Lambda)
+
+
 class TestInitialConditionConfig:
     """Tests for InitialConditionConfig model."""
 
