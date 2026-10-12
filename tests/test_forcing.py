@@ -19,8 +19,25 @@ from krmhd import (
     gandalf_step,
     energy,
 )
+import numpy as np
 from krmhd.spectral import rfftn_inverse
-from krmhd.forcing import gaussian_white_noise_fourier_perp_lowkz
+from krmhd.forcing import (
+    gaussian_white_noise_fourier_perp_lowkz,
+    gandalf_forcing_fourier,
+    _enforce_rfft_hermitian,
+)
+
+
+def _anti_hermitian_fraction(field, Nx: int) -> float:
+    """Share of stored power that irfftn discards (Issue #156).
+
+    A field is Hermitian iff rfftn(irfftn(field)) reproduces it. Whatever
+    the round trip loses is the anti-Hermitian 'ghost'.
+    """
+    f = np.asarray(field, dtype=np.complex128)
+    Nz, Ny = f.shape[:2]
+    rt = np.fft.rfftn(np.fft.irfftn(f, s=(Nz, Ny, Nx), axes=(0, 1, 2)), axes=(0, 1, 2))
+    return float(np.sum(np.abs(f - rt) ** 2) / np.sum(np.abs(f) ** 2))
 
 
 class TestGaussianWhiteNoise:
@@ -137,35 +154,54 @@ class TestGaussianWhiteNoise:
         # k=0 mode should be exactly zero
         assert noise[0, 0, 0] == 0.0 + 0.0j
 
-    def test_reality_condition_kx_zero_plane(self):
-        """kx=0 plane must be real-valued (Hermitian symmetry requirement).
+    def test_hermitian_pairs_kx_zero_plane(self):
+        """kx=0 (and Nyquist) entries must be Hermitian pairs, not merely real.
 
-        This is a DIRECT test of Hermitian symmetry enforcement in Fourier space,
-        not relying on irfftn to fix violations. Critical because forcing is applied
-        directly in Fourier space without inverse transform.
+        (0, ky, kz) pairs with (0, -ky, -kz). Taking the real part of each
+        entry leaves ~half the kx=0 power anti-Hermitian: irfftn drops it, but
+        it stays in the Fourier state (Issue #156).
         """
-        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
+        Nx = 32
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=32, Nz=16)
         key = jax.random.PRNGKey(42)
 
-        noise, key = gaussian_white_noise_fourier(
-            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
-        )
+        fields = [
+            gaussian_white_noise_fourier(
+                grid, amplitude=0.1, n_min=1, n_max=4, dt=0.01, key=key
+            )[0],
+            gandalf_forcing_fourier(
+                grid, fampl=1.0, n_min=1, n_max=4, dt=0.01, key=key
+            )[0],
+            gaussian_white_noise_fourier_perp_lowkz(
+                grid, amplitude=0.1, n_min=1, n_max=4, max_nz=1,
+                include_nz0=True, dt=0.01, key=key
+            )[0],
+        ]
+        for field in fields:
+            assert jnp.sum(jnp.abs(field[:, :, 0]) ** 2) > 0
+            assert _anti_hermitian_fraction(field, Nx) < 1e-10
 
-        # kx=0 plane (index 0 in rfft format) must have zero imaginary part
-        max_imag_kx0 = jnp.max(jnp.abs(noise[:, :, 0].imag))
-        assert max_imag_kx0 < 1e-10, (
-            f"kx=0 plane not real: max(imag) = {max_imag_kx0}. "
-            "Violates Hermitian symmetry required for real fields."
-        )
+    def test_hermitian_pairs_nyquist_plane(self):
+        """Projection must also pair entries on the Nyquist plane for even Nx."""
+        Nz, Ny, Nx = 8, 8, 8
+        rng = np.random.default_rng(0)
+        shape = (Nz, Ny, Nx // 2 + 1)
+        f = jnp.asarray(rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+        g = _enforce_rfft_hermitian(f, Nx)
+        assert _anti_hermitian_fraction(g, Nx) < 1e-12
+        # Interior kx planes are untouched
+        assert jnp.array_equal(g[:, :, 1:-1], f[:, :, 1:-1])
 
-        # kx=Nyquist plane (if exists) must also have zero imaginary part
-        if grid.Nx % 2 == 0:  # Nyquist frequency exists
-            nyquist_idx = grid.Nx // 2
-            max_imag_nyquist = jnp.max(jnp.abs(noise[:, :, nyquist_idx].imag))
-            assert max_imag_nyquist < 1e-10, (
-                f"kx=Nyquist plane not real: max(imag) = {max_imag_nyquist}. "
-                "Violates Hermitian symmetry."
-            )
+    def test_hermitian_projection_preserves_expected_power(self):
+        """Stored kx=0 power is unchanged on average versus taking the real part."""
+        N = 64
+        rng = np.random.default_rng(1)
+        shape = (N, N, N // 2 + 1)
+        f = jnp.asarray(rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+        g = _enforce_rfft_hermitian(f, N)
+        p_real = float(jnp.sum(f[:, :, 0].real ** 2))
+        p_proj = float(jnp.sum(jnp.abs(g[:, :, 0]) ** 2))
+        assert abs(p_proj / p_real - 1.0) < 0.05
 
     def test_reality_condition_inverse_transform(self):
         """Inverse transform should give real-valued field (end-to-end test)."""
@@ -654,6 +690,25 @@ class TestSpecificModeForcing:
         # Should be real (imaginary part negligible)
         assert jnp.max(jnp.abs(z_plus_real.imag)) < 1e-6
         assert jnp.max(jnp.abs(z_minus_real.imag)) < 1e-6
+
+    def test_kx_zero_mode_sets_hermitian_partner(self):
+        """A kx=0 mode must be forced together with its partner (Issue #156)."""
+        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
+        state = initialize_random_spectrum(
+            grid, M=4, alpha=5/3, amplitude=0.0, seed=0
+        )
+        key = jax.random.PRNGKey(7)
+
+        state_forced, _ = force_alfven_modes_specific(
+            state, [(0, 1, 1), (0, 1, -1), (1, 0, 1)], fampl=1.0, dt=0.005, key=key
+        )
+        forcing = state_forced.z_plus - state.z_plus
+
+        # Listed mode and its stored partner (0, -1, -1) are conjugates
+        assert jnp.abs(forcing[1, 1, 0]) > 0
+        assert jnp.allclose(forcing[-1, -1, 0], jnp.conj(forcing[1, 1, 0]))
+        assert jnp.allclose(forcing[-1, 1, 0], jnp.conj(forcing[1, -1, 0]))
+        assert _anti_hermitian_fraction(forcing, grid.Nx) < 1e-10
 
     def test_negative_kx_modes(self):
         """Should correctly handle modes with negative kx via Hermitian symmetry."""

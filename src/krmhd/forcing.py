@@ -68,6 +68,53 @@ def _mode_to_wavenumber(n: int, L: float) -> float:
     return 2.0 * jnp.pi * n / L
 
 
+def _rfft_partner(plane: Array) -> Array:
+    """
+    Value at (-kz, -ky) for every (kz, ky) entry of a [Nz, Ny] Fourier plane.
+
+    Index i maps to (-i) mod N, so flip both axes and roll by one.
+    """
+    return jnp.roll(jnp.flip(plane, axis=(0, 1)), shift=1, axis=(0, 1))
+
+
+def _enforce_rfft_hermitian(field: Array, Nx_full: int) -> Array:
+    """
+    Project the self-paired planes of an rfft field onto their Hermitian part.
+
+    In rfft storage, a mode (kx, ky, kz) with kx > 0 has its conjugate partner
+    (-kx, -ky, -kz) implied. On the kx=0 plane (and the kx=Nyquist plane for
+    even Nx) the partner (kx, -ky, -kz) is stored explicitly. Reality requires
+    f(kx, -ky, -kz) = f*(kx, ky, kz) between the two stored entries.
+
+    Taking the real part of each entry does NOT enforce this: two independent
+    real values are conjugates only if they are equal. The anti-Hermitian
+    remainder is discarded by irfftn, so the dynamics never see it, but it
+    stays in the Fourier state and every Fourier-space diagnostic counts it
+    (Issue #156).
+
+    The projection f → (f + conj(f_partner)) / 2 removes it. For independent
+    noise with equal variance at the two partners, it leaves the expected
+    stored power per entry unchanged, so the injection rate measured by
+    energy() is unchanged.
+
+    Args:
+        field: Complex Fourier field [Nz, Ny, Nx//2+1]
+        Nx_full: Full grid size in x (static); the Nyquist plane exists only if even
+
+    Returns:
+        Field whose kx=0 (and Nyquist) planes satisfy Hermitian symmetry exactly
+    """
+    planes = [0]
+    # Nyquist plane exists only for even Nx. For odd Nx the last rfft index is
+    # an ordinary kx > 0 mode whose partner is implied, so it must not be touched.
+    if Nx_full % 2 == 0:
+        planes.append(field.shape[2] - 1)
+    for ix in planes:
+        plane = field[:, :, ix]
+        field = field.at[:, :, ix].set(0.5 * (plane + jnp.conj(_rfft_partner(plane))))
+    return field
+
+
 @partial(jax.jit, static_argnums=(10,))
 def _gaussian_white_noise_fourier_perp_lowkz_jit(
     kx: Array,
@@ -117,20 +164,8 @@ def _gaussian_white_noise_fourier_perp_lowkz_jit(
 
     forced_field = noise * mask.astype(noise.dtype)
 
-    # Enforce rfft reality on kx=0 plane (always required)
-    forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
-
-    # Enforce reality on kx=Nyquist plane ONLY if Nx is even
-    # For rfft: shape is [Nz, Ny, Nx//2+1]
-    # - If Nx even (e.g., 32): Nyquist mode exists at index Nx//2 = 16
-    # - If Nx odd (e.g., 33): NO Nyquist mode; max mode is at index Nx//2 = 16 (not Nyquist!)
-    # Incorrectly setting odd-Nx highest mode to real corrupts physics at high-k
-    if Nx_full % 2 == 0:
-        Nx_rfft = forced_field.shape[2]
-        nyquist_idx = Nx_rfft - 1  # This is Nx//2 for even Nx
-        forced_field = forced_field.at[:, :, nyquist_idx].set(
-            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-        )
+    # Enforce Hermitian pairs on the kx=0 (and Nyquist) planes (Issue #156)
+    forced_field = _enforce_rfft_hermitian(forced_field, Nx_full)
 
     # Zero DC
     forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
@@ -185,10 +220,6 @@ def _gaussian_white_noise_fourier_jit(
     scale = amplitude / jnp.sqrt(dt)
 
     # Generate complex noise field
-    # Note: JAX's irfftn automatically enforces Hermitian symmetry during inverse
-    # transform, so the output will be exactly real-valued even if we don't
-    # explicitly enforce f(-k) = f*(k) here. Special modes (kx=0, Nyquist) will
-    # be handled correctly by the forcing mask (which zeros k=0) and JAX's FFT.
     noise = (real_part + 1j * imag_part) * scale
 
     # Apply spectral mask to localize forcing
@@ -202,27 +233,11 @@ def _gaussian_white_noise_fourier_jit(
     # For real-valued fields in physical space, Fourier coefficients must satisfy:
     # f(kx, ky, kz) = f*(-kx, -ky, -kz)
     #
-    # In rfft format (only kx >= 0 stored), special modes must be real:
-    # 1. kx=0 plane: These modes are their own conjugate partners
-    # 2. kx=Nyquist plane (if Nx even): Nyquist frequency must be real
-    #
-    # Without this enforcement, direct Fourier-space operations (like forcing)
-    # can create non-Hermitian fields that violate reality condition.
-
-    # Enforce reality on kx=0 plane (always required)
-    forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
-
-    # Enforce reality on kx=Nyquist plane ONLY if Nx is even
-    # For rfft: shape is [Nz, Ny, Nx//2+1]
-    # - If Nx even (e.g., 32): Nyquist mode exists at index Nx//2 = 16
-    # - If Nx odd (e.g., 33): NO Nyquist mode; max mode is at index Nx//2 = 16 (not Nyquist!)
-    # Incorrectly setting odd-Nx highest mode to real corrupts physics at high-k
-    if Nx_full % 2 == 0:
-        Nx_rfft = forced_field.shape[2]  # This is Nx//2+1
-        nyquist_idx = Nx_rfft - 1  # This is Nx//2 for even Nx
-        forced_field = forced_field.at[:, :, nyquist_idx].set(
-            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-        )
+    # In rfft format (only kx >= 0 stored), the kx=0 plane (and the kx=Nyquist
+    # plane for even Nx) stores both partners (kx, ky, kz) and (kx, -ky, -kz).
+    # irfftn silently discards any anti-Hermitian part there, but it would stay
+    # in the Fourier state and be counted by diagnostics (Issue #156).
+    forced_field = _enforce_rfft_hermitian(forced_field, Nx_full)
 
     return forced_field
 
@@ -295,21 +310,8 @@ def _gandalf_forcing_fourier_jit(
     # Zero out k=0 mode (no forcing of mean field)
     forced_field = forced_field.at[0, 0, 0].set(0.0 + 0.0j)
 
-    # Enforce Hermitian symmetry for rfft format
-    # Enforce reality on kx=0 plane (always required)
-    forced_field = forced_field.at[:, :, 0].set(forced_field[:, :, 0].real.astype(forced_field.dtype))
-
-    # Enforce reality on kx=Nyquist plane ONLY if Nx is even
-    # For rfft: shape is [Nz, Ny, Nx//2+1]
-    # - If Nx even (e.g., 32): Nyquist mode exists at index Nx//2 = 16
-    # - If Nx odd (e.g., 33): NO Nyquist mode; max mode is at index Nx//2 = 16 (not Nyquist!)
-    # Incorrectly setting odd-Nx highest mode to real corrupts physics at high-k
-    if Nx_full % 2 == 0:
-        Nx_rfft = forced_field.shape[2]
-        nyquist_idx = Nx_rfft - 1  # This is Nx//2 for even Nx
-        forced_field = forced_field.at[:, :, nyquist_idx].set(
-            forced_field[:, :, nyquist_idx].real.astype(forced_field.dtype)
-        )
+    # Enforce Hermitian pairs on the kx=0 (and Nyquist) planes (Issue #156)
+    forced_field = _enforce_rfft_hermitian(forced_field, Nx_full)
 
     return forced_field
 
@@ -860,12 +862,13 @@ def _get_rfft_compatible_modes(
     return rfft_modes
 
 
-@partial(jax.jit, static_argnums=(0,))
+@partial(jax.jit, static_argnums=(0, 4))
 def _gandalf_forcing_specific_jit(
     shape: Tuple[int, int, int],
     mode_indices: Array,  # [N_modes, 3] array of (ix, iy, iz)
     conjugate_flags: Array,  # [N_modes] boolean array
     amplitudes: Array,  # [N_modes] complex amplitudes
+    Nx_full: int,
 ) -> Array:
     """
     JIT-compiled kernel for forcing specific mode triplets.
@@ -874,16 +877,23 @@ def _gandalf_forcing_specific_jit(
     mode triplets, preserving the original GANDALF approach of forcing exactly
     6 specific (kx, ky, kz) modes with low k_z.
 
+    A mode on the kx=0 plane (or the kx=Nyquist plane for even Nx) has its
+    conjugate partner (kx, -ky, -kz) stored explicitly. The kernel sets that
+    partner to the conjugate amplitude, so the listed mode is forced with the
+    same amplitude as a kx > 0 mode (Issue #156).
+
     Args:
         shape: Output array shape [Nz, Ny, Nx//2+1] (static argument)
-        mode_indices: Integer array [N_modes, 3] of (ix, iy, iz) indices
+        mode_indices: Integer array [N_modes, 3] of (iz, iy, ix) indices
         conjugate_flags: Boolean array [N_modes] indicating if conjugate needed
         amplitudes: Complex array [N_modes] of forcing amplitudes
+        Nx_full: Full grid size in x (static); the Nyquist plane exists only if even
 
     Returns:
         Complex Fourier field [Nz, Ny, Nx//2+1] with forcing at specified modes
     """
     Nz, Ny, Nx_rfft = shape
+    nyquist_idx = Nx_rfft - 1 if Nx_full % 2 == 0 else -1
 
     # Initialize empty field
     forced_field = jnp.zeros((Nz, Ny, Nx_rfft), dtype=jnp.complex64)
@@ -901,7 +911,17 @@ def _gandalf_forcing_specific_jit(
         # Set the mode (JAX requires .at syntax for in-place updates)
         forced_field = forced_field.at[iz, iy, ix].set(amplitude)
 
-    return forced_field
+        # On a self-paired plane, also set the stored partner (kx, -ky, -kz)
+        iz_p = (Nz - iz) % Nz
+        iy_p = (Ny - iy) % Ny
+        on_paired_plane = (ix == 0) | (ix == nyquist_idx)
+        forced_field = forced_field.at[iz_p, iy_p, ix].set(
+            jnp.where(on_paired_plane, jnp.conj(amplitude), forced_field[iz_p, iy_p, ix])
+        )
+
+    # Self-conjugate modes (partner == mode) must be real; projection fixes them
+    # and leaves every properly paired entry unchanged.
+    return _enforce_rfft_hermitian(forced_field, Nx_full)
 
 
 def force_alfven_modes_specific(
@@ -1022,7 +1042,7 @@ def force_alfven_modes_specific(
     # Apply forcing via JIT kernel
     shape = (Nz, Ny, Nx // 2 + 1)
     forcing = _gandalf_forcing_specific_jit(shape, mode_indices,
-                                            conjugate_flags, amplitudes)
+                                            conjugate_flags, amplitudes, Nx)
 
     # Apply IDENTICAL forcing to both Elsasser variables (drives φ only)
     z_plus_new = state.z_plus + forcing
@@ -1297,7 +1317,7 @@ def force_hermite_moments_specific(
     # Apply forcing via JIT kernel (reuse GANDALF kernel - works for any amplitude formula)
     shape = (Nz, Ny, Nx // 2 + 1)
     forcing = _gandalf_forcing_specific_jit(shape, mode_indices,
-                                            conjugate_flags, amplitudes)
+                                            conjugate_flags, amplitudes, Nx)
 
     # Apply forcing to specified Hermite moments
     # g has shape [Nz, Ny, Nx//2+1, M+1], forcing has shape [Nz, Ny, Nx//2+1]
