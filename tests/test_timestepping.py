@@ -2221,3 +2221,73 @@ class TestIMEX222:
         assert slope >= 1.7, (
             f"IMEX convergence slope too low: {slope:.2f}, errs={errs}"
         )
+
+    def test_imex222_coupled_g_zpm_second_order(self):
+        """Issue #158: stage B must sample z+/- at t+gamma*dt, not t+dt/2.
+
+        All fields live on the kz=0 plane, so streaming vanishes and g
+        evolves only through the explicit nonlinearity {z+/-, g}. Both z+
+        and z- are nonzero, so z+/- evolve nonlinearly and the g-z+/-
+        coupling time matters. Sampling z+/- at t+dt/2 in stage B gives
+        slope 1.0 here; the fix gives 2.0. Runs in float64 because the
+        float32 accumulation floor (~3e-5) hides the truncation error.
+        """
+        from jax.experimental import enable_x64
+
+        with enable_x64():
+            Nx = Ny = 16
+            Nz = 4
+            M = 2
+            grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=1.0, Ly=1.0, Lz=1.0)
+
+            # z-independent real-space fields, so only kz=0 is populated.
+            x = np.arange(Nx) / Nx
+            Z, Y, X = np.meshgrid(np.zeros(Nz), x, x, indexing="ij")
+            two_pi = 2.0 * np.pi
+            scale = 2.0 / (Nx * Ny * Nz)  # O(1) real-space amplitude
+            z_plus = scale * jnp.fft.rfftn(
+                np.cos(two_pi * X) + 0.5 * np.sin(two_pi * (X + Y))
+            )
+            z_minus = scale * jnp.fft.rfftn(
+                np.sin(two_pi * Y) + 0.5 * np.cos(two_pi * (X - Y))
+            )
+            g0 = scale * jnp.fft.rfftn(np.sin(two_pi * (X + 2 * Y)))
+            g = jnp.stack([g0, 0.5 * g0, 0.25 * g0], axis=-1)
+            assert g.dtype == jnp.complex128
+
+            state0 = KRMHDState(
+                z_plus=z_plus,
+                z_minus=z_minus,
+                g=g,
+                M=M,
+                beta_i=1.0,
+                v_th=1.0,
+                nu=0.0,
+                Lambda=1.5,
+                time=0.0,
+                grid=grid,
+            )
+
+            T_final = 0.4
+
+            def run(dt, scheme):
+                s = state0
+                for _ in range(int(round(T_final / dt))):
+                    s = gandalf_step(s, dt=dt, eta=0.0, v_A=1.0, nu=0.0,
+                                     scheme=scheme)
+                return s
+
+            # Lawson-RK4 reference at a much finer step. Its z+/- error is
+            # O(dt_ref^2), ~1e-11 relative here, far below the IMEX errors.
+            g_ref = run(T_final / 640, "lawson_rk4").g
+            dts = [T_final / 10, T_final / 20, T_final / 40]
+            errs = [
+                float(jnp.linalg.norm(run(dt, "imex_rk222").g - g_ref)
+                      / jnp.linalg.norm(g_ref))
+                for dt in dts
+            ]
+
+        slope = np.polyfit(np.log(dts), np.log(errs), 1)[0]
+        assert slope >= 1.8, (
+            f"IMEX coupled g-z+/- slope too low: {slope:.2f}, errs={errs}"
+        )
