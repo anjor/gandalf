@@ -23,6 +23,45 @@ from jax import Array
 from pydantic import BaseModel, Field, ConfigDict, PrivateAttr, field_validator
 
 
+def _dealias_keep_1d(N: int, rfft: bool = False) -> Array:
+    """
+    Boolean 2/3-rule keep-mask along one periodic axis of N points.
+
+    Keeps the integer mode numbers n with |n| <= (N-1)//3, i.e. 3|n| < N.
+    The mode numbers follow FFT ordering: n = [0, 1, ..., N//2] on the
+    rfft (last) axis and n = [0, 1, ..., N/2-1, -N/2, ..., -1] otherwise,
+    matching the kx, ky, kz arrays of the grids below.
+
+    Why 3|n| < N: a quadratic product of kept modes n1, n2 (|n1|, |n2| <= K)
+    has |n1 + n2| <= 2K. On the grid it can alias to n1 + n2 ∓ N, whose
+    magnitude is at least N - 2K. The aliased content lands outside the kept
+    band, and the mask removes it, iff N - 2K > K, i.e. 3K < N. The same
+    condition makes the grid sum of a triple product of kept modes equal
+    its continuous integral, so the semi-discrete pseudo-spectral brackets
+    conserve the ideal quadratic invariants exactly. The comparison
+    |k| <= (2/3)·k_Nyquist gives the same set unless 3 divides N, in which
+    case it also keeps |n| = N/3, and two such modes alias onto -N/3
+    (Issue #171).
+
+    K = (N-1)//3 is the same edge that normalises the hyper-dissipation in
+    timestepping.py (idx_max, idy_max, idz_max).
+
+    Args:
+        N: Number of grid points along the axis
+        rfft: True for the rfft (non-negative, length N//2+1) axis
+
+    Returns:
+        Boolean array of shape [N//2+1] if rfft else [N]
+    """
+    n_keep = (N - 1) // 3
+    if rfft:
+        n = jnp.arange(N // 2 + 1)
+    else:
+        idx = jnp.arange(N)
+        n = jnp.where(idx < N // 2, idx, idx - N)  # fftfreq ordering, integers
+    return jnp.abs(n) <= n_keep
+
+
 class SpectralGrid2D(BaseModel):
     """
     Immutable 2D spectral grid specification with wavenumber arrays.
@@ -79,8 +118,11 @@ class SpectralGrid2D(BaseModel):
         - kx: [0, 1, 2, ..., Nx//2] (non-negative only, exploits reality)
         - ky: [0, 1, ..., Ny//2-1, -Ny//2, ..., -1] (standard FFT ordering)
 
-        The 2/3 dealiasing mask zeros modes where max(|kx|/kx_max, |ky|/ky_max) > 2/3
-        to prevent aliasing errors in nonlinear terms.
+        The 2/3 dealiasing mask keeps the modes with integer mode numbers
+        |nx| <= (Nx-1)//3 and |ny| <= (Ny-1)//3 (3|n| < N in each direction),
+        which makes quadratic nonlinear terms alias-free. For N not divisible
+        by 3 this is the same set as |k| <= (2/3)·k_Nyquist; for N divisible
+        by 3 the edge |n| = N/3 is excluded (Issue #171).
 
         Args:
             Nx: Number of grid points in x (must be even and > 0)
@@ -106,26 +148,15 @@ class SpectralGrid2D(BaseModel):
         kx = jnp.fft.rfftfreq(Nx, d=Lx / (2 * jnp.pi * Nx))
         ky = jnp.fft.fftfreq(Ny, d=Ly / (2 * jnp.pi * Ny))
 
-        # 2/3 rule dealiasing: zero modes beyond |k| > (2/3) * k_max
-        kx_max = jnp.max(jnp.abs(kx))
-        ky_max = jnp.max(jnp.abs(ky))
-
-        # Create 2D mesh for mask computation
-        # meshgrid with indexing="ij" produces [len(kx), len(ky)]
-        kx_2d, ky_2d = jnp.meshgrid(kx, ky, indexing="ij")
-
-        # Transpose to match rfft2 output shape [Ny, Nx//2+1]
-        # meshgrid order: [len(kx), len(ky)] = [Nx//2+1, Ny]
-        # After .T: [len(ky), len(kx)] = [Ny, Nx//2+1] ✓
-        kx_2d = kx_2d.T
-        ky_2d = ky_2d.T
-
-        # Mask: True where mode should be kept, False where it should be zeroed
-        # Use explicit float32 for 2/3 threshold to match JAX default precision
-        threshold = jnp.float32(2.0 / 3.0)
-        dealias_mask = (jnp.abs(kx_2d) <= threshold * kx_max) & (
-            jnp.abs(ky_2d) <= threshold * ky_max
-        )
+        # 2/3 rule dealiasing on integer mode numbers: keep |n| <= (N-1)//3
+        # per direction (see _dealias_keep_1d). Built from integers rather
+        # than a float comparison against (2/3)·k_Nyquist, which keeps the
+        # aliasing edge |n| = N/3 when 3 divides N.
+        # Mask: True where mode should be kept, False where it should be zeroed.
+        # Shape matches rfft2 output [Ny, Nx//2+1].
+        keep_x = _dealias_keep_1d(Nx, rfft=True)  # [Nx//2+1]
+        keep_y = _dealias_keep_1d(Ny)  # [Ny]
+        dealias_mask = keep_y[:, jnp.newaxis] & keep_x[jnp.newaxis, :]
 
         return cls(
             Nx=Nx,
@@ -247,8 +278,12 @@ class SpectralGrid3D(BaseModel):
         - ky: [0, 1, ..., Ny//2-1, -Ny//2, ..., -1] (standard FFT ordering)
         - kz: [0, 1, ..., Nz//2-1, -Nz//2, ..., -1] (standard FFT ordering)
 
-        The 2/3 dealiasing mask zeros modes where max(|kx|/kx_max, |ky|/ky_max, |kz|/kz_max) > 2/3
-        to prevent aliasing errors in nonlinear terms.
+        The 2/3 dealiasing mask keeps the modes with integer mode numbers
+        |nx| <= (Nx-1)//3, |ny| <= (Ny-1)//3 and |nz| <= (Nz-1)//3 (3|n| < N
+        in each direction), which makes quadratic nonlinear terms alias-free.
+        For N not divisible by 3 this is the same set as
+        |k| <= (2/3)·k_Nyquist; for N divisible by 3 the edge |n| = N/3 is
+        excluded (Issue #171).
 
         Args:
             Nx: Number of grid points in x (must be even and > 0)
@@ -283,29 +318,21 @@ class SpectralGrid3D(BaseModel):
         ky = jnp.fft.fftfreq(Ny, d=Ly / (2 * jnp.pi * Ny))
         kz = jnp.fft.fftfreq(Nz, d=Lz / (2 * jnp.pi * Nz))
 
-        # 2/3 rule dealiasing: zero modes beyond |k| > (2/3) * k_max
-        kx_max = jnp.max(jnp.abs(kx))
-        ky_max = jnp.max(jnp.abs(ky))
-        kz_max = jnp.max(jnp.abs(kz))
-
-        # Create 3D mesh for mask computation
-        # meshgrid with indexing="ij" produces [len(kx), len(ky), len(kz)]
-        kx_3d, ky_3d, kz_3d = jnp.meshgrid(kx, ky, kz, indexing="ij")
-
-        # Transpose to match rfftn output shape [Nz, Ny, Nx//2+1]
-        # meshgrid order: [len(kx), len(ky), len(kz)] = [Nx//2+1, Ny, Nz]
-        # After transpose(2,1,0): [len(kz), len(ky), len(kx)] = [Nz, Ny, Nx//2+1] ✓
-        kx_3d = kx_3d.transpose(2, 1, 0)
-        ky_3d = ky_3d.transpose(2, 1, 0)
-        kz_3d = kz_3d.transpose(2, 1, 0)
-
-        # Mask: True where mode should be kept, False where it should be zeroed
-        # Use explicit float32 for 2/3 threshold to match JAX default precision
-        threshold = jnp.float32(2.0 / 3.0)
+        # 2/3 rule dealiasing on integer mode numbers: keep |n| <= (N-1)//3
+        # per direction (see _dealias_keep_1d). Built from integers rather
+        # than a float comparison against (2/3)·k_Nyquist, which keeps the
+        # aliasing edge |n| = N/3 when 3 divides N. The z-direction is masked
+        # too: the nonlinear products are formed on the 3D grid, so they alias
+        # in z as well.
+        # Mask: True where mode should be kept, False where it should be zeroed.
+        # Shape matches rfftn output [Nz, Ny, Nx//2+1].
+        keep_x = _dealias_keep_1d(Nx, rfft=True)  # [Nx//2+1]
+        keep_y = _dealias_keep_1d(Ny)  # [Ny]
+        keep_z = _dealias_keep_1d(Nz)  # [Nz]
         dealias_mask = (
-            (jnp.abs(kx_3d) <= threshold * kx_max)
-            & (jnp.abs(ky_3d) <= threshold * ky_max)
-            & (jnp.abs(kz_3d) <= threshold * kz_max)
+            keep_z[:, jnp.newaxis, jnp.newaxis]
+            & keep_y[jnp.newaxis, :, jnp.newaxis]
+            & keep_x[jnp.newaxis, jnp.newaxis, :]
         )
 
         return cls(
@@ -877,8 +904,9 @@ def dealias(field_fourier: Array, dealias_mask: Array) -> Array:
     Apply 2/3 rule dealiasing by zeroing high-wavenumber modes.
 
     Prevents aliasing errors in nonlinear terms by ensuring products of
-    dealiased fields remain properly resolved. Modes where
-    max(|kx|/kx_max, |ky|/ky_max) > 2/3 are set to zero.
+    dealiased fields remain properly resolved. Modes outside the grid's
+    2/3-rule mask, i.e. with integer mode number |n| > (N-1)//3 in any
+    direction, are set to zero.
 
     This is CRITICAL for stability in nonlinear spectral codes.
 
