@@ -47,7 +47,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from krmhd.physics import KRMHDState, energy
-from krmhd.spectral import SpectralGrid3D
+from krmhd.spectral import SpectralGrid3D, enforce_hermitian, _rfft_partner  # noqa: F401
 
 
 def _mode_to_wavenumber(n: int, L: float) -> float:
@@ -74,51 +74,11 @@ def _mode_to_wavenumber(n: int, L: float) -> float:
     return 2.0 * jnp.pi * n / L
 
 
-def _rfft_partner(plane: Array) -> Array:
-    """
-    Value at (-kz, -ky) for every (kz, ky) entry of a [Nz, Ny] Fourier plane.
-
-    Index i maps to (-i) mod N, so flip both axes and roll by one.
-    """
-    return jnp.roll(jnp.flip(plane, axis=(0, 1)), shift=1, axis=(0, 1))
-
-
-def _enforce_rfft_hermitian(field: Array, Nx_full: int) -> Array:
-    """
-    Project the self-paired planes of an rfft field onto their Hermitian part.
-
-    In rfft storage, a mode (kx, ky, kz) with kx > 0 has its conjugate partner
-    (-kx, -ky, -kz) implied. On the kx=0 plane (and the kx=Nyquist plane for
-    even Nx) the partner (kx, -ky, -kz) is stored explicitly. Reality requires
-    f(kx, -ky, -kz) = f*(kx, ky, kz) between the two stored entries.
-
-    Taking the real part of each entry does NOT enforce this: two independent
-    real values are conjugates only if they are equal. The anti-Hermitian
-    remainder is discarded by irfftn, so the dynamics never see it, but it
-    stays in the Fourier state and every Fourier-space diagnostic counts it
-    (Issue #156).
-
-    The projection f → (f + conj(f_partner)) / 2 removes it. For independent
-    noise with equal variance at the two partners, it leaves the expected
-    stored power per entry unchanged, so the injection rate measured by
-    energy() is unchanged.
-
-    Args:
-        field: Complex Fourier field [Nz, Ny, Nx//2+1]
-        Nx_full: Full grid size in x (static); the Nyquist plane exists only if even
-
-    Returns:
-        Field whose kx=0 (and Nyquist) planes satisfy Hermitian symmetry exactly
-    """
-    planes = [0]
-    # Nyquist plane exists only for even Nx. For odd Nx the last rfft index is
-    # an ordinary kx > 0 mode whose partner is implied, so it must not be touched.
-    if Nx_full % 2 == 0:
-        planes.append(field.shape[2] - 1)
-    for ix in planes:
-        plane = field[:, :, ix]
-        field = field.at[:, :, ix].set(0.5 * (plane + jnp.conj(_rfft_partner(plane))))
-    return field
+# Hermitian projection of the kx=0 (and Nyquist) planes (Issue #156). It now
+# lives in spectral.py (enforce_hermitian, _rfft_partner) so initializers and
+# checkpoint loading share it (Issue #165); this alias keeps the forcing
+# kernels and their tests unchanged.
+_enforce_rfft_hermitian = enforce_hermitian
 
 
 @partial(jax.jit, static_argnums=(10,))

@@ -10,6 +10,7 @@ This module provides 2D and 3D spectral operations using FFT methods:
 - Laplacian operators (∇², ∇²⊥) for 2D and 3D fields
 - Poisson solvers for ∇²φ = ω and ∇²⊥φ = ω
 - Dealiasing using the 2/3 rule to prevent aliasing errors
+- Hermitian projection of the self-paired kx=0/Nyquist rfft planes
 
 All performance-critical functions are JIT-compiled with JAX.
 """
@@ -894,6 +895,128 @@ def dealias(field_fourier: Array, dealias_mask: Array) -> Array:
         >>> fg_fourier = dealias(fg_fourier, grid.dealias_mask)  # MUST dealias!
     """
     return field_fourier * dealias_mask
+
+
+# =============================================================================
+# Reality Condition on Self-Paired rfft Planes (Issues #156, #165)
+# =============================================================================
+
+
+def _rfft_paired_planes(Nx: int) -> tuple[int, ...]:
+    """
+    rfft x-indices whose planes store both Hermitian partners explicitly.
+
+    The kx=0 plane always does. The kx=Nyquist plane (index Nx//2) does only
+    for even Nx. For odd Nx the last rfft index is an ordinary kx > 0 mode
+    whose partner is implied, so it must not be touched.
+    """
+    return (0, Nx // 2) if Nx % 2 == 0 else (0,)
+
+
+def _rfft_partner(plane: Array) -> Array:
+    """
+    Value at (-kz, -ky) for every (kz, ky) entry of a [Nz, Ny, ...] Fourier plane.
+
+    Index i maps to (-i) mod N, so flip both axes and roll by one. Trailing
+    axes (e.g. the Hermite index m) are carried along unchanged.
+    """
+    return jnp.roll(jnp.flip(plane, axis=(0, 1)), shift=1, axis=(0, 1))
+
+
+def _check_rfft_shape(field: Array, Nx: int) -> None:
+    """Raise if field is not in 3D rfftn storage [Nz, Ny, Nx//2+1, ...] for this Nx."""
+    if field.ndim < 3 or field.shape[2] != Nx // 2 + 1:
+        raise ValueError(
+            f"Expected rfftn storage [Nz, Ny, Nx//2+1, ...] with Nx={Nx} "
+            f"(axis 2 of length {Nx // 2 + 1}), got shape {field.shape}"
+        )
+
+
+@partial(jax.jit, static_argnames=("Nx",))
+def enforce_hermitian(field: Array, Nx: int) -> Array:
+    """
+    Project the self-paired planes of an rfftn field onto their Hermitian part.
+
+    In rfft storage [Nz, Ny, Nx//2+1], a mode (kx, ky, kz) with kx > 0 has its
+    conjugate partner (-kx, -ky, -kz) implied. On the kx=0 plane (and the
+    kx=Nyquist plane for even Nx) the partner (kx, -ky, -kz) is stored
+    explicitly, and a real field needs f(kx, -ky, -kz) = f*(kx, ky, kz)
+    between the two stored entries.
+
+    Whatever violates this is an anti-Hermitian "ghost". irfftn discards it,
+    so the dynamics never see it, but the linear operators preserve it in the
+    Fourier state and every Fourier-space diagnostic counts it (Issues #156,
+    #165). Taking the real part of each entry does NOT remove it: two
+    independent real values are conjugates only if they are equal.
+
+    The projection f → (f + conj(f_partner)) / 2 removes it exactly and leaves
+    irfftn(f) unchanged. Entries that are their own partner (ky and kz each 0
+    or Nyquist) become real. All kx > 0 planes are untouched, and the
+    projection is idempotent.
+
+    For independent draws of equal variance at the two partners, the cross
+    term averages to zero, so the expected power per entry halves: E|f'|² =
+    E|f|²/2, the same as taking the real part. Callers that need the kx=0
+    modes to match the kx > 0 spectrum must rescale.
+
+    Args:
+        field: Complex Fourier field [Nz, Ny, Nx//2+1] or with trailing axes,
+            e.g. Hermite moments [Nz, Ny, Nx//2+1, M+1]
+        Nx: Full grid size in x (static); the Nyquist plane exists only if even
+
+    Returns:
+        Field of the same shape whose kx=0 (and Nyquist) planes satisfy
+        Hermitian symmetry exactly
+
+    Example:
+        >>> g = enforce_hermitian(state.g, grid.Nx)  # every g_m at once
+    """
+    _check_rfft_shape(field, Nx)
+    for ix in _rfft_paired_planes(Nx):
+        plane = field[:, :, ix]
+        field = field.at[:, :, ix].set(0.5 * (plane + jnp.conj(_rfft_partner(plane))))
+    return field
+
+
+@partial(jax.jit, static_argnames=("Nx", "relative_to"))
+def anti_hermitian_fraction(field: Array, Nx: int, relative_to: str = "planes") -> Array:
+    """
+    Anti-Hermitian share of the stored power on the self-paired rfft planes.
+
+    The anti-Hermitian part f_A = (f - conj(f_partner)) / 2 of the kx=0 (and
+    even-Nx Nyquist) planes is what enforce_hermitian removes. It is
+    orthogonal to the Hermitian part, so the share lies in [0, 1]. "Stored
+    power" is the unweighted sum Σ|f|² over rfft entries (all trailing axes,
+    e.g. every Hermite moment, included).
+
+    Args:
+        field: Complex Fourier field [Nz, Ny, Nx//2+1, ...]
+        Nx: Full grid size in x (static)
+        relative_to: Denominator (static).
+            "planes" (default): stored power on the paired planes, i.e. the
+            ghost's share of the kx=0/Nyquist power.
+            "total": stored power of the whole array, i.e. the share that
+            unweighted Fourier-space sums overcount. Robust when the paired
+            planes hold little power, so it suits round-off thresholds.
+
+    Returns:
+        Scalar share (0-d array); 0 when the denominator is 0
+
+    Example:
+        >>> float(anti_hermitian_fraction(state.z_plus, grid.Nx))  # ≈ 0 when clean
+    """
+    _check_rfft_shape(field, Nx)
+    if relative_to not in ("planes", "total"):
+        raise ValueError(f"relative_to must be 'planes' or 'total', got {relative_to!r}")
+    anti_power = 0.0
+    plane_power = 0.0
+    for ix in _rfft_paired_planes(Nx):
+        plane = field[:, :, ix]
+        anti = 0.5 * (plane - jnp.conj(_rfft_partner(plane)))
+        anti_power = anti_power + jnp.sum(jnp.abs(anti) ** 2)
+        plane_power = plane_power + jnp.sum(jnp.abs(plane) ** 2)
+    denom = plane_power if relative_to == "planes" else jnp.sum(jnp.abs(field) ** 2)
+    return jnp.where(denom > 0, anti_power / jnp.where(denom > 0, denom, 1.0), 0.0)
 
 
 # =============================================================================

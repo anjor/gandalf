@@ -33,6 +33,8 @@ from krmhd.spectral import (
     rfftn_forward,
     rfftn_inverse,
     dealias,
+    enforce_hermitian,
+    _rfft_paired_planes,
 )
 from krmhd.hermite import closure_symmetric, closure_zero
 
@@ -688,6 +690,43 @@ def zero_k0_mode(field: Array) -> Array:
     return field.at[0, 0, 0].set(0.0 + 0.0j)
 
 
+def enforce_hermitian_state(state: KRMHDState) -> KRMHDState:
+    """
+    Remove the anti-Hermitian ghost from z± and every Hermite moment g_m.
+
+    Applies spectral.enforce_hermitian to z_plus, z_minus and g (all M+1
+    moments at once), so the kx=0 (and even-Nx Nyquist) planes satisfy
+    f(kx, -ky, -kz) = f*(kx, ky, kz). φ and A∥ are linear in z±, so they
+    follow. Every real-space field is unchanged: irfftn already discarded the
+    ghost, so this only corrects what Fourier-space diagnostics see.
+
+    Use it to clean states written before the forcing fix (Issues #156, #165),
+    or after any operation that sets Fourier entries directly.
+
+    Args:
+        state: KRMHD state
+
+    Returns:
+        New state with Hermitian kx=0/Nyquist planes; all scalars unchanged
+
+    Example:
+        >>> state = enforce_hermitian_state(state)
+    """
+    Nx = state.grid.Nx
+    return KRMHDState(
+        z_plus=enforce_hermitian(state.z_plus, Nx),
+        z_minus=enforce_hermitian(state.z_minus, Nx),
+        g=enforce_hermitian(state.g, Nx),
+        M=state.M,
+        beta_i=state.beta_i,
+        v_th=state.v_th,
+        nu=state.nu,
+        Lambda=state.Lambda,
+        time=state.time,
+        grid=state.grid,
+    )
+
+
 # =============================================================================
 # Elsasser RHS Functions (GANDALF Energy-Conserving Formulation)
 # =============================================================================
@@ -1286,6 +1325,10 @@ def initialize_alfven_wave(
         compare with theoretical dispersion: ω² = k∥² v_A²
         In the kinetic regime, expect modifications from Landau damping when
         ω/(k∥·v_th) ~ 1.
+
+        A mode on the kx=0 (or Nyquist) plane is stored together with its
+        conjugate partner (kx, -ky, -kz), so it has the same real-space
+        amplitude and energy as a kx > 0 mode of equal amplitude (Issue #165).
     """
     # Initialize empty fields
     phi = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
@@ -1302,6 +1345,20 @@ def initialize_alfven_wave(
     # This gives circularly polarized wave
     phi = phi.at[ikz, iky, ikx].set(amplitude * 1.0j)
     A_parallel = A_parallel.at[ikz, iky, ikx].set(amplitude * 1.0)
+
+    # A kx > 0 entry a implies its partner a* at (-kx, -ky, -kz). On the kx=0
+    # plane (and the Nyquist plane for even Nx) the partner (kx, -ky, -kz) is
+    # stored explicitly, so set it to a* as well (Issue #165). With one entry
+    # set, f + conj(f_partner) = 2·enforce_hermitian(f): this is rfftn of the
+    # same real-space wave (2|a|/N)·cos(k·x + arg a) a kx > 0 entry gives, so
+    # the amplitude and energy() match a kx > 0 wave. A self-conjugate entry
+    # becomes 2·Re(a), since only the cosine survives on the grid there.
+    # kx > 0 modes are returned unchanged.
+    on_paired_plane = (ikx == 0) | ((grid.Nx % 2 == 0) & (ikx == grid.Nx // 2))
+    phi = jnp.where(on_paired_plane, 2.0 * enforce_hermitian(phi, grid.Nx), phi)
+    A_parallel = jnp.where(
+        on_paired_plane, 2.0 * enforce_hermitian(A_parallel, grid.Nx), A_parallel
+    )
 
     # Convert to Elsasser variables
     z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
@@ -1321,6 +1378,34 @@ def initialize_alfven_wave(
         time=0.0,
         grid=grid,
     )
+
+
+def _hermitian_unit_phasors(unit: Array, Nx: int) -> Array:
+    """
+    Random unit phasors whose kx=0 (and Nyquist) planes form Hermitian pairs.
+
+    On those planes the partner (kx, -ky, -kz) is stored explicitly and was
+    drawn independently. Projecting with enforce_hermitian and rescaling to
+    unit modulus gives u(kx, -ky, -kz) = u*(kx, ky, kz) exactly (Issue #165).
+    The phase stays uniform, because the sum of two independent uniform
+    phasors has a uniform phase. A self-conjugate entry becomes ±1. Every
+    mode therefore keeps |u| = 1, so the spectrum it multiplies is reproduced
+    exactly, as on kx > 0 planes. kx > 0 planes are returned unchanged.
+
+    Args:
+        unit: Unit-modulus complex array [Nz, Ny, Nx//2+1]
+        Nx: Full grid size in x
+
+    Returns:
+        Unit-modulus array with Hermitian kx=0 (and Nyquist) planes
+    """
+    projected = enforce_hermitian(unit, Nx)
+    modulus = jnp.abs(projected)
+    # modulus = 0 has probability zero; 1 keeps the pair Hermitian if it occurs
+    normalized = jnp.where(modulus > 0, projected / jnp.where(modulus > 0, modulus, 1.0), 1.0)
+    for ix in _rfft_paired_planes(Nx):
+        unit = unit.at[:, :, ix].set(normalized[:, :, ix])
+    return unit
 
 
 def initialize_random_spectrum(
@@ -1347,7 +1432,9 @@ def initialize_random_spectrum(
     - α = 2: Steep spectrum (viscous range)
 
     The initialization ensures:
-    - Reality condition: f(-k) = f*(k)
+    - Reality condition: f(-k) = f*(k), including Hermitian pairs on the
+      kx=0 and Nyquist planes, where every mode keeps the exact modulus of
+      the target spectrum, as kx > 0 modes do (Issue #165)
     - Divergence-free magnetic field: ∇·B = 0
     - Random phases for statistical homogeneity
     - Energy concentrated in specified k-range [k_min, k_max]
@@ -1415,9 +1502,12 @@ def initialize_random_spectrum(
     phase_phi = 2.0 * jnp.pi * jax.random.uniform(subkey1, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1))
     phase_A = 2.0 * jnp.pi * jax.random.uniform(subkey2, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1))
 
-    # Create fields with random phases and power-law spectrum
-    phi = spectrum * jnp.exp(1.0j * phase_phi).astype(jnp.complex64)
-    A_parallel = spectrum * jnp.exp(1.0j * phase_A).astype(jnp.complex64)
+    # Create fields with random phases and power-law spectrum. On the kx=0
+    # (and Nyquist) planes the phasors form Hermitian pairs (Issue #165).
+    phase_factor_phi = _hermitian_unit_phasors(jnp.exp(1.0j * phase_phi).astype(jnp.complex64), grid.Nx)
+    phase_factor_A = _hermitian_unit_phasors(jnp.exp(1.0j * phase_A).astype(jnp.complex64), grid.Nx)
+    phi = spectrum * phase_factor_phi
+    A_parallel = spectrum * phase_factor_A
 
     # Zero out k=0 mode (no DC component)
     phi = phi.at[0, 0, 0].set(0.0)
