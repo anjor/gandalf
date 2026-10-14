@@ -1313,6 +1313,29 @@ class TestFollowFieldLine:
 # =============================================================================
 
 
+def _detailed_balance_weights(T: np.ndarray) -> np.ndarray:
+    """
+    Diagonal free-energy weights p_m for which P·T is symmetric, from T alone.
+
+    T is the tridiagonal Hermite streaming matrix
+    (hermite.compute_streaming_matrix), dg/dt = -i√βᵢ k∥ T g. The quadratic
+    form gᵀPg, P = diag(p), is conserved iff P·T is symmetric, i.e.
+    p_m·T[m, m+1] = p_(m+1)·T[m+1, m]. Solving that recurrence from p_1 = 1
+    (the code's normalisation) gives p without using any closed form for
+    p_0 or p_M, so the tests below check hermite_free_energy against the
+    code's own matrix rather than against a copy of its formula.
+    """
+    size = T.shape[0]
+    p = np.ones(size)
+    if size >= 2:
+        p[0] = T[1, 0] / T[0, 1]
+        for m in range(1, size - 1):
+            p[m + 1] = p[m] * T[m, m + 1] / T[m + 1, m]
+    PT = np.diag(p) @ T
+    np.testing.assert_allclose(PT, PT.T, rtol=0.0, atol=1e-14)
+    return p
+
+
 class TestHermiteFlux:
     """Test Hermite moment flux computation."""
 
@@ -1441,15 +1464,19 @@ class TestHermiteFlux:
         # Λ = 1 → p₀ = 0: the g₀ → g₁ link carries no free energy
         assert jnp.allclose(flux[..., 0], 0.0)
 
+    @pytest.mark.parametrize("closure", ["zero", "symmetric"])
     @pytest.mark.parametrize("Lambda", [-2.0, 3.0])
-    def test_hermite_flux_closes_free_energy_budget(self, Lambda):
+    def test_hermite_flux_closes_free_energy_budget(self, Lambda, closure):
         """Per-moment budget d/dt ½pₘ⟨|gₘ|²⟩ = F_{m-½} - F_{m+½} (Issue #159).
 
         With φ = 0 and Ψ ≠ 0, the budget closes only if the flux includes the
         {Ψ, ·} part of ∇∥. Fields are restricted to low k so the
-        pseudo-spectral products are exact.
+        pseudo-spectral products are exact. Under closure="symmetric" the
+        last moment's budget holds with the detailed-balance weight p_M
+        (Issue #164); the flux itself does not depend on the closure.
         """
         from krmhd.diagnostics import hermite_flux
+        from krmhd.hermite import compute_streaming_matrix
         from krmhd.physics import g0_rhs, g1_rhs, gm_rhs
         from krmhd.spectral import rfftn_forward
 
@@ -1479,7 +1506,8 @@ class TestHermiteFlux:
 
         args = (state.z_plus, state.z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask)
         rhs = [g0_rhs(g, *args, beta_i, N, N, N), g1_rhs(g, *args, beta_i, Lambda, N, N, N)]
-        rhs += [gm_rhs(g, *args, m, beta_i, N, N, N) for m in range(2, M + 1)]
+        rhs += [gm_rhs(g, *args, m, beta_i, N, N, N, closure=closure)
+                for m in range(2, M + 1)]
 
         # rfft weights: kx>0 counted twice, kx=0 (and Nyquist) once
         w = jnp.full(N // 2 + 1, 2.0).at[0].set(1.0).at[-1].set(1.0)[None, None, :]
@@ -1490,11 +1518,16 @@ class TestHermiteFlux:
         flux = hermite_flux(state)
         F = [ksum(flux[..., m]) for m in range(M)]
         p = [1.0 - 1.0 / Lambda] + [1.0] * M
+        if closure == "symmetric":
+            # g_M weight from detailed balance on the code's own matrix
+            p[M] = _detailed_balance_weights(
+                compute_streaming_matrix(M, Lambda, closure)
+            )[M]
 
         for m in range(M + 1):
             dW = p[m] * ksum(jnp.real(jnp.conj(g[..., m]) * rhs[m]))
             F_in = F[m - 1] if m > 0 else 0.0
-            F_out = F[m] if m < M else 0.0  # closure="zero": no flux out of g_M
+            F_out = F[m] if m < M else 0.0  # either closure: no flux out of g_M
             scale = max(abs(F_in), abs(F_out))
             assert scale > 0
             assert abs(dW - (F_in - F_out)) < 1e-5 * scale, \
@@ -1793,6 +1826,182 @@ class TestHermiteFreeEnergy:
         assert np.isclose(W, E_unweighted, rtol=1e-5), (
             f"Λ = 1e12: weighted W = {W} != unweighted Σ Eₘ = {E_unweighted}"
         )
+
+
+class TestHermiteFreeEnergyClosure:
+    """
+    hermite_free_energy under closure="zero" and closure="symmetric" (Issue #164).
+
+    The symmetric closure g_(M+1) = g_(M-1) changes only T[M, M-1], to
+    √(M/2) + √((M+1)/2). The conserved form gᵀPg then needs a weight p_M ≠ 1 on
+    g_M. The expected weights are derived here from the code's own streaming
+    matrix (_detailed_balance_weights), not from the implementation's formula.
+    """
+
+    M_VALUES = (2, 3, 9, 10)
+    LAMBDAS = (float(np.sqrt(5.0)), -float(np.sqrt(5.0)))
+    CLOSURES = ("zero", "symmetric")
+
+    @staticmethod
+    def _smooth_random_state(M: int, Lambda: float, seed: int = 0) -> KRMHDState:
+        """
+        Smooth random z± and g with no dissipation (η = ν = 0).
+
+        Each field is the rfftn of real Gaussian noise times a Gaussian
+        envelope in k (so the spectrum falls off smoothly) and the 2/3
+        dealiasing mask, with the k = 0 mode removed. z± ≠ 0, so the
+        {Φ, ·} advection and the {Ψ, ·} part of ∇∥ (where the closure also
+        enters) are active alongside ∂z streaming. Dtypes follow JAX's x64
+        setting: complex128 when called inside enable_x64().
+        """
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        rng = np.random.default_rng(seed)
+        kx = np.asarray(grid.kx)[None, None, :]
+        ky = np.asarray(grid.ky)[None, :, None]
+        kz = np.asarray(grid.kz)[:, None, None]
+        k2 = (kx / kx.max()) ** 2 + (ky / ky.max()) ** 2 + (kz / kz.max()) ** 2
+        envelope = jnp.asarray(np.exp(-2.0 * k2)) * grid.dealias_mask
+
+        def field(amplitude: float) -> jax.Array:
+            real = jnp.asarray(rng.standard_normal((grid.Nz, grid.Ny, grid.Nx)))
+            f = amplitude * jnp.fft.rfftn(real) * envelope
+            return f.at[0, 0, 0].set(0.0)
+
+        z_plus = field(0.3)
+        z_minus = field(0.3)
+        g = jnp.stack([field(1.0) for _ in range(M + 1)], axis=-1)
+        return KRMHDState(
+            z_plus=z_plus, z_minus=z_minus, g=g, M=M, beta_i=1.0, v_th=1.0,
+            nu=0.0, Lambda=Lambda, time=0.0, grid=grid,
+        )
+
+    @pytest.mark.parametrize("closure", CLOSURES)
+    @pytest.mark.parametrize("Lambda", LAMBDAS)
+    @pytest.mark.parametrize("M", M_VALUES)
+    def test_weights_symmetrize_streaming_matrix(self, M, Lambda, closure):
+        """free_energy_weights(M, Λ, closure) makes P·T symmetric for the code's T."""
+        from krmhd.hermite import compute_streaming_matrix, free_energy_weights
+
+        p = _detailed_balance_weights(compute_streaming_matrix(M, Lambda, closure))
+        np.testing.assert_allclose(
+            free_energy_weights(M, Lambda, closure), p, rtol=1e-14, atol=0.0
+        )
+        if closure == "symmetric":
+            assert 0.44 < p[M] < 0.5  # ≈ 1/2, Issue #164
+        else:
+            assert p[M] == pytest.approx(1.0, abs=1e-15)
+
+    @pytest.mark.parametrize("closure", CLOSURES)
+    @pytest.mark.parametrize("Lambda", LAMBDAS)
+    @pytest.mark.parametrize("M", M_VALUES)
+    def test_free_energy_conserved_by_rhs(self, M, Lambda, closure):
+        """
+        dW/dt = 0 to float64 roundoff along krmhd_rhs(closure), η = ν = 0.
+
+        dW/dt is taken from hermite_free_energy itself as the central
+        difference [W(g + εġ) - W(g - εġ)] / 2ε, which is exact for a
+        quadratic form (no truncation error). The relative rate is
+        |dW/dt| / (ω·W) with ω = ‖ġ‖/‖g‖ the rate scale of the RHS.
+        Evaluating the other closure's weights on the same dynamics must
+        drift, so the check is not vacuous. For these states the matched
+        rate is below 1e-15 and the mismatched rate (which includes the
+        pre-#164 weight 1 on g_M under the symmetric closure) is 4e-3 to 2e-2.
+        """
+        from jax.experimental import enable_x64
+        from krmhd.diagnostics import hermite_free_energy, hermite_moment_energy
+        from krmhd.hermite import compute_streaming_matrix
+        from krmhd.timestepping import krmhd_rhs
+
+        with enable_x64():
+            state = self._smooth_random_state(M, Lambda)
+            assert state.g.dtype == jnp.complex128
+
+            g = state.g
+            g_dot = krmhd_rhs(state, eta=0.0, v_A=1.0, closure=closure).g
+            omega = float(jnp.linalg.norm(g_dot) / jnp.linalg.norm(g))
+            assert omega > 0.0
+            eps = 0.5 / omega
+
+            def relative_rate(weight_closure: str) -> float:
+                def W_at(s: float) -> float:
+                    shifted = state.model_copy(update={"g": g + s * eps * g_dot})
+                    return hermite_free_energy(shifted, closure=weight_closure)
+
+                W = hermite_free_energy(state, closure=weight_closure)
+                assert W > 0.0
+                dW_dt = (W_at(1.0) - W_at(-1.0)) / (2.0 * eps)
+                return abs(dW_dt) / (omega * W)
+
+            # hermite_free_energy is the detailed-balance form of the code's T
+            p = _detailed_balance_weights(compute_streaming_matrix(M, Lambda, closure))
+            E_m = np.asarray(hermite_moment_energy(state))
+            assert hermite_free_energy(state, closure=closure) == pytest.approx(
+                float(np.dot(p, E_m)), rel=1e-13
+            )
+
+            rate = relative_rate(closure)
+            assert rate < 1e-12, (
+                f"M={M}, Λ={Lambda:+.4f}, closure={closure}: "
+                f"|dW/dt|/(ωW) = {rate:.3e}"
+            )
+
+            other = "zero" if closure == "symmetric" else "symmetric"
+            rate_other = relative_rate(other)
+            assert rate_other > 1e-6, (
+                f"weights of closure={other} should drift under closure={closure}, "
+                f"got |dW/dt|/(ωW) = {rate_other:.3e}"
+            )
+
+    def test_zero_closure_result_unchanged(self):
+        """Default and closure="zero" reproduce the pre-#164 formula bit for bit."""
+        from krmhd.diagnostics import hermite_free_energy, hermite_moment_energy
+
+        Lambda = -float(np.sqrt(5.0))
+        state = self._smooth_random_state(M=9, Lambda=Lambda, seed=4)
+        E_m = hermite_moment_energy(state)
+        legacy = float((1.0 - 1.0 / Lambda) * E_m[0] + jnp.sum(E_m[1:]))
+
+        assert hermite_free_energy(state) == legacy
+        assert hermite_free_energy(state, closure="zero") == legacy
+        assert hermite_free_energy(state, True, "zero") == legacy
+
+    def test_symmetric_closure_weights_g_M_only(self):
+        """Symmetric minus zero closure is (p_M - 1)·E_M, with p_M from detailed balance."""
+        from jax.experimental import enable_x64
+        from krmhd.diagnostics import hermite_free_energy, hermite_moment_energy
+        from krmhd.hermite import compute_streaming_matrix
+
+        M, Lambda = 10, float(np.sqrt(5.0))
+        with enable_x64():
+            state = self._smooth_random_state(M, Lambda, seed=5)
+            E_M = float(hermite_moment_energy(state)[M])
+            p_M = _detailed_balance_weights(
+                compute_streaming_matrix(M, Lambda, "symmetric")
+            )[M]
+            diff = (hermite_free_energy(state, closure="symmetric")
+                    - hermite_free_energy(state, closure="zero"))
+            assert diff == pytest.approx((p_M - 1.0) * E_M, rel=1e-10)
+
+    @pytest.mark.parametrize("M", [0, 1])
+    def test_small_M(self, M):
+        """M < 2: the symmetric closure is rejected; the zero closure is w₀E₀ (+ E₁)."""
+        from krmhd.diagnostics import hermite_free_energy, hermite_moment_energy
+
+        Lambda = 3.0
+        state = self._smooth_random_state(M, Lambda, seed=6)
+        with pytest.raises(ValueError, match="M >= 2"):
+            hermite_free_energy(state, closure="symmetric")
+
+        E_m = hermite_moment_energy(state)
+        expected = (1.0 - 1.0 / Lambda) * float(E_m[0]) + float(jnp.sum(E_m[1:]))
+        assert hermite_free_energy(state) == pytest.approx(expected, rel=1e-6)
+
+    def test_invalid_closure_raises(self):
+        from krmhd.diagnostics import hermite_free_energy
+
+        state = self._smooth_random_state(M=4, Lambda=3.0, seed=7)
+        with pytest.raises(ValueError, match="closure"):
+            hermite_free_energy(state, closure="bogus")
 
 
 class TestPhaseMixingEnergy:
@@ -2283,3 +2492,51 @@ class TestComputeDissipationRate:
         assert abs(r2['resistive'] / r1['resistive'] - 2.0) < 1e-6
         # Collisional should scale linearly with nu
         assert abs(r3['collisional'] / r1['collisional'] - 2.0) < 1e-6
+
+    @pytest.mark.parametrize("scheme", ["imex_rk222", "lawson_rk4"])
+    def test_collisional_rate_is_free_energy_loss_symmetric_closure(self, scheme):
+        """
+        Under closure="symmetric", -dW/dt from one short gandalf_step equals
+        Nx·Ny·collisional when both W and the rate use closure="symmetric"
+        (Issue #164).
+
+        z± = 0 and η = 0, so W changes only through streaming (which conserves
+        the symmetric-closure W) and hyper-collisions. hyper_n = 4 puts most of
+        the collisional loss on g_M, where the closure weight p_M ≈ 1/2 differs
+        from 1, so the zero-closure rate misses by tens of percent.
+        """
+        from jax.experimental import enable_x64
+        from krmhd.diagnostics import hermite_free_energy
+        from krmhd.timestepping import gandalf_step
+
+        M, Lambda, nu, hyper_n, dt = 4, float(np.sqrt(5.0)), 1.0, 4, 1e-5
+        with enable_x64():
+            grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+            rng = np.random.default_rng(11)
+            moments = []
+            for _ in range(M + 1):
+                real = jnp.asarray(rng.standard_normal((grid.Nz, grid.Ny, grid.Nx)))
+                moments.append((jnp.fft.rfftn(real) * grid.dealias_mask).at[0, 0, 0].set(0.0))
+            g = jnp.stack(moments, axis=-1)
+            zeros = jnp.zeros(g.shape[:3], dtype=g.dtype)
+            state = KRMHDState(
+                z_plus=zeros, z_minus=zeros, g=g, M=M, beta_i=1.0, v_th=1.0,
+                nu=nu, Lambda=Lambda, time=0.0, grid=grid,
+            )
+
+            W0 = hermite_free_energy(state, closure="symmetric")
+            new = gandalf_step(state, dt, eta=0.0, v_A=1.0, nu=nu, hyper_n=hyper_n,
+                               scheme=scheme, closure="symmetric")
+            dW_dt = (hermite_free_energy(new, closure="symmetric") - W0) / dt
+
+            N_perp = grid.Nx * grid.Ny
+            rate_sym = compute_dissipation_rate(
+                state, eta=0.0, nu=nu, hyper_n=hyper_n, closure="symmetric"
+            )["collisional"]
+            rate_zero = compute_dissipation_rate(
+                state, eta=0.0, nu=nu, hyper_n=hyper_n
+            )["collisional"]
+
+            assert dW_dt < 0.0
+            assert -dW_dt == pytest.approx(N_perp * rate_sym, rel=1e-4)
+            assert abs(-dW_dt - N_perp * rate_zero) > 0.1 * abs(dW_dt)
