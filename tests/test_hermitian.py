@@ -247,8 +247,8 @@ def test_random_spectrum_keeps_kx_positive_draws():
     np.testing.assert_array_equal(state.z_minus[:, :, 1:-1], z_minus[:, :, 1:-1])
 
 
-def test_random_spectrum_paired_plane_power_matches_spectrum():
-    """√2 rescale: on kx=0, E|φ|² follows the same k^(-α) target as kx > 0."""
+def test_random_spectrum_paired_plane_modulus_and_phase():
+    """On kx=0, |φ| equals the target spectrum exactly and the phase is uniform."""
     grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=32)
     k_mag = np.sqrt(
         np.asarray(grid.kx)[None, None, :] ** 2
@@ -257,13 +257,19 @@ def test_random_spectrum_paired_plane_power_matches_spectrum():
     )
     band = ((k_mag >= 1.0) & (k_mag <= 10.0))[:, :, 0]
 
-    ratios = []
+    phases = []
     for seed in range(8):
-        # alpha=0: flat target |f| = 1 in band, so every entry has equal weight
+        # alpha=0: flat target |f| = 1 in band, 0 outside
         state = initialize_random_spectrum(grid, M=0, alpha=0.0, k_max=10.0, seed=seed)
-        ratios.append(np.mean(np.abs(np.asarray(state.phi[:, :, 0])[band]) ** 2))
-    # Without the rescale this would be 0.5
-    assert np.mean(ratios) == pytest.approx(1.0, abs=0.1)
+        phi0 = np.asarray(state.phi[:, :, 0])
+        np.testing.assert_allclose(np.abs(phi0[band]), 1.0, rtol=1e-6)
+        assert np.all(phi0[~band] == 0)
+        phases.append(np.angle(phi0[band]))
+    phases = np.concatenate(phases)
+    # Uniform phase: low circular moments vanish (Hermitian pairs make the
+    # sine moments cancel exactly, so only the cosines are informative)
+    assert abs(np.mean(np.cos(phases))) < 0.05
+    assert abs(np.mean(np.cos(2 * phases))) < 0.05
 
 
 @pytest.mark.parametrize("Nx,Ny,Nz", GRIDS)

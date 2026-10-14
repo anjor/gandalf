@@ -1380,6 +1380,34 @@ def initialize_alfven_wave(
     )
 
 
+def _hermitian_unit_phasors(unit: Array, Nx: int) -> Array:
+    """
+    Random unit phasors whose kx=0 (and Nyquist) planes form Hermitian pairs.
+
+    On those planes the partner (kx, -ky, -kz) is stored explicitly and was
+    drawn independently. Projecting with enforce_hermitian and rescaling to
+    unit modulus gives u(kx, -ky, -kz) = u*(kx, ky, kz) exactly (Issue #165).
+    The phase stays uniform, because the sum of two independent uniform
+    phasors has a uniform phase. A self-conjugate entry becomes ±1. Every
+    mode therefore keeps |u| = 1, so the spectrum it multiplies is reproduced
+    exactly, as on kx > 0 planes. kx > 0 planes are returned unchanged.
+
+    Args:
+        unit: Unit-modulus complex array [Nz, Ny, Nx//2+1]
+        Nx: Full grid size in x
+
+    Returns:
+        Unit-modulus array with Hermitian kx=0 (and Nyquist) planes
+    """
+    projected = enforce_hermitian(unit, Nx)
+    modulus = jnp.abs(projected)
+    # modulus = 0 has probability zero; 1 keeps the pair Hermitian if it occurs
+    normalized = jnp.where(modulus > 0, projected / jnp.where(modulus > 0, modulus, 1.0), 1.0)
+    for ix in _rfft_paired_planes(Nx):
+        unit = unit.at[:, :, ix].set(normalized[:, :, ix])
+    return unit
+
+
 def initialize_random_spectrum(
     grid: SpectralGrid3D,
     M: int,
@@ -1405,8 +1433,8 @@ def initialize_random_spectrum(
 
     The initialization ensures:
     - Reality condition: f(-k) = f*(k), including Hermitian pairs on the
-      kx=0 and Nyquist planes, rescaled so their expected power matches
-      kx > 0 modes (Issue #165)
+      kx=0 and Nyquist planes, where every mode keeps the exact modulus of
+      the target spectrum, as kx > 0 modes do (Issue #165)
     - Divergence-free magnetic field: ∇·B = 0
     - Random phases for statistical homogeneity
     - Energy concentrated in specified k-range [k_min, k_max]
@@ -1474,28 +1502,16 @@ def initialize_random_spectrum(
     phase_phi = 2.0 * jnp.pi * jax.random.uniform(subkey1, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1))
     phase_A = 2.0 * jnp.pi * jax.random.uniform(subkey2, shape=(grid.Nz, grid.Ny, grid.Nx // 2 + 1))
 
-    # Create fields with random phases and power-law spectrum
-    phi = spectrum * jnp.exp(1.0j * phase_phi).astype(jnp.complex64)
-    A_parallel = spectrum * jnp.exp(1.0j * phase_A).astype(jnp.complex64)
+    # Create fields with random phases and power-law spectrum. On the kx=0
+    # (and Nyquist) planes the phasors form Hermitian pairs (Issue #165).
+    phase_factor_phi = _hermitian_unit_phasors(jnp.exp(1.0j * phase_phi).astype(jnp.complex64), grid.Nx)
+    phase_factor_A = _hermitian_unit_phasors(jnp.exp(1.0j * phase_A).astype(jnp.complex64), grid.Nx)
+    phi = spectrum * phase_factor_phi
+    A_parallel = spectrum * phase_factor_A
 
     # Zero out k=0 mode (no DC component)
     phi = phi.at[0, 0, 0].set(0.0)
     A_parallel = A_parallel.at[0, 0, 0].set(0.0)
-
-    # Hermitian pairs on the kx=0 (and Nyquist) planes (Issue #165). There the
-    # partner (kx, -ky, -kz) is stored explicitly and got its own random phase;
-    # irfftn drops the anti-Hermitian part but diagnostics count it. Projecting
-    # f → (f + conj(f_partner))/2 averages two independent unit phasors, so the
-    # expected power per entry falls from s² to s²/2. Rescaling those planes by
-    # √2 restores E|f|² = s², the same expected energy per mode as a kx > 0
-    # entry (which stands for itself and its implied partner), so E(k) keeps
-    # its k^(-α) shape on every plane. The cost: the modulus there becomes
-    # √2·s·|cos((θ + θ_partner)/2)| rather than exactly s. kx > 0 entries keep
-    # their draws bit for bit.
-    paired_planes = jnp.array(_rfft_paired_planes(grid.Nx))
-    plane_weight = jnp.ones(grid.Nx // 2 + 1, dtype=jnp.float32).at[paired_planes].set(jnp.sqrt(2.0))
-    phi = enforce_hermitian(phi * plane_weight, grid.Nx)
-    A_parallel = enforce_hermitian(A_parallel * plane_weight, grid.Nx)
 
     # Convert to Elsasser variables
     z_plus, z_minus = physical_to_elsasser(phi, A_parallel)
