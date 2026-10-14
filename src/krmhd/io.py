@@ -123,7 +123,7 @@ def save_checkpoint(
         metadata: Optional user metadata dict (arbitrary key-value pairs)
         overwrite: If True, overwrite existing file; otherwise raise error
         scheme: Advisory — the gandalf_step integrator that produced this
-            state (``"imex_rk222"`` or ``"lawson_rk4"``). When provided, it
+            state (one of ``SUPPORTED_SCHEMES``, e.g. ``"imex_rk222"``). When provided, it
             is written as an HDF5 metadata attribute and surfaced by
             ``load_checkpoint`` so a resumed run can detect silent integrator
             switches. ``None`` (default) omits the attribute; the state
@@ -283,7 +283,7 @@ def load_checkpoint(
         filename: Input HDF5 checkpoint file path
         validate_grid: If True, verify grid dimensions are consistent
         expected_scheme: Optional gandalf_step scheme the caller intends to
-            resume with (``"imex_rk222"`` or ``"lawson_rk4"``). If provided
+            resume with (one of ``SUPPORTED_SCHEMES``). If provided
             *and* the checkpoint was saved with a ``scheme`` tag, a
             ``UserWarning`` is emitted when they differ — a silent switch
             between integrators makes trajectories drift by ~1e-6/step at
@@ -424,9 +424,11 @@ def load_checkpoint(
     ):
         warnings.warn(
             f"Checkpoint {filename!r}: stored scheme={stored_scheme!r} but "
-            f"expected_scheme={expected_scheme!r}. The Elsasser formula is "
-            f"scheme-independent but float32 arithmetic ordering differs, so "
-            f"the resumed trajectory will drift ~1e-6/step. "
+            f"expected_scheme={expected_scheme!r}. imex_rk222 and lawson_rk4 "
+            f"share the Elsasser formula but differ in float32 arithmetic "
+            f"ordering, so a switch between them drifts ~1e-6/step. "
+            f"imex_ars343 uses a different z+/- update, so a switch to or "
+            f"from it differs at the truncation-error level. "
             f"To suppress: omit `expected_scheme` from your `load_checkpoint` "
             f"call. To reproduce: re-run under {stored_scheme!r}.",
             UserWarning,
