@@ -300,8 +300,8 @@ def poisson_bracket_2d(
     Note:
         The 2/3 dealiasing is CRITICAL for stability. Without it, aliasing errors
         from the nonlinear product will cause spurious energy growth and eventual
-        numerical instability. The dealiasing zeros all modes where
-        max(|kx|/kx_max, |ky|/ky_max) > 2/3.
+        numerical instability. The dealiasing zeros all modes with integer
+        mode number |n| > (N-1)//3 in any direction (3|n| >= N).
     """
     # 1. Compute derivatives in Fourier space
     df_dx_fourier = derivative_x(f_fourier, kx)

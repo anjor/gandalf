@@ -10,6 +10,7 @@ Validates:
 - Poisson solver (∇²φ = ω)
 """
 
+import numpy as np
 import pytest
 import jax
 import jax.numpy as jnp
@@ -372,6 +373,281 @@ class TestDealiasing:
 
         # Low-k field should be nearly unchanged
         assert jnp.allclose(field_real, field_back, atol=1e-6)
+
+
+def _mode_numbers(N: int, rfft: bool = False) -> np.ndarray:
+    """Integer FFT mode numbers along one axis (rfft: [0..N//2])."""
+    if rfft:
+        return np.arange(N // 2 + 1)
+    idx = np.arange(N)
+    return np.where(idx < N // 2, idx, idx - N)
+
+
+def _legacy_mask(*axes: tuple[jax.Array, bool]) -> jax.Array:
+    """
+    The pre-#171 mask: |k| <= float32(2/3)·max|k| per direction.
+
+    Each entry is (k, rfft); k is the physical wavenumber array. Axes are
+    given in array order (z, y, x for 3D). When 3 divides N this keeps the
+    edge |n| = N/3, which aliases. Used only as a control.
+    """
+    threshold = jnp.float32(2.0 / 3.0)
+    keeps = [jnp.abs(k) <= threshold * jnp.max(jnp.abs(k)) for k, _ in axes]
+    mask = keeps[0]
+    for i, keep in enumerate(keeps[1:], start=1):
+        mask = mask[..., jnp.newaxis] & keep.reshape((1,) * i + (-1,))
+    return mask
+
+
+def _rfft_weights(Nx: int) -> np.ndarray:
+    """Parseval weights over the rfft axis: 1 at kx = 0 and Nyquist, else 2."""
+    w = np.full(Nx // 2 + 1, 2.0)
+    w[0] = 1.0
+    w[-1] = 1.0
+    return w
+
+
+class TestDealiasMaskAliasFree:
+    """
+    The 2/3 mask keeps exactly 3|n| < N per direction (Issue #171).
+
+    A quadratic product of two kept modes, |n1|, |n2| <= K, aliases to
+    n1 + n2 ∓ N with magnitude >= N - 2K, which lies outside the kept band
+    iff 3K < N. Equivalently, the grid sum of a triple product of kept
+    modes equals its integral, so the dealiased bracket satisfies
+    <f, P{φ, f}> = 0 exactly (to round-off). The old float comparison
+    |k| <= (2/3)·k_Nyquist kept |n| = N/3 when 3 divides N.
+    """
+
+    @pytest.mark.parametrize("N", [24, 32, 48])
+    @pytest.mark.parametrize("L", [2 * jnp.pi, 1.0])
+    def test_retained_set_is_3n_less_than_N(self, N, L):
+        """Kept modes are exactly the box 3|n| < N in every direction (2D and 3D)."""
+        n_keep = (N - 1) // 3
+        nx = _mode_numbers(N, rfft=True)
+        ny = _mode_numbers(N)
+        nz = _mode_numbers(N)
+
+        grid2 = SpectralGrid2D.create(Nx=N, Ny=N, Lx=L, Ly=L)
+        expected2 = (3 * np.abs(ny)[:, None] < N) & (3 * np.abs(nx)[None, :] < N)
+        assert grid2.dealias_mask.shape == (N, N // 2 + 1)
+        assert grid2.dealias_mask.dtype == jnp.bool_
+        np.testing.assert_array_equal(np.asarray(grid2.dealias_mask), expected2)
+
+        grid3 = SpectralGrid3D.create(Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L)
+        expected3 = (
+            (3 * np.abs(nz)[:, None, None] < N)
+            & (3 * np.abs(ny)[None, :, None] < N)
+            & (3 * np.abs(nx)[None, None, :] < N)
+        )
+        assert grid3.dealias_mask.shape == (N, N, N // 2 + 1)
+        assert grid3.dealias_mask.dtype == jnp.bool_
+        np.testing.assert_array_equal(np.asarray(grid3.dealias_mask), expected3)
+
+        # The edge n = (N-1)//3 is kept in each direction and n_keep + 1 is not
+        # (index N - n is mode -n on the full-FFT axes).
+        mask_x = grid3.dealias_mask[0, 0, :]
+        mask_y = grid3.dealias_mask[0, :, 0]
+        mask_z = grid3.dealias_mask[:, 0, 0]
+        assert bool(mask_x[n_keep]) and not bool(mask_x[n_keep + 1])
+        for mask_full in (mask_y, mask_z):
+            assert bool(mask_full[n_keep]) and bool(mask_full[N - n_keep])
+            assert not bool(mask_full[n_keep + 1]) and not bool(mask_full[N - n_keep - 1])
+
+    @pytest.mark.parametrize(
+        "Nx, Ny, Nz",
+        [(16, 16, 16), (20, 32, 8), (22, 64, 10), (128, 128, 32), (256, 256, 16)],
+    )
+    def test_unchanged_when_3_does_not_divide_N(self, Nx, Ny, Nz):
+        """For 3 ∤ N the integer rule equals the old (2/3)·k_Nyquist comparison."""
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=1.0, Ly=2.5, Lz=2 * jnp.pi)
+        legacy = _legacy_mask((grid.kz, False), (grid.ky, False), (grid.kx, True))
+        np.testing.assert_array_equal(np.asarray(grid.dealias_mask), np.asarray(legacy))
+        grid2 = SpectralGrid2D.create(Nx=Nx, Ny=Ny, Lx=1.0, Ly=2.5)
+        legacy2 = _legacy_mask((grid2.ky, False), (grid2.kx, True))
+        np.testing.assert_array_equal(np.asarray(grid2.dealias_mask), np.asarray(legacy2))
+
+    @staticmethod
+    def _band_filling_field(rng: np.random.Generator, shape: tuple, mask: jax.Array) -> jax.Array:
+        """rfft of real Gaussian noise restricted to the mask (fills the band)."""
+        return jnp.fft.rfftn(jnp.asarray(rng.standard_normal(shape))) * mask
+
+    def _bracket_invariant_2d(self, N: int, mask: jax.Array) -> float:
+        """<f, P{φ, f}> / Σ|f||P{φ, f}| for φ, f filling the given mask (2D)."""
+        from krmhd.physics import poisson_bracket_2d
+
+        grid = SpectralGrid2D.create(Nx=N, Ny=N)
+        rng = np.random.default_rng(171)
+        f = self._band_filling_field(rng, (N, N), mask)
+        phi = self._band_filling_field(rng, (N, N), mask)
+        bracket = poisson_bracket_2d(phi, f, grid.kx, grid.ky, N, N, mask)
+        w = _rfft_weights(N)[None, :]
+        inv = np.sum(w * np.real(np.conj(f) * bracket))
+        scale = np.sum(w * np.abs(f) * np.abs(bracket))
+        assert scale > 0.0
+        return float(inv / scale)
+
+    def _bracket_invariant_3d(self, Nx: int, Nz: int, mask: jax.Array) -> float:
+        """<f, P{φ, f}> / Σ|f||P{φ, f}| for φ, f filling the given mask (3D)."""
+        from krmhd.physics import poisson_bracket_3d
+
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=Nx, Nz=Nz)
+        rng = np.random.default_rng(171)
+        f = self._band_filling_field(rng, (Nz, Nx, Nx), mask)
+        phi = self._band_filling_field(rng, (Nz, Nx, Nx), mask)
+        bracket = poisson_bracket_3d(phi, f, grid.kx, grid.ky, Nz, Nx, Nx, mask)
+        w = _rfft_weights(Nx)[None, None, :]
+        inv = np.sum(w * np.real(np.conj(f) * bracket))
+        scale = np.sum(w * np.abs(f) * np.abs(bracket))
+        assert scale > 0.0
+        return float(inv / scale)
+
+    def test_bracket_conserves_quadratic_invariant_2d_N24(self):
+        """float64, N = 24: <f, P{φ, f}> vanishes to round-off; the legacy mask does not."""
+        from jax.experimental import enable_x64
+
+        N = 24
+        with enable_x64():
+            grid = SpectralGrid2D.create(Nx=N, Ny=N)
+            assert grid.kx.dtype == jnp.float64
+            rel = self._bracket_invariant_2d(N, grid.dealias_mask)
+            assert abs(rel) < 1e-13, f"dealiased bracket not conservative: {rel:.3e}"
+
+            # Control: the pre-#171 mask keeps |n| = 8 = N/3 and aliases.
+            legacy = _legacy_mask((grid.ky, False), (grid.kx, True))
+            assert int(np.sum(np.asarray(legacy))) > int(np.sum(np.asarray(grid.dealias_mask)))
+            rel_legacy = self._bracket_invariant_2d(N, legacy)
+            assert abs(rel_legacy) > 1e-4, f"control unexpectedly conservative: {rel_legacy:.3e}"
+
+    def test_bracket_conserves_quadratic_invariant_3d_N24(self):
+        """float64, 24 x 24 x 8: the 3D bracket conserves <f, P{φ, f}>; the legacy mask does not."""
+        from jax.experimental import enable_x64
+
+        Nx, Nz = 24, 8
+        with enable_x64():
+            grid = SpectralGrid3D.create(Nx=Nx, Ny=Nx, Nz=Nz)
+            rel = self._bracket_invariant_3d(Nx, Nz, grid.dealias_mask)
+            assert abs(rel) < 1e-13, f"dealiased bracket not conservative: {rel:.3e}"
+
+            legacy = _legacy_mask((grid.kz, False), (grid.ky, False), (grid.kx, True))
+            rel_legacy = self._bracket_invariant_3d(Nx, Nz, legacy)
+            assert abs(rel_legacy) > 1e-4, f"control unexpectedly conservative: {rel_legacy:.3e}"
+
+    @staticmethod
+    def _padded_bracket_3d(
+        phi: np.ndarray, f: np.ndarray, kx: np.ndarray, ky: np.ndarray, Nz: int, Ny: int, Nx: int
+    ) -> np.ndarray:
+        """
+        Exact {φ, f} of band-limited inputs, in GANDALF's (unnormalised
+        rfftn) convention on the (Nz, Ny, Nx) grid, untruncated.
+
+        The product is formed on a grid twice as fine in every direction,
+        where all products of the inputs are resolved, then mapped back to
+        the coarse index layout. Inputs must vanish at |n| >= N/2.
+        """
+        iz = _mode_numbers(Nz) % (2 * Nz)
+        iy = _mode_numbers(Ny) % (2 * Ny)
+        ix = np.arange(Nx // 2 + 1)
+        scale = 8.0  # fine/coarse point count; numpy forward FFT is unnormalised
+        fine_shape = (2 * Nz, 2 * Ny, 2 * Nx)
+
+        def to_real(F: np.ndarray) -> np.ndarray:
+            fine = np.zeros((2 * Nz, 2 * Ny, Nx + 1), dtype=np.complex128)
+            fine[np.ix_(iz, iy, ix)] = F * scale
+            return np.fft.irfftn(fine, s=fine_shape, axes=(0, 1, 2))
+
+        KX = 1j * kx[None, None, :]
+        KY = 1j * ky[None, :, None]
+        prod = to_real(KX * phi) * to_real(KY * f) - to_real(KY * phi) * to_real(KX * f)
+        return np.fft.rfftn(prod)[np.ix_(iz, iy, ix)] / scale
+
+    @pytest.mark.parametrize("Nx, Nz", [(24, 12), (24, 8), (16, 12)])
+    def test_bracket_equals_exact_product_on_band_3d(self, Nx, Nz):
+        """
+        float64: the dealiased 3D bracket equals the exact bracket projected
+        onto the mask, for inputs filling the band.
+
+        (16, 12) differs from the legacy mask only in z. The products are
+        formed on the 3D grid, so they alias in z too. That aliasing does
+        not show in <f, P{φ, f}>: the bracket coefficients depend only on
+        k⊥, which still add exactly, so the invariant survives. It does put
+        content at the wrong kz, which this comparison detects.
+        """
+        from jax.experimental import enable_x64
+        from krmhd.physics import poisson_bracket_3d
+
+        def max_rel_error(mask: jax.Array) -> float:
+            grid = SpectralGrid3D.create(Nx=Nx, Ny=Nx, Nz=Nz)
+            rng = np.random.default_rng(171)
+            f = self._band_filling_field(rng, (Nz, Nx, Nx), mask)
+            phi = self._band_filling_field(rng, (Nz, Nx, Nx), mask)
+            got = np.asarray(poisson_bracket_3d(phi, f, grid.kx, grid.ky, Nz, Nx, Nx, mask))
+            exact = self._padded_bracket_3d(
+                np.asarray(phi), np.asarray(f), np.asarray(grid.kx), np.asarray(grid.ky),
+                Nz, Nx, Nx,
+            ) * np.asarray(mask)
+            return float(np.max(np.abs(got - exact)) / np.max(np.abs(exact)))
+
+        with enable_x64():
+            grid = SpectralGrid3D.create(Nx=Nx, Ny=Nx, Nz=Nz)
+            err = max_rel_error(grid.dealias_mask)
+            assert err < 1e-12, f"dealiased bracket differs from exact product: {err:.3e}"
+
+            # Control: every case has 3 | N in some direction, so the legacy
+            # mask keeps an aliasing edge there.
+            legacy = _legacy_mask((grid.kz, False), (grid.ky, False), (grid.kx, True))
+            err_legacy = max_rel_error(legacy)
+            assert err_legacy > 1e-3, f"control unexpectedly alias-free: {err_legacy:.3e}"
+
+    def test_krmhd_rhs_conserves_alfvenic_energy_N24(self):
+        """
+        float64, 24 x 24 x 12, η = 0: the KRMHD RHS conserves
+        E = Σ k⊥²(|z⁺|² + |z⁻|²) to round-off with the grid mask.
+
+        The linear ∓ikz terms conserve E mode by mode; the dealiased
+        Elsasser nonlinearity conserves it when it is alias-free. With the
+        legacy mask the relative rate is ~1e-2.
+        """
+        from jax.experimental import enable_x64
+        from krmhd.physics import KRMHDState
+        from krmhd.timestepping import krmhd_rhs
+
+        Nx, Nz, M = 24, 12, 2
+
+        def relative_rate(mask: jax.Array) -> float:
+            grid = SpectralGrid3D.create(Nx=Nx, Ny=Nx, Nz=Nz)
+            grid = grid.model_copy(update={"dealias_mask": mask})
+            rng = np.random.default_rng(171)
+
+            def field() -> jax.Array:
+                f = 0.3 * self._band_filling_field(rng, (Nz, Nx, Nx), mask)
+                return f.at[0, 0, 0].set(0.0)
+
+            z_plus, z_minus = field(), field()
+            g = jnp.zeros(z_plus.shape + (M + 1,), dtype=z_plus.dtype)
+            state = KRMHDState(
+                z_plus=z_plus, z_minus=z_minus, g=g, M=M, beta_i=1.0, v_th=1.0,
+                nu=0.0, Lambda=1.0, time=0.0, grid=grid,
+            )
+            d = krmhd_rhs(state, eta=0.0, v_A=1.0)
+            k_perp2 = np.asarray(grid.kx[None, None, :] ** 2 + grid.ky[None, :, None] ** 2)
+            w = _rfft_weights(Nx)[None, None, :] * k_perp2
+            dE = np.sum(w * np.real(np.conj(z_plus) * d.z_plus + np.conj(z_minus) * d.z_minus))
+            scale = np.sum(
+                w * (np.abs(z_plus) * np.abs(d.z_plus) + np.abs(z_minus) * np.abs(d.z_minus))
+            )
+            assert scale > 0.0
+            return float(dE / scale)
+
+        with enable_x64():
+            grid = SpectralGrid3D.create(Nx=Nx, Ny=Nx, Nz=Nz)
+            assert grid.kx.dtype == jnp.float64
+            rel = relative_rate(grid.dealias_mask)
+            assert abs(rel) < 1e-13, f"KRMHD RHS not energy-conserving: {rel:.3e}"
+
+            legacy = _legacy_mask((grid.kz, False), (grid.ky, False), (grid.kx, True))
+            rel_legacy = relative_rate(legacy)
+            assert abs(rel_legacy) > 1e-4, f"control unexpectedly conservative: {rel_legacy:.3e}"
 
 
 class TestSpectralField2D:

@@ -272,12 +272,14 @@ This causes spurious energy transfer and violates conservation laws.
 
 ### The 2/3 Rule
 
-**Solution:** Keep only modes with |k| ≤ k_max = (2/3)·k_Nyquist.
+**Solution:** Keep only modes with integer mode number |n| ≤ K = (N-1)//3 in each direction, i.e. 3|n| < N. A product of two kept modes has |n| ≤ 2K and can alias to n ∓ N, whose magnitude is at least N - 2K; that lies outside the kept band (and is zeroed by the mask) exactly when 3K < N.
 
 For N=64:
 - k_Nyquist = 32
-- k_max = 21 (after dealiasing)
-- Products: k=21 × k=21 = k=42 ≤ 2·k_max = 42 ✓ (no aliasing)
+- K = 21 (after dealiasing)
+- Products: k=21 × k=21 = k=42 → aliases to 42 - 64 = -22, outside the kept band ✓ (no aliasing)
+
+For N not divisible by 3 this is the same set as |k| ≤ (2/3)·k_Nyquist. For N divisible by 3 it is not: at N=24, (2/3)·12 = 8, but two n=8 modes give n=16, which aliases to -8. The mask therefore keeps |n| ≤ 7 at N=24 (Issue #171).
 
 **Implementation:**
 ```python
@@ -299,10 +301,11 @@ product_hat = jnp.fft.rfftn(product_real)
 product_hat_dealiased = grid.dealias(product_hat)
 ```
 
-**Dealiasing mask:** Sets to zero all modes with:
+**Dealiasing mask:** Sets to zero all modes with integer mode numbers (nx, ny, nz) satisfying:
 ```
-|kx| > (2/3)·(Nx/2)  OR  |ky| > (2/3)·(Ny/2)  OR  |kz| > (2/3)·(Nz/2)
+|nx| > (Nx-1)//3  OR  |ny| > (Ny-1)//3  OR  |nz| > (Nz-1)//3
 ```
+The edge (N-1)//3 is the same one used to normalise the hyper-dissipation (below).
 
 **Performance:** Dealiasing is cheap (just a mask multiplication), but FFTs dominate cost.
 
@@ -971,7 +974,7 @@ See `src/krmhd/forcing.py` for implementation details.
 | Component | Implementation | Key Parameters |
 |-----------|---------------|----------------|
 | **Spatial** | 3D Fourier (rfft) | Nx, Ny, Nz, Lx, Ly, Lz |
-| **Dealiasing** | 2/3 rule | k_max = (2/3)·k_Nyquist |
+| **Dealiasing** | 2/3 rule | \|n\| ≤ (N-1)//3 per direction |
 | **Time** | GANDALF + RK2 | dt (CFL-limited) |
 | **Dissipation** | Normalized hyper | η, r (typically η=1-2, r=2) |
 | **Kinetic** | Hermite moments | M (typically 8), ν, n |
