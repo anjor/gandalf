@@ -68,6 +68,11 @@ Backward compatibility:
     version attribute (IO_FORMAT_VERSION) was intentionally left unchanged
     because old files remain fully readable.
 
+    Checkpoints whose kx=0/Nyquist planes carry an anti-Hermitian "ghost"
+    (written before Issues #156/#165 were fixed) are projected onto their
+    Hermitian part on load, with a UserWarning. Real-space fields are
+    unchanged; pass enforce_hermitian=False to get the raw arrays.
+
 Physics context:
     Checkpointing is essential for long turbulence runs (t >> τ_nl) where:
     - τ_nl ~ L/v_rms is the nonlinear time
@@ -89,8 +94,8 @@ import h5py
 import numpy as np
 import jax.numpy as jnp
 
-from krmhd.physics import KRMHDState
-from krmhd.spectral import SpectralGrid3D
+from krmhd.physics import KRMHDState, enforce_hermitian_state
+from krmhd.spectral import SpectralGrid3D, anti_hermitian_fraction
 from krmhd.diagnostics import EnergyHistory, TurbulenceDiagnostics
 from krmhd.timestepping import Scheme, SUPPORTED_SCHEMES
 
@@ -101,6 +106,13 @@ IO_FORMAT_VERSION = "1.0.0"
 # Compression settings for HDF5 datasets
 # level 4 is a good balance between compression ratio and speed
 COMPRESSION_LEVEL = 4
+
+# Anti-Hermitian power on the kx=0/Nyquist planes, as a share of a field's
+# total stored power, above which load_checkpoint treats it as a ghost rather
+# than round-off (Issue #165). Checkpoints are float32: a clean state has
+# per-entry round-off ~1e-7, i.e. a power share ~1e-14, while ghosts written
+# before the forcing fix (#156) are O(1e-2) or larger.
+HERMITIAN_GHOST_TOLERANCE = 1e-10
 
 
 def save_checkpoint(
@@ -271,6 +283,7 @@ def load_checkpoint(
     filename: str,
     validate_grid: bool = True,
     expected_scheme: Optional[Scheme] = None,
+    enforce_hermitian: bool = True,
 ) -> Tuple[KRMHDState, SpectralGrid3D, Dict[str, Any]]:
     """
     Load KRMHD state from HDF5 checkpoint file.
@@ -290,6 +303,12 @@ def load_checkpoint(
             float32 even though the Elsasser formula is scheme-independent.
             ``None`` (default) skips the check for backward compatibility
             with legacy checkpoints.
+        enforce_hermitian: If True (default), measure the anti-Hermitian
+            "ghost" on the kx=0/Nyquist planes of z± and g. If any field's
+            share of stored power exceeds HERMITIAN_GHOST_TOLERANCE, project
+            it out with ``enforce_hermitian_state`` and emit a
+            ``UserWarning``. Clean checkpoints load bit for bit. If False,
+            the arrays are returned exactly as stored.
 
     Returns:
         state: Loaded KRMHD state
@@ -320,6 +339,12 @@ def load_checkpoint(
         /state/B_parallel_real and /state/B_parallel_imag datasets for the
         since-removed (never-evolved) B_parallel field. These datasets are
         silently ignored; old checkpoints load without error.
+
+        Checkpoints written before the forcing fix (Issue #156) or from
+        random_spectrum / kx=0 Alfvén-wave initial conditions before #165
+        carry an anti-Hermitian part on the kx=0/Nyquist planes. irfftn never
+        saw it, so removing it leaves every real-space field unchanged; it
+        only stops Fourier-space diagnostics from counting it.
     """
     filepath = Path(filename)
 
@@ -411,6 +436,10 @@ def load_checkpoint(
         # applies to timestamp, user metadata, etc. under h5py < 3.0 too.
         metadata = {k: _decode_attr(v) for k, v in f['metadata'].attrs.items()}
 
+    # Remove an anti-Hermitian ghost on the kx=0/Nyquist planes (Issue #165)
+    if enforce_hermitian:
+        state = _remove_hermitian_ghost(state, filename)
+
     # Advisory scheme-mismatch warning. Only fires when the checkpoint
     # recorded a scheme AND the caller explicitly named the scheme it
     # intends to resume with — otherwise stay silent so legacy checkpoints
@@ -436,6 +465,46 @@ def load_checkpoint(
         )
 
     return state, grid, metadata
+
+
+def _remove_hermitian_ghost(state: KRMHDState, filename: str) -> KRMHDState:
+    """
+    Project out an anti-Hermitian ghost on the kx=0/Nyquist planes, with a warning.
+
+    The share is measured against each field's total stored power, which stays
+    robust when the paired planes hold little power, so round-off on a clean
+    state is far below HERMITIAN_GHOST_TOLERANCE and the state is returned
+    untouched. Arrays that do not match the grid (possible with
+    validate_grid=False) are left alone.
+    """
+    Nx = state.grid.Nx
+    fields = {"z_plus": state.z_plus, "z_minus": state.z_minus, "g": state.g}
+    if any(arr.shape[2] != Nx // 2 + 1 for arr in fields.values()):
+        return state
+
+    ghost_share = {
+        name: float(anti_hermitian_fraction(arr, Nx, relative_to="total"))
+        for name, arr in fields.items()
+    }
+    if max(ghost_share.values()) <= HERMITIAN_GHOST_TOLERANCE:
+        return state
+
+    plane_share = {name: float(anti_hermitian_fraction(arr, Nx)) for name, arr in fields.items()}
+    summary = ", ".join(
+        f"{name} {ghost_share[name]:.3g} ({plane_share[name]:.3g} of kx=0/Nyquist power)"
+        for name in fields
+    )
+    warnings.warn(
+        f"Checkpoint {filename!r} has an anti-Hermitian part on the "
+        f"kx=0/Nyquist planes (share of stored power: {summary}), "
+        f"most likely written before the fixes for issues #156/#165. "
+        f"irfftn never saw it, but Fourier-space diagnostics counted "
+        f"it. It has been projected out; real-space fields are "
+        f"unchanged. Pass enforce_hermitian=False to load the raw arrays.",
+        UserWarning,
+        stacklevel=3,  # point at load_checkpoint's caller
+    )
+    return enforce_hermitian_state(state)
 
 
 def _validate_scheme(scheme: str, *, kwarg_name: str) -> None:

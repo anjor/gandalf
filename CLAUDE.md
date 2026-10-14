@@ -240,7 +240,7 @@ See Diagnostics section for full details on compute_turbulence_diagnostics().
 3. **Parallel gradient**: ∇∥ = ik∥ only valid for periodic boundary conditions
 4. **Initial conditions**: Must satisfy ∇·B = 0 and reality conditions
 5. **Slow mode coupling**: Any back-reaction indicates coding error
-6. **Hermitian symmetry in forcing**: When adding forcing directly in Fourier space, the kx=0 and kx=Nyquist planes need Hermitian pairs f(0,-ky,-kz) = f*(0,ky,kz). Taking the real part of each entry is NOT enough. Use `forcing._enforce_rfft_hermitian`. irfftn silently drops the anti-Hermitian part, but it stays in the Fourier state and pollutes diagnostics (Issue #156).
+6. **Hermitian symmetry on kx=0/Nyquist planes**: When setting entries directly in Fourier space (forcing, initial conditions), the kx=0 and kx=Nyquist planes need Hermitian pairs f(kx,-ky,-kz) = f*(kx,ky,kz). Taking the real part of each entry is NOT enough. Use `spectral.enforce_hermitian(field, Nx)` (works on [Nz, Ny, Nx//2+1] and Hermite [..., M+1] arrays) or `physics.enforce_hermitian_state(state)`, and check with `spectral.anti_hermitian_fraction`. The projection halves the expected power of independent draws on those planes, so rescale if the kx=0 modes must match the kx>0 spectrum. irfftn silently drops the anti-Hermitian part, but it stays in the Fourier state and pollutes diagnostics (Issues #156, #165). `io.load_checkpoint` removes it from old checkpoints with a warning (`enforce_hermitian=False` opts out).
 
 ## Reference Parameters
 Typical astrophysical parameters:

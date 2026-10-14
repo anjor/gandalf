@@ -707,8 +707,12 @@ def test_checkpoint_legacy_b_parallel_datasets_ignored(tmpdir):
         meta_group.attrs['version'] = IO_FORMAT_VERSION
         meta_group.attrs['timestamp'] = datetime.now().isoformat()
 
-    # Must load without KeyError despite the extra B_parallel datasets
-    loaded_state, loaded_grid, metadata = load_checkpoint(str(filename))
+    # Must load without KeyError despite the extra B_parallel datasets.
+    # The random fields are not Hermitian on kx=0/Nyquist; opt out of the
+    # ghost projection (Issue #165) so the raw arrays can be compared.
+    loaded_state, loaded_grid, metadata = load_checkpoint(
+        str(filename), enforce_hermitian=False
+    )
 
     assert loaded_grid.Nx == Nx
     assert loaded_grid.Ny == Ny

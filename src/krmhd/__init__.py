@@ -41,6 +41,8 @@ from krmhd.spectral import (
     derivative_z,
     laplacian,
     dealias,
+    enforce_hermitian,
+    anti_hermitian_fraction,
 )
 
 from krmhd.hermite import (
@@ -65,6 +67,7 @@ from krmhd.physics import (
     initialize_alfven_wave,
     initialize_random_spectrum,
     initialize_orszag_tang,
+    enforce_hermitian_state,
     energy,
 )
 
@@ -141,6 +144,8 @@ __all__ = [
     "derivative_z",
     "laplacian",
     "dealias",
+    "enforce_hermitian",
+    "anti_hermitian_fraction",
     # Hermite basis for kinetic physics
     "hermite_polynomial",
     "hermite_polynomials_all",
@@ -161,6 +166,7 @@ __all__ = [
     "initialize_alfven_wave",
     "initialize_random_spectrum",
     "initialize_orszag_tang",
+    "enforce_hermitian_state",
     "energy",
     # Time integration
     "krmhd_rhs",
