@@ -15,6 +15,12 @@ increment is propagated by exactly one phase factor covering the remaining
 sub-interval. The passive Hermite sector uses a Lawson-form RK4 update for
 stable externally driven advection.
 
+gandalf_step(scheme=...) selects the Hermite integrator. The default
+"imex_rk222" (ARS(2,2,2)) treats streaming and hyper-collisions implicitly.
+"imex_ars343" (ARS(3,4,3), Issue #166) does the same with a third-order
+pair whose explicit part is stable for advection, and advances z± with the
+same explicit stages. "lawson_rk4" is the integrating-factor path above.
+
 Example usage:
     >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
     >>> state = initialize_alfven_wave(grid, kz=1, amplitude=0.1)
@@ -680,7 +686,7 @@ def _gandalf_step_lawson_rk4_jit(
 # `Scheme` is the single source of truth; `SUPPORTED_SCHEMES` is the
 # runtime-introspectable frozenset derived from it so adding a new
 # integrator is a one-line edit.
-Scheme = Literal["imex_rk222", "lawson_rk4"]
+Scheme = Literal["imex_rk222", "imex_ars343", "lawson_rk4"]
 SUPPORTED_SCHEMES: frozenset[str] = frozenset(get_args(Scheme))
 
 # ARS(2,2,2) implicit-stage coefficient and stage-2 explicit scaling (Python floats).
@@ -983,6 +989,300 @@ def _gandalf_step_imex222_jit(
     )
 
 
+# =============================================================================
+# IMEX-ARS(3,4,3) Integrator (Issue #166)
+# =============================================================================
+
+
+def _ars343_gamma() -> float:
+    """Diagonal coefficient γ of ARS(3,4,3).
+
+    γ is the root in (1/3, 1/2) of 6γ³ - 18γ² + 9γ - 1 = 0. It makes the
+    3-stage SDIRK implicit part third order and L-stable (Alexander 1977).
+    Newton's method refines the 10-digit table value to double precision.
+    """
+    g = 0.4358665215
+    for _ in range(3):
+        g -= (6.0 * g**3 - 18.0 * g**2 + 9.0 * g - 1.0) / (18.0 * g**2 - 36.0 * g + 9.0)
+    return g
+
+
+_ARS343_GAMMA: float = _ars343_gamma()                       # ≈ 0.4358665215
+_ARS343_C3: float = (1.0 + _ARS343_GAMMA) / 2.0              # stage-3 time ≈ 0.7179
+_ARS343_B1: float = -1.5 * _ARS343_GAMMA**2 + 4.0 * _ARS343_GAMMA - 0.25
+_ARS343_B2: float = 1.5 * _ARS343_GAMMA**2 - 5.0 * _ARS343_GAMMA + 1.25
+
+
+def _ars343_explicit_a4() -> float:
+    """Explicit coefficient â42 = â43 of ARS(3,4,3).
+
+    ARS (1997, §2.7) leave â42 = â43 free and tabulate 0.5529291479. That
+    value makes the explicit stability polynomial equal to RK4's,
+    1 + z + z²/2 + z³/6 + z⁴/24, which is stable on the imaginary axis for
+    |z| ≤ 2√2. The z⁴ coefficient is γ²·â43·â32, and â32 is linear in â43
+    (â32 = p·â43 + q below), so the condition γ²·a·(p·a + q) = 1/24 is a
+    quadratic in a. Its root near the table value is returned.
+    """
+    g = _ARS343_GAMMA
+    p = -3.75 + 15.0 * g - 5.25 * g**2
+    q = 4.0 - 12.5 * g + 4.5 * g**2
+    c0 = -1.0 / (24.0 * g**2)
+    disc = math.sqrt(q * q - 4.0 * p * c0)
+    roots = ((-q + disc) / (2.0 * p), (-q - disc) / (2.0 * p))
+    return min(roots, key=lambda a: abs(a - 0.5529291479))
+
+
+_ARS343_A42: float = _ars343_explicit_a4()                   # ≈ 0.5529291479
+_ARS343_A43: float = _ARS343_A42
+_ARS343_A31: float = (
+    (1.0 - 4.5 * _ARS343_GAMMA + 1.5 * _ARS343_GAMMA**2) * _ARS343_A42
+    + (2.75 - 10.5 * _ARS343_GAMMA + 3.75 * _ARS343_GAMMA**2) * _ARS343_A43
+    - 3.5 + 13.0 * _ARS343_GAMMA - 4.5 * _ARS343_GAMMA**2
+)
+_ARS343_A32: float = (
+    (-1.0 + 4.5 * _ARS343_GAMMA - 1.5 * _ARS343_GAMMA**2) * _ARS343_A42
+    + (-2.75 + 10.5 * _ARS343_GAMMA - 3.75 * _ARS343_GAMMA**2) * _ARS343_A43
+    + 4.0 - 12.5 * _ARS343_GAMMA + 4.5 * _ARS343_GAMMA**2
+)
+_ARS343_A41: float = 1.0 - _ARS343_A42 - _ARS343_A43
+
+
+def _post_step_dissipation(
+    z_plus: Array,
+    z_minus: Array,
+    g: Array,
+    dt: float,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    eta: float,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+    hyper_r: int,
+    eta_z: float,
+    hyper_rz: int,
+) -> Tuple[Array, Array, Array]:
+    """Post-step resistive and parallel damping, then the defensive g dealias.
+
+    Same factors, in the same order, as the end of _gandalf_step_imex222_jit:
+    exp(-η·(k⊥²/k⊥²_max)^r·dt) on z± and every g_m, then
+    exp(-η_z·(kz²/kz²_max)^rz·dt) on all fields when (Nz-1)//3 ≥ 1, then
+    the 2/3 mask on g. Hyper-collisions live in the implicit operator L.
+    Must be called inside a jitted kernel (Nx, Ny, Nz, hyper_r and hyper_rz
+    static).
+    """
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    k_perp_squared = kx_3d**2 + ky_3d**2
+
+    idx_max = (Nx - 1) // 3
+    idy_max = (Ny - 1) // 3
+    k_perp_max_squared = kx[idx_max]**2 + ky[idy_max]**2
+    k_perp_2r_normalized = (k_perp_squared / k_perp_max_squared) ** hyper_r
+    perp_dissipation_factor = jnp.exp(-eta * k_perp_2r_normalized * dt)
+    z_plus = z_plus * perp_dissipation_factor
+    z_minus = z_minus * perp_dissipation_factor
+    g = g * perp_dissipation_factor[:, :, :, jnp.newaxis]
+
+    # Static branch; see the matching block in _gandalf_step_imex222_jit for
+    # why tiny Nz skips the parallel damping.
+    idz_max = (Nz - 1) // 3
+    if idz_max >= 1:
+        kz_max_squared = kz[idz_max] ** 2
+        kz_2rz_normalized = (kz_3d**2 / kz_max_squared) ** hyper_rz
+        z_dissipation_factor = jnp.exp(-eta_z * kz_2rz_normalized * dt)
+        z_plus = z_plus * z_dissipation_factor
+        z_minus = z_minus * z_dissipation_factor
+        g = g * z_dissipation_factor[:, :, :, jnp.newaxis]
+
+    g = g * dealias_mask[:, :, :, jnp.newaxis]
+    return z_plus, z_minus, g
+
+
+@partial(
+    jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_rz", "closure"]
+)
+def _gandalf_step_imex343_jit(
+    fields: KRMHDFields,
+    dt: float,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    eta: float,
+    v_A: float,
+    beta_i: float,
+    Lambda: float,
+    M: int,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+    hyper_r: int,
+    lu: Array,
+    piv: Array,
+    eta_z: float = 0.0,
+    hyper_rz: int = 1,
+    closure: str = "zero",
+) -> KRMHDFields:
+    """
+    JIT-compiled IMEX-ARS(3,4,3) stepper (Ascher, Ruuth, Spiteri 1997, §2.7).
+
+    Why (Issue #166): the explicit part of ARS(2,2,2) has the stability
+    function 1 + z + z²/2, so |R(iy)|² = 1 + y⁴/4 > 1 for every y ≠ 0. Pure
+    advection is therefore unstable at any dt, and imex_rk222 relies on
+    hyper-collisions and hyper-resistivity to stay bounded. The explicit
+    part of ARS(3,4,3) has RK4's stability polynomial (see
+    _ars343_explicit_a4), stable for |dt·ρ| ≤ 2√2, where ρ is the spectral
+    radius of the advection operator.
+
+    Tableau (γ ≈ 0.4358665215, c₃ = (1+γ)/2, b₁, b₂ from _ARS343_*):
+
+        Implicit A:                    Explicit Â:
+          c  |                           c  |
+          0  | 0   0        0   0        0  | 0    0    0    0
+          γ  | 0   γ        0   0        γ  | γ    0    0    0
+          c₃ | 0  (1-γ)/2   γ   0        c₃ | â31  â32  0    0
+          1  | 0   b₁       b₂  γ        1  | â41  â42  â43  0
+          -------------------------      -----------------------
+             | 0   b₁       b₂  γ           | 0    b₁   b₂   γ
+
+    Hermite moments g: linear streaming and hyper-collisions (L, implicit)
+    and the Poisson-bracket advection N (explicit). The three implicit
+    stages share the diagonal γ, so one LU factorization of (I - γ·dt·L)
+    serves all of them. The implicit part is stiffly accurate, so
+    gⁿ⁺¹ = G₄ + dt·Σⱼ (b̂ⱼ - â₄ⱼ)·Nⱼ and needs no extra solve. The terms
+    dt·L·Gᵢ that later stages need come from the stage equation itself,
+    dt·L·Gᵢ = (Gᵢ - rhsᵢ)/γ, which avoids a dense (M+1)² mat-vec.
+
+    Elsasser z±: the same explicit tableau in Lawson (interaction-picture)
+    form. Stage values are
+        Zᵢ = e^(±ikz·cᵢ·dt)·zⁿ + dt·Σⱼ âᵢⱼ·e^(±ikz·(cᵢ-cⱼ)·dt)·NLⱼ
+    and zⁿ⁺¹ = e^(±ikz·dt)·zⁿ + dt·Σⱼ b̂ⱼ·e^(±ikz·(1-cⱼ)·dt)·NLⱼ. z± advection
+    is then stable on the same interval, and every g stage samples z± at
+    its own stage time. Unlike imex_rk222 and lawson_rk4, the z± trajectory
+    is not the GANDALF midpoint RK2 one.
+
+    Each stage makes one _krmhd_rhs_jit call with kz = 0 and η = 0, which
+    returns the nonlinear terms of z± and g together (the linear
+    propagation and streaming terms are the only kz-dependent parts). The
+    step costs four RHS calls and three LU solves; imex_rk222 makes four
+    RHS calls and two solves.
+
+    Order: third order for the coupled (z±, g) system with η = η_z = 0.
+    Resistive and parallel damping are applied after the step with exact
+    exponential factors (_post_step_dissipation), the same first-order
+    splitting as imex_rk222; see its "resistivity splitting" note.
+    """
+    gam = _ARS343_GAMMA
+    c3 = _ARS343_C3
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
+    kz_zero = jnp.zeros_like(kz)
+
+    def nonlinear(stage_fields: KRMHDFields) -> Tuple[Array, Array, Array]:
+        """Nonlinear RHS (NL⁺, NL⁻, N_g) at one stage; kz = 0 strips the linear terms."""
+        rhs = _krmhd_rhs_jit(
+            stage_fields, kx, ky, kz_zero, dealias_mask, 0.0, v_A, beta_i,
+            _NU_IN_IMPLICIT_OPERATOR, Lambda, M, Nz, Ny, Nx, closure=closure,
+        )
+        return rhs.z_plus, rhs.z_minus, rhs.g
+
+    def propagator(s: float) -> Tuple[Array, Array]:
+        """Elsasser linear propagators e^(±ikz·s·dt) over the fraction s of the step."""
+        theta = kz_3d * (s * dt)
+        return jnp.exp(1j * theta), jnp.exp(-1j * theta)
+
+    # The phase offsets cᵢ - cⱼ and 1 - cⱼ that occur: γ, c₃, (1-γ)/2
+    # (= c₃ - γ = 1 - c₃), 1 - γ and 1.
+    ep_gam, em_gam = propagator(gam)
+    ep_c3, em_c3 = propagator(c3)
+    ep_half, em_half = propagator((1.0 - gam) / 2.0)
+    ep_1mg, em_1mg = propagator(1.0 - gam)
+    ep_one, em_one = propagator(1.0)
+
+    zp_n, zm_n, g_n = fields.z_plus, fields.z_minus, fields.g
+
+    # Stage 1 (c = 0): Z₁ = zⁿ, G₁ = gⁿ.
+    nlp_1, nlm_1, N_1 = nonlinear(fields)
+
+    # Stage 2 (c = γ).
+    zp_2 = ep_gam * (zp_n + (dt * gam) * nlp_1)
+    zm_2 = em_gam * (zm_n + (dt * gam) * nlm_1)
+    rhs_2 = g_n + (dt * gam) * N_1
+    G_2 = imex_solve(lu, piv, rhs_2)
+    dtLG_2 = (G_2 - rhs_2) / gam
+    nlp_2, nlm_2, N_2 = nonlinear(
+        KRMHDFields(z_plus=zp_2, z_minus=zm_2, g=G_2, time=fields.time + gam * dt)
+    )
+
+    # Stage 3 (c = c₃).
+    zp_3 = ep_c3 * (zp_n + (dt * _ARS343_A31) * nlp_1) + (dt * _ARS343_A32) * ep_half * nlp_2
+    zm_3 = em_c3 * (zm_n + (dt * _ARS343_A31) * nlm_1) + (dt * _ARS343_A32) * em_half * nlm_2
+    rhs_3 = (
+        g_n
+        + ((1.0 - gam) / 2.0) * dtLG_2
+        + (dt * _ARS343_A31) * N_1
+        + (dt * _ARS343_A32) * N_2
+    )
+    G_3 = imex_solve(lu, piv, rhs_3)
+    dtLG_3 = (G_3 - rhs_3) / gam
+    nlp_3, nlm_3, N_3 = nonlinear(
+        KRMHDFields(z_plus=zp_3, z_minus=zm_3, g=G_3, time=fields.time + c3 * dt)
+    )
+
+    # Stage 4 (c = 1).
+    zp_4 = (
+        ep_one * (zp_n + (dt * _ARS343_A41) * nlp_1)
+        + (dt * _ARS343_A42) * ep_1mg * nlp_2
+        + (dt * _ARS343_A43) * ep_half * nlp_3
+    )
+    zm_4 = (
+        em_one * (zm_n + (dt * _ARS343_A41) * nlm_1)
+        + (dt * _ARS343_A42) * em_1mg * nlm_2
+        + (dt * _ARS343_A43) * em_half * nlm_3
+    )
+    rhs_4 = (
+        g_n
+        + _ARS343_B1 * dtLG_2
+        + _ARS343_B2 * dtLG_3
+        + (dt * _ARS343_A41) * N_1
+        + (dt * _ARS343_A42) * N_2
+        + (dt * _ARS343_A43) * N_3
+    )
+    G_4 = imex_solve(lu, piv, rhs_4)
+    nlp_4, nlm_4, N_4 = nonlinear(
+        KRMHDFields(z_plus=zp_4, z_minus=zm_4, g=G_4, time=fields.time + dt)
+    )
+
+    # Final update with b̂ = (0, b₁, b₂, γ).
+    z_plus_new = ep_one * zp_n + dt * (
+        _ARS343_B1 * ep_1mg * nlp_2 + _ARS343_B2 * ep_half * nlp_3 + gam * nlp_4
+    )
+    z_minus_new = em_one * zm_n + dt * (
+        _ARS343_B1 * em_1mg * nlm_2 + _ARS343_B2 * em_half * nlm_3 + gam * nlm_4
+    )
+    g_new = G_4 + dt * (
+        -_ARS343_A41 * N_1
+        + (_ARS343_B1 - _ARS343_A42) * N_2
+        + (_ARS343_B2 - _ARS343_A43) * N_3
+        + gam * N_4
+    )
+
+    z_plus_new, z_minus_new, g_new = _post_step_dissipation(
+        z_plus_new, z_minus_new, g_new, dt, kx, ky, kz, dealias_mask,
+        eta, Nz, Ny, Nx, hyper_r, eta_z, hyper_rz,
+    )
+
+    return KRMHDFields(
+        z_plus=z_plus_new,
+        z_minus=z_minus_new,
+        g=g_new,
+        time=fields.time + dt,
+    )
+
+
 def gandalf_step(
     state: KRMHDState,
     dt: float,
@@ -1035,6 +1335,18 @@ def gandalf_step(
               nonlinear advection is explicit. Elsasser z+/z- formula matches
               the Lawson path (z_plus_rhs/z_minus_rhs do not depend on g);
               realized trajectories agree to ~float32 accumulation error.
+              Its explicit stage has |R(iy)|² = 1 + y⁴/4, so advection grows
+              at every dt unless hyper-collisions and hyper-resistivity damp
+              it faster (Issue #166).
+            - "imex_ars343": ARS(3,4,3) IMEX scheme (Issue #166). Same
+              implicit operator as imex_rk222, with an L-stable third-order
+              implicit part. Its explicit part has RK4's stability
+              polynomial, stable for |dt·ρ| ≤ 2√2, so advection is stable
+              without dissipation. z± use the same explicit tableau in
+              Lawson form, so the z± trajectory differs from the midpoint
+              RK2 of the other two schemes. Third order for the coupled
+              system with η = η_z = 0. Costs one more LU solve per step
+              than imex_rk222.
             - "lawson_rk4": legacy mixed integrating-factor + Lawson-RK4 path,
               retained for comparison and rollback. Known to be unstable at
               high M·k_z (see Issue #137).
@@ -1099,7 +1411,7 @@ def gandalf_step(
         ValueError: If hyper_n not in [1, 2, 3, 4, 6]
         ValueError: If closure is unknown, or "symmetric" with M < 2
         ValueError: If hyper_rz not in [1, 2, 4, 8]
-        ValueError: If scheme not in {"lawson_rk4", "imex_rk222"}
+        ValueError: If scheme not in {"imex_rk222", "imex_ars343", "lawson_rk4"}
         ValueError: If hyper-collision overflow risk detected (nu·dt >= 50, normalized;
             Lawson path only — the IMEX solve is unconditionally stable)
         ValueError: If hyper-resistivity overflow risk detected (eta·dt >= 50, normalized)
@@ -1134,6 +1446,9 @@ def gandalf_step(
           the Lawson path evaluates it 6 times (2 + 4 Lawson-RK4 stages).
           Issue #141 tracks dropping IMEX to 2 by deriving N from `rhs_*.g`
           and the already-computed `L*g` mat-vec.
+        - imex_ars343 also evaluates `_krmhd_rhs_jit` 4 times per step, all
+          with k_z=0, one per stage. It makes three LU solves to imex_rk222's
+          two and skips the dense `L*g` mat-vec.
         - Resistive damping is applied as a post-step exp() factor, the same
           as the Lawson convention. This is a 1st-order Strang split with
           the IMEX solve; `eta*dt*|k_perp|^(2r) << 1` in typical turbulence
@@ -1145,7 +1460,8 @@ def gandalf_step(
         - Linear propagation: Handled exactly (unconditionally stable)
         - Nonlinear terms: Elsasser O(dt²), Hermite O(dt⁴) in Lawson form
         - Dissipation: Exact exponential decay
-        - Overall: O(dt²) for the coupled mixed scheme
+        - Overall: O(dt²) for the coupled mixed scheme; O(dt³) for
+          imex_ars343 with η = η_z = 0
         - Energy conservation: Excellent in inviscid limit
 
         Hyper-dissipation (r>1) concentrates dissipation at small scales:
@@ -1194,9 +1510,9 @@ def gandalf_step(
     if hyper_rz not in (1, 2, 4, 8):
         raise ValueError(f"hyper_rz must be 1, 2, 4, or 8 (got {hyper_rz})")
 
-    if scheme not in ("lawson_rk4", "imex_rk222"):
+    if scheme not in SUPPORTED_SCHEMES:
         raise ValueError(
-            f"scheme must be 'lawson_rk4' or 'imex_rk222' (got {scheme!r})"
+            f"scheme must be one of {sorted(SUPPORTED_SCHEMES)} (got {scheme!r})"
         )
 
     validate_closure(closure, state.M)
@@ -1329,6 +1645,42 @@ def gandalf_step(
             streaming_P_inv_T=P_inv.T,
             closure=closure,
         )
+    elif scheme == "imex_ars343":
+        # Same implicit operator as imex_rk222. All three ARS(3,4,3) implicit
+        # stages share the diagonal gamma, so one factorization serves them.
+        L_per_kz = build_implicit_operator(
+            grid.kz,
+            state.beta_i,
+            nu_effective,
+            state.M,
+            state.Lambda,
+            hyper_n,
+            closure,
+        )
+        lu, piv = factor_imex_operator(L_per_kz, dt, _ARS343_GAMMA)
+
+        new_fields = _gandalf_step_imex343_jit(
+            fields,
+            dt,
+            grid.kx,
+            grid.ky,
+            grid.kz,
+            grid.dealias_mask,
+            eta,
+            v_A,
+            state.beta_i,
+            state.Lambda,
+            state.M,
+            grid.Nz,
+            grid.Ny,
+            grid.Nx,
+            hyper_r,
+            lu,
+            piv,
+            eta_z=eta_z,
+            hyper_rz=hyper_rz,
+            closure=closure,
+        )
     else:  # scheme == "imex_rk222"
         # Build the implicit operator L(k_z) = -i*sqrt(beta_i)*kz*T + D(nu, M, hyper_n)
         # and factor (I - dt*gamma*L) once per step. L is cheap to rebuild because
@@ -1459,6 +1811,14 @@ def compute_cfl_timestep(
         - CFL violation → exponential instability. An eroding CFL margin as
           forced runs grow in amplitude is a candidate mechanism for the
           late-time blowups of Issue #136.
+        - dt_cfl does not by itself guarantee a stable step (Issue #166).
+          The explicit advection stage of scheme="imex_rk222" amplifies
+          every advected mode by about (dt·ρ)⁴/8 per step, where ρ is the
+          advection rate of that mode. It stays bounded only when
+          hyper-collisions and hyper-resistivity damp the mode faster. In
+          pure advection without dissipation it grows even at dt_cfl.
+          scheme="imex_ars343" and "lawson_rk4" are stable for
+          |dt·ρ| ≤ 2√2 without dissipation.
 
     Note:
         For typical KRMHD with strong guide field, v_A usually dominates

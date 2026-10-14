@@ -2358,3 +2358,302 @@ class TestIMEX222:
         assert slope >= 1.8, (
             f"IMEX coupled g-z+/- slope too low: {slope:.2f}, errs={errs}"
         )
+
+
+class TestIMEXARS343:
+    """IMEX-ARS(3,4,3) integrator (Issue #166)."""
+
+    @staticmethod
+    def _stability_polynomial(A, b, z):
+        """R(z) = 1 + z·bᵀ(I - zA)⁻¹1 for an explicit tableau (A strictly lower)."""
+        s = len(b)
+        return 1.0 + z * (b @ np.linalg.solve(np.eye(s) - z * A, np.ones(s)))
+
+    @staticmethod
+    def _static_advection_state(M, amplitude=60.0, N=16, Nz=4):
+        """Static z⁺ on the kz=0 plane, z⁻ = 0, and z-independent g.
+
+        With z⁻ = 0 the Elsasser nonlinearity vanishes exactly, so z⁺ is
+        frozen. With g on the kz=0 plane there is no streaming. g then
+        obeys pure linear advection by the static fields Φ = Ψ = z⁺/2, and
+        the free energy W is an exact invariant.
+        """
+        grid = SpectralGrid3D.create(Nx=N, Ny=N, Nz=Nz, Lx=1.0, Ly=1.0, Lz=1.0)
+        x = np.arange(N) / N
+        _, Y, X = np.meshgrid(np.zeros(Nz), x, x, indexing="ij")
+        two_pi = 2.0 * np.pi
+        scale = 1.0 / (N * N * Nz)
+        z_plus = amplitude * scale * jnp.fft.rfftn(
+            np.cos(two_pi * X) + np.sin(two_pi * (X + Y)) + 0.7 * np.cos(two_pi * (2 * Y - X))
+        )
+        rng = np.random.default_rng(1)
+        g = jnp.stack(
+            [
+                scale * jnp.fft.rfftn(np.broadcast_to(rng.standard_normal((N, N)), (Nz, N, N)))
+                for _ in range(M + 1)
+            ],
+            axis=-1,
+        ) * grid.dealias_mask[..., None]
+        return KRMHDState(
+            z_plus=z_plus.astype(jnp.complex64),
+            z_minus=jnp.zeros(z_plus.shape, dtype=jnp.complex64),
+            g=(1e-2 * g).astype(jnp.complex64),
+            M=M,
+            beta_i=1.0,
+            v_th=1.0,
+            nu=0.0,
+            Lambda=float(np.sqrt(5.0)),
+            time=0.0,
+            grid=grid,
+        )
+
+    def test_ars343_tableau(self):
+        """Coefficients: third order, ARS table values, RK4 stability polynomial."""
+        from krmhd import timestepping as ts
+
+        gam = ts._ARS343_GAMMA
+        assert abs(6 * gam**3 - 18 * gam**2 + 9 * gam - 1) < 1e-14
+        # Values tabulated by Ascher, Ruuth and Spiteri (1997, §2.7)
+        assert abs(gam - 0.4358665215) < 1e-10
+        assert abs(ts._ARS343_A42 - 0.5529291479) < 2e-10
+        assert abs(ts._ARS343_A31 - 0.3212788860) < 2e-10
+        assert abs(ts._ARS343_A32 - 0.3966543747) < 2e-10
+
+        A_ex = np.array([
+            [0.0, 0.0, 0.0, 0.0],
+            [gam, 0.0, 0.0, 0.0],
+            [ts._ARS343_A31, ts._ARS343_A32, 0.0, 0.0],
+            [ts._ARS343_A41, ts._ARS343_A42, ts._ARS343_A43, 0.0],
+        ])
+        A_im = np.array([
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, gam, 0.0, 0.0],
+            [0.0, (1 - gam) / 2, gam, 0.0],
+            [0.0, ts._ARS343_B1, ts._ARS343_B2, gam],
+        ])
+        b = np.array([0.0, ts._ARS343_B1, ts._ARS343_B2, gam])
+        c = np.array([0.0, gam, ts._ARS343_C3, 1.0])
+        one = np.ones(4)
+        np.testing.assert_allclose(A_ex @ one, c, atol=1e-14)
+        np.testing.assert_allclose(A_im @ one, c, atol=1e-14)
+        # Third-order conditions; b and c are shared, so these also cover
+        # the IMEX coupling conditions.
+        for A in (A_ex, A_im):
+            assert abs(b @ one - 1) < 1e-14
+            assert abs(b @ c - 1 / 2) < 1e-14
+            assert abs(b @ c**2 - 1 / 3) < 1e-14
+            assert abs(b @ A @ c - 1 / 6) < 1e-14
+        # Explicit stability polynomial equals RK4's (Issue #166)
+        assert abs(b @ A_ex @ A_ex @ A_ex @ one - 1 / 24) < 1e-14
+
+    def test_ars343_explicit_part_stable_on_imaginary_axis(self):
+        """ARS(3,4,3) explicit part: |R(iy)| ≤ 1 up to 2√2. ARS(2,2,2): never."""
+        from krmhd import timestepping as ts
+
+        gam = ts._ARS343_GAMMA
+        A_343 = np.array([
+            [0.0, 0.0, 0.0, 0.0],
+            [gam, 0.0, 0.0, 0.0],
+            [ts._ARS343_A31, ts._ARS343_A32, 0.0, 0.0],
+            [ts._ARS343_A41, ts._ARS343_A42, ts._ARS343_A43, 0.0],
+        ])
+        b_343 = np.array([0.0, ts._ARS343_B1, ts._ARS343_B2, gam])
+        g2, d2 = ts._IMEX_GAMMA, ts._IMEX_DELTA
+        A_222 = np.array([[0.0, 0.0, 0.0], [g2, 0.0, 0.0], [d2, 1 - d2, 0.0]])
+        b_222 = np.array([d2, 1 - d2, 0.0])
+
+        for y in np.linspace(0.05, 2 * np.sqrt(2) - 1e-6, 200):
+            assert abs(self._stability_polynomial(A_343, b_343, 1j * y)) <= 1 + 1e-12
+            # |R(iy)|² = 1 + y⁴/4 for ARS(2,2,2)
+            r2 = abs(self._stability_polynomial(A_222, b_222, 1j * y)) ** 2
+            assert r2 == pytest.approx(1 + y**4 / 4, rel=1e-10)
+        assert abs(self._stability_polynomial(A_343, b_343, 3.0j)) > 1
+
+    def test_ars343_runs_and_is_finite(self):
+        """Smoke test with collisions, hyper-resistivity and kz damping."""
+        state = TestIMEX222._make_random_state()
+        new = gandalf_step(state, dt=0.01, eta=0.5, v_A=1.0, hyper_r=2, hyper_n=2,
+                           eta_z=0.5, scheme="imex_ars343")
+        assert jnp.all(jnp.isfinite(new.z_plus))
+        assert jnp.all(jnp.isfinite(new.z_minus))
+        assert jnp.all(jnp.isfinite(new.g))
+        assert new.time == pytest.approx(0.01)
+
+    def test_ars343_rmhd_only_M0(self):
+        """M = 0 (RMHD only) runs and its z± stay close to the Lawson path."""
+        state0 = TestIMEX222._make_random_state(M=0, nu=0.0, z_amp=0.01)
+        state_l = state0
+        state_a = state0
+        for _ in range(20):
+            state_l = gandalf_step(state_l, dt=0.005, eta=0.0, v_A=1.0, nu=0.0,
+                                   scheme="lawson_rk4")
+            state_a = gandalf_step(state_a, dt=0.005, eta=0.0, v_A=1.0, nu=0.0,
+                                   scheme="imex_ars343")
+        assert float(jnp.max(jnp.abs(state_l.z_plus - state_a.z_plus))) < 1e-4
+        assert float(jnp.max(jnp.abs(state_l.z_minus - state_a.z_minus))) < 1e-4
+
+    def test_ars343_post_step_dissipation_matches_imex222(self):
+        """Exact linear z± damping must be identical under both IMEX schemes.
+
+        A single z⁺ mode with z⁻ = 0 has no nonlinearity, so both schemes
+        reduce to the propagator times the resistive and kz damping factors.
+        """
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8, Lx=1.0, Ly=1.0, Lz=1.0)
+        shape = (8, 16, 9)
+        z_plus = jnp.zeros(shape, dtype=jnp.complex64).at[2, 3, 2].set(0.3 + 0.1j)
+        state = KRMHDState(
+            z_plus=z_plus, z_minus=jnp.zeros(shape, dtype=jnp.complex64),
+            g=jnp.zeros(shape + (5,), dtype=jnp.complex64), M=4, beta_i=1.0,
+            v_th=1.0, nu=0.0, Lambda=1.5, time=0.0, grid=grid,
+        )
+        kw = dict(dt=0.02, eta=2.0, v_A=1.0, nu=0.0, hyper_r=2, eta_z=1.0, hyper_rz=2)
+        out_222 = gandalf_step(state, scheme="imex_rk222", **kw)
+        out_343 = gandalf_step(state, scheme="imex_ars343", **kw)
+        np.testing.assert_allclose(np.asarray(out_343.z_plus), np.asarray(out_222.z_plus),
+                                   atol=1e-7)
+        # Damping actually acted on the mode
+        assert abs(complex(out_343.z_plus[2, 3, 2])) < 0.99 * abs(0.3 + 0.1j)
+
+    def test_ars343_pure_advection_conserves_free_energy(self):
+        """Issue #166: pure Hermite advection, no dissipation.
+
+        The exact dynamics conserve W. At 3·dt_cfl the explicit stage of
+        imex_rk222 blows up, while imex_ars343 stays bounded and matches
+        lawson_rk4, whose RK4 stability interval it shares. At dt_cfl the
+        imex_rk222 growth is slow but still present.
+        """
+        from krmhd.diagnostics import hermite_free_energy
+
+        state0 = self._static_advection_state(M=8)
+        dt_cfl = compute_cfl_timestep(state0, v_A=1.0, cfl_safety=0.3)
+        W0 = hermite_free_energy(state0)
+
+        def W_ratio(scheme, dt, n_steps):
+            s = state0
+            for _ in range(n_steps):
+                s = gandalf_step(s, dt=dt, eta=0.0, v_A=1.0, nu=0.0, scheme=scheme)
+            # z⁺ must stay frozen, or the test is not pure advection
+            assert float(jnp.max(jnp.abs(s.z_plus - state0.z_plus))) == 0.0
+            return hermite_free_energy(s) / W0
+
+        r_222 = W_ratio("imex_rk222", 3 * dt_cfl, 60)
+        r_343 = W_ratio("imex_ars343", 3 * dt_cfl, 60)
+        r_rk4 = W_ratio("lawson_rk4", 3 * dt_cfl, 60)
+        assert r_222 > 1e3, f"expected imex_rk222 blow-up, got W ratio {r_222:.3e}"
+        assert 0.95 < r_343 <= 1.0 + 1e-5, f"imex_ars343 W ratio {r_343:.6e}"
+        assert r_343 == pytest.approx(r_rk4, rel=1e-4)
+
+        r_222 = W_ratio("imex_rk222", dt_cfl, 200)
+        r_343 = W_ratio("imex_ars343", dt_cfl, 200)
+        assert r_222 > 1.01, f"expected slow imex_rk222 growth, got W ratio {r_222:.6e}"
+        assert abs(r_343 - 1.0) < 1e-3, f"imex_ars343 W ratio {r_343:.6e}"
+
+    def test_ars343_pure_streaming_stable_large_dt(self):
+        """Stiff streaming (high M·kz) at a large dt stays bounded."""
+        state = TestIMEX222._make_random_state(M=32, nu=0.0, z_amp=0.0, g_amp=0.05)
+        W0 = float(jnp.sum(jnp.abs(state.g) ** 2))
+        s = state
+        for _ in range(20):
+            s = gandalf_step(s, dt=0.5, eta=0.0, v_A=1.0, nu=0.0, scheme="imex_ars343")
+        assert jnp.all(jnp.isfinite(s.g))
+        assert float(jnp.sum(jnp.abs(s.g) ** 2)) <= 1.01 * W0
+
+    def test_ars343_order_of_accuracy_with_damping(self):
+        """Linear streaming + collisions on one kz mode vs the matrix exponential."""
+        from jax.experimental import enable_x64
+        from scipy.linalg import expm
+        from krmhd.hermite import _damping_diag
+
+        with enable_x64():
+            Nx = Ny = 8
+            Nz = 4
+            M = 4
+            nu = 2.0
+            Lambda = 1.5
+            grid = SpectralGrid3D.create(Nx=Nx, Ny=Ny, Nz=Nz, Lx=1.0, Ly=1.0, Lz=1.0)
+            Nxh = Nx // 2 + 1
+            g = np.zeros((Nz, Ny, Nxh, M + 1), dtype=np.complex128)
+            g[1, 0, 0, :3] = [1.0, 0.5j, 0.2]
+            state = KRMHDState(
+                z_plus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex128),
+                z_minus=jnp.zeros((Nz, Ny, Nxh), dtype=jnp.complex128),
+                g=jnp.asarray(g), M=M, beta_i=1.0, v_th=1.0, nu=nu,
+                Lambda=Lambda, time=0.0, grid=grid,
+            )
+            kz_val = float(np.asarray(grid.kz)[1])
+            L0 = (-1j * kz_val * compute_streaming_matrix(M, Lambda)
+                  + np.diag(nu * _damping_diag(M, hyper_n=1)))
+            g_exact = expm(L0 * 1.0) @ g[1, 0, 0, :]
+
+            dts = [0.05, 0.025, 0.0125]
+            errs = []
+            for dt in dts:
+                s = state
+                for _ in range(int(round(1.0 / dt))):
+                    s = gandalf_step(s, dt=dt, eta=0.0, v_A=1.0, nu=nu, hyper_n=1,
+                                     scheme="imex_ars343")
+                errs.append(np.linalg.norm(np.asarray(s.g[1, 0, 0, :]) - g_exact))
+
+        slope = np.polyfit(np.log(dts), np.log(errs), 1)[0]
+        assert slope >= 2.7, f"ARS(3,4,3) damped-streaming slope {slope:.2f}, errs={errs}"
+
+    def test_ars343_coupled_third_order_3d(self):
+        """Coupled z± and g with kz ≠ 0: third order, and the Lawson-RK4 answer.
+
+        kz ≠ 0 exercises the z± propagators e^(±ikz·(cᵢ-cⱼ)·dt) and the
+        implicit streaming. A wrong phase offset would drop the order to 1.
+        """
+        from jax.experimental import enable_x64
+
+        with enable_x64():
+            N = Nz = 8
+            M = 3
+            grid = SpectralGrid3D.create(Nx=N, Ny=N, Nz=Nz, Lx=1.0, Ly=1.0, Lz=1.0)
+            x = np.arange(N) / N
+            Z, Y, X = np.meshgrid(x, x, x, indexing="ij")
+            two_pi = 2.0 * np.pi
+            scale = 2.0 / (N * N * Nz)
+            z_plus = scale * jnp.fft.rfftn(
+                np.cos(two_pi * (X + Z)) + 0.5 * np.sin(two_pi * (X + Y - Z))
+            )
+            z_minus = scale * jnp.fft.rfftn(
+                np.sin(two_pi * (Y - Z)) + 0.5 * np.cos(two_pi * (X - Y + Z))
+            )
+            g0 = scale * jnp.fft.rfftn(np.sin(two_pi * (X + 2 * Y + Z)))
+            g = jnp.stack([g0, 0.5 * g0, 0.25 * g0, 0.1 * g0], axis=-1)
+            state0 = KRMHDState(
+                z_plus=z_plus, z_minus=z_minus, g=g, M=M, beta_i=1.0, v_th=1.0,
+                nu=0.0, Lambda=1.5, time=0.0, grid=grid,
+            )
+            T_final = 0.4
+
+            def run(dt, scheme):
+                s = state0
+                for _ in range(int(round(T_final / dt))):
+                    s = gandalf_step(s, dt=dt, eta=0.0, v_A=1.0, nu=0.0, scheme=scheme)
+                return s
+
+            ref = run(T_final / 320, "imex_ars343")
+            dts = [T_final / 10, T_final / 20, T_final / 40]
+            outs = [run(dt, "imex_ars343") for dt in dts]
+            # Independent reference: Lawson-RK4 (midpoint RK2 for z±)
+            lawson = run(T_final / 1280, "lawson_rk4")
+
+            for name in ("z_plus", "z_minus", "g"):
+                f_ref = getattr(ref, name)
+                errs = [float(jnp.linalg.norm(getattr(o, name) - f_ref) / jnp.linalg.norm(f_ref))
+                        for o in outs]
+                slope = np.polyfit(np.log(dts), np.log(errs), 1)[0]
+                assert slope >= 2.8, f"{name}: slope {slope:.2f}, errs={errs}"
+                rel = float(jnp.linalg.norm(getattr(lawson, name) - f_ref) / jnp.linalg.norm(f_ref))
+                assert rel < 1e-6, f"{name}: ARS(3,4,3) vs Lawson-RK4 differ by {rel:.2e}"
+
+    def test_ars343_checkpoint_scheme_tag(self, tmp_path):
+        """save/load accept the new scheme name."""
+        from krmhd.io import save_checkpoint, load_checkpoint
+
+        state = TestIMEX222._make_random_state()
+        filename = tmp_path / "ckpt_ars343.h5"
+        save_checkpoint(state, str(filename), scheme="imex_ars343")
+        _, _, metadata = load_checkpoint(str(filename), expected_scheme="imex_ars343")
+        assert metadata.get("scheme") == "imex_ars343"
