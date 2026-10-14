@@ -606,7 +606,7 @@ class TestDealiasMaskAliasFree:
 
         The linear ∓ikz terms conserve E mode by mode; the dealiased
         Elsasser nonlinearity conserves it when it is alias-free. With the
-        legacy mask the relative rate is ~1e-2.
+        legacy mask the relative rate is ~3e-3.
         """
         from jax.experimental import enable_x64
         from krmhd.physics import KRMHDState
