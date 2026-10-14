@@ -529,8 +529,10 @@ def check_hermite_convergence(
     where E_M = |gₘ|² and E_total = Σ|gₙ|² over all moments.
 
     Note: E_total here is the unweighted per-moment spectrum sum, used only as
-    a truncation metric — it is NOT the conserved free energy when Λ ≠ ∞
-    (see diagnostics.hermite_free_energy, which weights m=0 by w₀ = 1 - 1/Λ).
+    a truncation metric — it is NOT the conserved free energy when Λ ≠ ∞ or
+    under the symmetric closure (see diagnostics.hermite_free_energy, which
+    weights m=0 by w₀ = 1 - 1/Λ and, for closure="symmetric", m=M by
+    p_M = √M/(√M + √(M+1))).
 
     The energy calculation accounts for rfft format: modes with kx > 0 are
     counted twice (complex conjugate pairs), while kx = 0 is counted once.
@@ -685,7 +687,8 @@ def compute_streaming_matrix(M: int, Lambda: float = 1.0, closure: str = "zero")
         "symmetric": g_(M+1) = g_(M-1)  -> T[M, M-1] = sqrt(M/2) + sqrt((M+1)/2)
     The symmetric closure breaks the symmetry of T in the last row, so the
     unweighted sum of |g_m|^2 is no longer conserved by streaming alone; the
-    m = M boundary term must be accounted for in free-energy budgets.
+    conserved free energy then weights g_M by p_M = sqrt(M)/(sqrt(M)+sqrt(M+1))
+    (see free_energy_weights and diagnostics.hermite_free_energy).
 
     Args:
         M: Maximum Hermite moment index (array has M+1 moments: g0..gM)
@@ -722,6 +725,49 @@ def compute_streaming_matrix(M: int, Lambda: float = 1.0, closure: str = "zero")
         T[M, M - 1] += np.sqrt((M + 1) / 2.0)
 
     return T
+
+
+def free_energy_weights(M: int, Lambda: float, closure: str = "zero") -> np.ndarray:
+    """
+    Per-moment weights p_m of the Hermite free energy W = sum_m p_m sum_k |g_m,k|^2.
+
+    W is the quadratic form g^T P g, P = diag(p_0, ..., p_M), conserved by the
+    collisionless streaming dynamics dg/dt = -i sqrt(beta_i) k_par T g. It is
+    conserved iff P T is symmetric (detailed balance p_m T[m,n] = p_n T[n,m]),
+    with T from compute_streaming_matrix(M, Lambda, closure). Normalising
+    p_1 = 1 gives
+
+        p_0 = 1 - 1/Lambda                          (T[1,0] kinetic correction)
+        p_m = 1                  for 1 <= m < M
+        p_M = 1                                     closure = "zero"
+        p_M = sqrt(M) / (sqrt(M) + sqrt(M+1))       closure = "symmetric"
+
+    The symmetric value follows from p_(M-1) T[M-1,M] = p_M T[M,M-1] with
+    T[M-1,M] = sqrt(M/2) and T[M,M-1] = sqrt(M/2) + sqrt((M+1)/2); it is
+    close to 1/2 (0.4495 at M = 2, 0.4881 at M = 10). The same weights make
+    the {Psi, .} field-line part of grad_par conserve W, because the closure
+    enters that term through the same combination of g_(M+1) and g_(M-1).
+
+    Args:
+        M: Maximum Hermite moment index (weights for g_0..g_M)
+        Lambda: Kinetic closure parameter Lambda (alpha = -1/Lambda)
+        closure: Truncation closure, "zero" (default) or "symmetric"
+
+    Returns:
+        numpy.ndarray: (M+1,) float64 weights p_m. For M = 0 this is [p_0].
+
+    Raises:
+        ValueError: If closure is unknown, or "symmetric" with M < 2 (the
+            code defines the symmetric closure only for M >= 2; see
+            validate_closure).
+    """
+    validate_closure(closure, M)
+
+    weights = np.ones(M + 1, dtype=np.float64)
+    weights[0] = 1.0 - 1.0 / Lambda
+    if closure == "symmetric":
+        weights[M] = np.sqrt(M) / (np.sqrt(M) + np.sqrt(M + 1))
+    return weights
 
 
 @lru_cache(maxsize=None)

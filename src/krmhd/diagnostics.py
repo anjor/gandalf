@@ -73,6 +73,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import numpy as np
 
+from krmhd.hermite import free_energy_weights
 from krmhd.physics import KRMHDState, energy as compute_energy, poisson_bracket_3d
 from krmhd.spectral import (
     SpectralGrid3D,
@@ -1111,6 +1112,7 @@ def compute_dissipation_rate(
     nu: float,
     hyper_r: int = 1,
     hyper_n: int = 1,
+    closure: str = "zero",
 ) -> Dict[str, float]:
     """
     Compute instantaneous collisional and resistive dissipation rates.
@@ -1124,11 +1126,18 @@ def compute_dissipation_rate(
         nu: Collision frequency (hyper-collision coefficient)
         hyper_r: Resistive hyper-dissipation order (default: 1)
         hyper_n: Collisional hyper-dissipation order (default: 1)
+        closure: Hermite truncation closure the state is evolved with,
+            "zero" (default) or "symmetric". It sets the weight of the m = M
+            term, so that 'collisional' is the collisional loss rate of
+            hermite_free_energy(state, closure=closure).
 
     Returns:
         Dictionary with keys:
         - 'resistive': Elsasser (z±) energy dissipation rate from eta operator
-        - 'collisional': Hermite moment energy dissipation rate from nu operator (m>=2)
+        - 'collisional': Hermite free-energy dissipation rate from nu operator (m>=2),
+          Σₘ wₘ·2νₘ·Eₘ / (Nx·Ny) with νₘ = ν(m/M)^n and the weights wₘ of
+          hermite.free_energy_weights (wₘ = 1 for 2 ≤ m < M; w_M = 1 under the
+          zero closure, √M/(√M + √(M+1)) under the symmetric closure)
         - 'total': resistive + collisional (Elsasser + Hermite collisional only)
 
     Note:
@@ -1191,7 +1200,12 @@ def compute_dissipation_rate(
     collision_rate = nu * ((moment_indices / M) ** hyper_n)
     collision_rate = jnp.where(moment_indices >= 2, collision_rate, 0.0)
 
-    collisional = float(jnp.sum(2.0 * collision_rate * E_m).real / N_perp)
+    # Free-energy weights: 1 for 2 <= m < M, and p_M on g_M under the
+    # symmetric closure (all 1 for m >= 1 under the zero closure, which keeps
+    # that result bit-identical). The m = 0 weight 1 - 1/Λ meets a zero rate.
+    weights = jnp.asarray(free_energy_weights(M, state.Lambda, closure), dtype=E_m.dtype)
+
+    collisional = float(jnp.sum(2.0 * collision_rate * weights * E_m).real / N_perp)
 
     return {
         'collisional': collisional,
@@ -2357,6 +2371,13 @@ def hermite_flux(state: KRMHDState) -> Array:
         with F_{m+½} = Σₖ w_k F_{m+½,k} (w_k the rfft mode weights). The
         {Φ, ·} advection term integrates to zero over the box.
 
+        The flux does not depend on the truncation closure. Under
+        closure="symmetric" the budget of the last moment holds with the
+        weight p_M = √M/(√M + √(M+1)) of hermite_free_energy(closure=
+        "symmetric"): d/dt ½p_M⟨|g_M|²⟩ = F_{M-½}, because p_M times the
+        g_M ← g_(M-1) coupling √(M/2) + √((M+1)/2) equals √(M/2). No link
+        coefficient involves p_M, so the expression below is unchanged.
+
         Both parts of ∇∥ are needed. The ∂z part alone, ik_z gₘ₊₁, gives
         -k_z·Im[gₘ₊₁·gₘ*]. The {Ψ, ·} part carries the transfer along the
         perturbed field and is comparable to the backward flux once the
@@ -2566,17 +2587,26 @@ def hermite_moment_energy(state: KRMHDState, account_for_rfft: bool = True) -> A
     return energy
 
 
-def hermite_free_energy(state: KRMHDState, account_for_rfft: bool = True) -> float:
+def hermite_free_energy(
+    state: KRMHDState,
+    account_for_rfft: bool = True,
+    closure: str = "zero",
+) -> float:
     """
     Compute the Λ-weighted Hermite free energy W = ∑ₘ wₘ ∑ₖ |gₘ,ₖ|².
 
     This is the quadratic invariant of the Hermite hierarchy, with weights
+    (hermite.free_energy_weights)
 
-        w₀ = 1 - 1/Λ,    wₘ = 1  for m ≥ 1.
+        w₀ = 1 - 1/Λ,    wₘ = 1  for 1 ≤ m < M,
+        w_M = 1                          closure = "zero"
+        w_M = √M / (√M + √(M+1))         closure = "symmetric"
 
     Unlike the unweighted sum of hermite_moment_energy() (which is the
     per-moment spectrum, not an invariant), W is exactly conserved by the
-    inviscid, collisionless dynamics.
+    inviscid, collisionless dynamics, provided `closure` matches the closure
+    the state is evolved with (the `closure` argument of gandalf_step /
+    krmhd_rhs, or config.physics.closure).
 
     Derivation (detailed balance):
         The linear parallel streaming term is
@@ -2584,27 +2614,36 @@ def hermite_free_energy(state: KRMHDState, account_for_rfft: bool = True) -> flo
             dgₘ/dt = -i·√βᵢ·k∥·∑ₙ T[m,n]·gₙ
 
         with the tridiagonal coupling matrix T from
-        hermite.compute_streaming_matrix():
+        hermite.compute_streaming_matrix(M, Λ, closure):
 
             T[0,1] = √(1/2),  T[1,0] = (1 - 1/Λ)/√2,  T[1,2] = 1,
-            T[m,m+1] = √((m+1)/2),  T[m,m-1] = √(m/2)   (m ≥ 2).
+            T[m,m+1] = √((m+1)/2),  T[m,m-1] = √(m/2)   (m ≥ 2),
+
+        and, for closure = "symmetric" (g_(M+1) = g_(M-1)),
+        T[M,M-1] = √(M/2) + √((M+1)/2).
 
         Requiring d/dt ∑ₘ wₘ|gₘ|² = 0 for ALL g and k∥ gives the
         detailed-balance condition wₘ·T[m,n] = wₙ·T[n,m] for every pair.
-        All m ≥ 1 pairs are already symmetric, so wₘ = wₙ there; the only
-        asymmetric pair is (0,1):
+        Under the zero closure all m ≥ 1 pairs are already symmetric, so
+        wₘ = wₙ there, and the only asymmetric pair is (0,1):
 
             w₀·√(1/2) = w₁·(1 - 1/Λ)/√2   ⇒   w₀ = (1 - 1/Λ)·w₁
 
-        i.e. (up to an overall constant) w₀ = 1 - 1/Λ and wₘ≥₁ = 1.
+        i.e. (up to an overall constant) w₀ = 1 - 1/Λ and wₘ≥₁ = 1. The
+        symmetric closure also makes the (M-1, M) pair asymmetric:
+
+            w_(M-1)·√(M/2) = w_M·[√(M/2) + √((M+1)/2)]
+                ⇒   w_M = √M / (√M + √(M+1))  ≈ 1/2.
 
         The perpendicular advection terms {Φ, gₘ} conserve each moment's
-        ∑ₖ|gₘ|² individually, so W is an invariant of the full nonlinear
-        hierarchy (absent collisions/dissipation). Collisions and resistive
-        damping only remove free energy: dW/dt ≤ 0.
+        ∑ₖ|gₘ|² individually, and the field-line term {Ψ, ·} carries the
+        same moment couplings as ∂z (including the closure), so W is an
+        invariant of the full nonlinear hierarchy (absent collisions and
+        dissipation). Collisions and resistive damping only remove free
+        energy: dW/dt ≤ 0.
 
     Special cases:
-        - Λ → ∞:  w₀ → 1, recovering the unweighted sum ∑ₘ Eₘ
+        - Λ → ∞:  w₀ → 1, recovering the unweighted sum ∑ₘ Eₘ (zero closure)
         - Λ = 1:  w₀ = 0, g₀ decouples from the invariant (T[1,0] = 0)
         - Λ = -1: w₀ = 2 — the thesis-standard α = 1 case (the code's Λ
           relates to the thesis kinetic parameter via α = -1/Λ, see
@@ -2618,27 +2657,42 @@ def hermite_free_energy(state: KRMHDState, account_for_rfft: bool = True) -> flo
         values via its complex-eigenvalue check — so for all usable Λ
         (Λ ≥ 1 or Λ < 0) the form is positive (semi-)definite, with the
         semi-definite boundary at Λ = 1 where g₀ carries zero weight.
+        w_M > 0 for both closures.
 
     Args:
         state: KRMHD state with Hermite moments g[Nz, Ny, Nx//2+1, M+1]
         account_for_rfft: If True, properly weight rfft modes (default: True)
+        closure: Hermite truncation closure the state is evolved with,
+            "zero" (default, g_(M+1) = 0) or "symmetric" (g_(M+1) = g_(M-1)).
+            The state does not record its closure, so pass the same value
+            given to gandalf_step.
 
     Returns:
-        W: Scalar free energy w₀·E₀ + ∑ₘ₌₁ᴹ Eₘ
+        W: Scalar free energy w₀·E₀ + ∑ₘ₌₁ᴹ wₘ·Eₘ
+
+    Raises:
+        ValueError: If closure is unknown, or closure = "symmetric" with
+            M < 2 (the code defines the symmetric closure only for M ≥ 2;
+            see hermite.validate_closure).
 
     Note:
         For M = 0 the sum degenerates to w₀·E₀ (defined, but the streaming
-        hierarchy itself is trivial in that fluid-only limit).
+        hierarchy itself is trivial in that fluid-only limit). For M = 1
+        only the zero closure exists, and W = w₀·E₀ + E₁.
 
     Example:
-        >>> W = hermite_free_energy(state)
+        >>> W = hermite_free_energy(state, closure="symmetric")
         >>> # Track free-energy budget during inviscid evolution
-        >>> # (should be constant for eta = nu = 0)
+        >>> # (constant for eta = nu = 0 when closure matches gandalf_step)
     """
+    weights = free_energy_weights(state.M, state.Lambda, closure)
     E_m = hermite_moment_energy(state, account_for_rfft)
-    w0 = 1.0 - 1.0 / state.Lambda
-    # E_m[1:] is empty for M=0, so this degenerates cleanly to w0 * E_0
-    return float(w0 * E_m[0] + jnp.sum(E_m[1:]))
+    # Under the zero closure every tail weight is exactly 1 and w₀ is a Python
+    # float, so the result is bit-identical to w₀·E₀ + ∑ₘ≥₁ Eₘ (pre-#164).
+    # E_m[1:] is empty for M=0, so this degenerates cleanly to w₀·E₀.
+    w0 = float(weights[0])
+    w_tail = jnp.asarray(weights[1:], dtype=E_m.dtype)
+    return float(w0 * E_m[0] + jnp.sum(w_tail * E_m[1:]))
 
 
 def phase_mixing_energy(state: KRMHDState, m: int, account_for_rfft: bool = True) -> float:
