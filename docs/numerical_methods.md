@@ -951,6 +951,7 @@ is whether forcing spans the full |k| shell (all k_z) or is restricted to low k_
 | Function | k-space selection | Amplitude scaling | z+/z- | Low-k_z only? |
 |----------|------------------|-------------------|-------|---------------|
 | `force_alfven_modes()` | full \|k\| shell | Gaussian white noise | identical | No |
+| `force_alfven_modes(band="perp_lowkz")` | k_perp band + \|nz\| ≤ max_nz | Gaussian white noise | identical | Yes |
 | `force_alfven_modes_gandalf()` | full \|k\| shell | `(1/k_perp) × sqrt(fampl/dt × \|log(rand)\|)` | identical | No |
 | `force_alfven_modes_balanced()` | k_perp band + \|nz\| ≤ max_nz | Gaussian white noise | independent | Yes |
 
@@ -966,6 +967,10 @@ is whether forcing spans the full |k| shell (all k_z) or is restricted to low k_
   parallel phase mixing.
 
 - **`force_alfven_modes()`**: Simpler Gaussian variant of the full-|k| shell forcing.
+  The shell includes the n_z = 0 plane. Those 2D modes cascade inversely and can
+  build a box-scale condensate (Issue #173). Pass `band="perp_lowkz"` to force φ only
+  on k_perp ∈ [n_min, n_max] and |n_z| ≤ `max_nz` (default `max_nz=1`,
+  `include_nz0=False`, the same band options as `force_alfven_modes_balanced()`).
 
 See `src/krmhd/forcing.py` for implementation details.
 

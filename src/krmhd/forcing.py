@@ -41,7 +41,7 @@ Reference:
 """
 
 from functools import partial
-from typing import Tuple
+from typing import Optional, Tuple
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -385,6 +385,8 @@ def gaussian_white_noise_fourier_perp_lowkz(
         raise ValueError(f"Invalid band: n_min={n_min}, n_max={n_max}")
     if max_nz < 0:
         raise ValueError(f"max_nz must be ≥ 0, got {max_nz}")
+    if dt <= 0:
+        raise ValueError(f"dt must be positive, got {dt}")
 
     # Perpendicular band limits
     kperp_min = _mode_to_wavenumber(n_min, grid.Lx)
@@ -502,6 +504,10 @@ def gaussian_white_noise_fourier(
     Mode numbers are converted to physical wavenumbers via k = 2πn/L_min,
     where L_min = min(Lx, Ly, Lz) ensures consistency in anisotropic domains.
 
+    The isotropic shell k_min ≤ |k| ≤ k_max includes the n_z = 0 plane and the
+    high-|n_z| modes with small k⊥. For the low-|n_z| perpendicular band, use
+    gaussian_white_noise_fourier_perp_lowkz.
+
     The noise is scaled by 1/√dt and added as a per-step increment. The
     injection rate therefore scales as amplitude²/dt² and depends on the
     timestep (see module docstring).
@@ -601,6 +607,9 @@ def force_alfven_modes(
     n_max: int,
     dt: float,
     key: Array,
+    band: str = "shell",
+    max_nz: Optional[int] = None,
+    include_nz0: Optional[bool] = None,
 ) -> Tuple[KRMHDState, Array]:
     """
     Apply Gaussian white noise forcing to Alfvén modes (Elsasser variables).
@@ -614,6 +623,16 @@ def force_alfven_modes(
 
     The forcing is additive: z⁺ → z⁺ + F, z⁻ → z⁻ + F (same F for both).
 
+    Forcing band (Issue #173):
+    - band="shell" (default): the isotropic shell n_min ≤ |n| ≤ n_max, drawn by
+      gaussian_white_noise_fourier. The shell includes the n_z = 0 plane. In RMHD
+      those purely 2D modes cascade inversely and can build a condensate at the
+      box scale. The shell also includes high-|n_z| modes with small k⊥.
+    - band="perp_lowkz": the perpendicular band n⊥ ∈ [n_min, n_max] on the planes
+      |n_z| ≤ max_nz, drawn by gaussian_white_noise_fourier_perp_lowkz. By default
+      only |n_z| = 1 is forced, as in force_alfven_modes_balanced. Use it for
+      critically balanced turbulence.
+
     Args:
         state: Current KRMHD state with Elsasser variables
         amplitude: Forcing amplitude (injection rate ∝ amplitude²/dt², see module docstring)
@@ -621,6 +640,12 @@ def force_alfven_modes(
         n_max: Maximum mode number for forcing band (typically n=2 to n=5)
         dt: Timestep size (for white noise scaling)
         key: JAX random key
+        band: "shell" (isotropic |k| shell, default) or "perp_lowkz"
+            (perpendicular band on low-|n_z| planes)
+        max_nz: Largest |n_z| forced with band="perp_lowkz" (default 1).
+            Must be None with band="shell".
+        include_nz0: Whether band="perp_lowkz" forces the n_z = 0 plane
+            (default False). Must be None with band="shell".
 
     Returns:
         new_state: State with forcing applied to z⁺ and z⁻
@@ -638,6 +663,11 @@ def force_alfven_modes(
         >>> A_old = (state.z_plus - state.z_minus) / 2
         >>> A_new = (state_forced.z_plus - state_forced.z_minus) / 2
         >>> assert jnp.allclose(A_old, A_new)  # A∥ unchanged ✓
+        >>> # RMHD-compatible band: n⊥ ∈ [1, 2], |n_z| = 1, no 2D modes
+        >>> state_forced, key = force_alfven_modes(
+        ...     state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key,
+        ...     band="perp_lowkz",
+        ... )
 
     Physics:
         By forcing z⁺ = z⁻ identically:
@@ -650,14 +680,29 @@ def force_alfven_modes(
         Mode number convention: n=1 is the fundamental mode (k=2π/L),
         n=2 is the second harmonic (k=4π/L), etc.
     """
-    # Input validation (gaussian_white_noise_fourier validates n_min, n_max, dt)
+    # Input validation (the noise generators validate n_min, n_max, dt)
     if amplitude <= 0:
         raise ValueError(f"amplitude must be positive, got {amplitude}")
 
     # Generate single forcing field
-    forcing, key = gaussian_white_noise_fourier(
-        state.grid, amplitude, n_min, n_max, dt, key
-    )
+    if band == "shell":
+        if max_nz is not None or include_nz0 is not None:
+            raise ValueError(
+                "max_nz and include_nz0 apply only to band='perp_lowkz'; "
+                "the isotropic shell always includes n_z = 0"
+            )
+        forcing, key = gaussian_white_noise_fourier(
+            state.grid, amplitude, n_min, n_max, dt, key
+        )
+    elif band == "perp_lowkz":
+        forcing, key = gaussian_white_noise_fourier_perp_lowkz(
+            state.grid, amplitude, n_min, n_max,
+            1 if max_nz is None else max_nz,
+            False if include_nz0 is None else include_nz0,
+            dt, key,
+        )
+    else:
+        raise ValueError(f"band must be 'shell' or 'perp_lowkz', got {band!r}")
 
     # Apply IDENTICAL forcing to both Elsasser variables
     # This forces φ = (z⁺+z⁻)/2 only, leaving A∥ = (z⁺-z⁻)/2 unforced
@@ -702,7 +747,8 @@ def force_alfven_modes_gandalf(
     k_min <= |k| <= k_max where |k| = sqrt(kx² + ky² + kz²). High-k_z modes
     with small k_perp are included. This is NOT low-k_z RMHD-style forcing.
     For RMHD-compatible forcing restricted to low |k_z|, use
-    ``force_alfven_modes_balanced(max_nz=1)``.
+    ``force_alfven_modes(band="perp_lowkz")`` (φ only) or
+    ``force_alfven_modes_balanced(max_nz=1)`` (independent z⁺ and z⁻).
 
     Args:
         state: Current KRMHD state with Elsasser variables
