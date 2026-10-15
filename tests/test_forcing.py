@@ -437,6 +437,96 @@ class TestAlfvenForcing:
         assert jnp.allclose(state_forced.g, g_old)
 
 
+class TestAlfvenForcingBand:
+    """band="perp_lowkz" for φ-only forcing (Issue #173).
+
+    The isotropic shell includes n_z = 0, which feeds a 2D condensate in RMHD.
+    """
+
+    @staticmethod
+    def _increment(band_kwargs, seed=7, Nx=32, Nz=16):
+        grid = SpectralGrid3D.create(Nx=Nx, Ny=Nx, Nz=Nz)
+        state = initialize_alfven_wave(grid, M=4, kz_mode=1, amplitude=0.0)
+        state_forced, _ = force_alfven_modes(
+            state, amplitude=1.0, n_min=1, n_max=2, dt=0.01,
+            key=jax.random.PRNGKey(seed), **band_kwargs
+        )
+        dzp = np.asarray(state_forced.z_plus - state.z_plus)
+        dzm = np.asarray(state_forced.z_minus - state.z_minus)
+        nz = np.rint(np.asarray(grid.kz) * grid.Lz / (2 * np.pi)).astype(int)
+        nx = np.rint(np.asarray(grid.kx) * grid.Lx / (2 * np.pi))
+        ny = np.rint(np.asarray(grid.ky) * grid.Ly / (2 * np.pi))
+        n_perp = np.sqrt(nx[None, None, :] ** 2 + ny[None, :, None] ** 2)
+        return grid, dzp, dzm, nz, n_perp
+
+    @staticmethod
+    def _plane_power(field, nz, value):
+        return float(np.sum(np.abs(field[np.abs(nz) == value]) ** 2))
+
+    def test_default_shell_forces_nz0(self):
+        """Default stays the isotropic shell, which includes the n_z = 0 plane."""
+        grid, dzp, _, nz, _ = self._increment({})
+        expected, _ = gaussian_white_noise_fourier(
+            grid, amplitude=1.0, n_min=1, n_max=2, dt=0.01, key=jax.random.PRNGKey(7)
+        )
+        np.testing.assert_allclose(dzp, np.asarray(expected), rtol=1e-6, atol=1e-6)
+        assert self._plane_power(dzp, nz, 0) > 0
+
+    def test_perp_lowkz_default_band(self):
+        """Default perp_lowkz forces n⊥ ∈ [n_min, n_max] on |n_z| = 1 only."""
+        grid, dzp, dzm, nz, n_perp = self._increment({"band": "perp_lowkz"})
+
+        expected, _ = gaussian_white_noise_fourier_perp_lowkz(
+            grid, 1.0, 1, 2, 1, False, 0.01, jax.random.PRNGKey(7)
+        )
+        np.testing.assert_allclose(dzp, np.asarray(expected), rtol=1e-6, atol=1e-6)
+
+        allowed = (np.abs(nz)[:, None, None] == 1) & (n_perp >= 1) & (n_perp <= 2)
+        assert np.sum(np.abs(dzp[allowed]) ** 2) > 0
+        assert np.all(dzp[~allowed] == 0)
+        assert self._plane_power(dzp, nz, 0) == 0
+
+        # φ only: identical increments on z⁺ and z⁻, so A∥ is unforced
+        np.testing.assert_array_equal(dzp, dzm)
+
+    def test_perp_lowkz_include_nz0_and_max_nz(self):
+        """include_nz0 adds the n_z = 0 plane; max_nz widens the |n_z| set."""
+        _, dzp, _, nz, _ = self._increment(
+            {"band": "perp_lowkz", "include_nz0": True}
+        )
+        assert self._plane_power(dzp, nz, 0) > 0
+        assert self._plane_power(dzp, nz, 2) == 0
+
+        _, dzp, _, nz, _ = self._increment({"band": "perp_lowkz", "max_nz": 2})
+        assert self._plane_power(dzp, nz, 0) == 0
+        assert self._plane_power(dzp, nz, 1) > 0
+        assert self._plane_power(dzp, nz, 2) > 0
+        assert np.all(dzp[np.abs(nz) > 2] == 0)
+
+    def test_perp_lowkz_hermitian(self):
+        """The kx=0 and Nyquist planes hold Hermitian pairs (Issue #156)."""
+        _, dzp, _, _, _ = self._increment(
+            {"band": "perp_lowkz", "include_nz0": True}, Nx=32
+        )
+        assert _anti_hermitian_fraction(dzp, 32) < 1e-12
+
+    def test_invalid_band_arguments(self):
+        """Band options are rejected with the shell and for unknown bands."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        state = initialize_alfven_wave(grid, M=4, kz_mode=1, amplitude=0.0)
+        key = jax.random.PRNGKey(0)
+        for kwargs in ({"max_nz": 1}, {"include_nz0": False}, {"band": "perp"}):
+            with pytest.raises(ValueError):
+                force_alfven_modes(
+                    state, amplitude=1.0, n_min=1, n_max=2, dt=0.01, key=key, **kwargs
+                )
+        with pytest.raises(ValueError, match="dt"):
+            force_alfven_modes(
+                state, amplitude=1.0, n_min=1, n_max=2, dt=0.0, key=key,
+                band="perp_lowkz",
+            )
+
+
 class TestEnergyInjection:
     """Test energy injection rate computation."""
 
