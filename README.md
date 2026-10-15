@@ -1194,6 +1194,7 @@ The code includes validation against:
   - gaussian_white_noise_fourier(): Band-limited stochastic forcing
   - force_alfven_modes(): Forces z⁺=z⁻ identically (drives u⊥ only, not B⊥)
   - force_hermite_moments(): Independent forcing for kinetic moments g_m
+    (default isotropic shell includes k⊥ = 0; `band="perp_lowkz"` excludes it)
   - compute_energy_injection_rate(): Energy diagnostics for balance validation
   - Hermitian symmetry enforcement for rfft format (critical for direct Fourier operations)
 - **Validation examples** (Issues #11-12, #27): Physics benchmarks

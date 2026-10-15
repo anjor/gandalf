@@ -972,6 +972,16 @@ is whether forcing spans the full |k| shell (all k_z) or is restricted to low k_
   on k_perp ∈ [n_min, n_max] and |n_z| ≤ `max_nz` (default `max_nz=1`,
   `include_nz0=False`, the same band options as `force_alfven_modes_balanced()`).
 
+**Hermite moment forcing (`force_hermite_moments()`).** The default `band="shell"`
+forces g_m on the isotropic shell `k_min ≤ |k| ≤ k_max`. The shell includes the
+k_perp = 0 modes (0, 0, ±n_z). At k_perp = 0 the brackets {Φ, g} and {Ψ, g} vanish
+identically, so free energy injected there never cascades in k_perp. It only phase
+mixes linearly. Keep the shell for linear FDT validation. In turbulence runs that
+measure the cascade versus phase-mixing partition, use `band="perp_lowkz"`. It
+forces the same band as `force_alfven_modes_balanced()`: k_perp band plus
+|nz| ≤ `max_nz` (default 1), with nz = 0 excluded unless `include_nz0=True`
+(Issue #174).
+
 See `src/krmhd/forcing.py` for implementation details.
 
 ## Summary
