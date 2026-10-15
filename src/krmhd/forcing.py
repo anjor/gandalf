@@ -41,7 +41,7 @@ Reference:
 """
 
 from functools import partial
-from typing import Tuple
+from typing import Optional, Tuple
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -1042,6 +1042,9 @@ def force_hermite_moments(
     dt: float,
     key: Array,
     forced_moments: Tuple[int, ...] = (0,),
+    band: str = "shell",
+    max_nz: Optional[int] = None,
+    include_nz0: Optional[bool] = None,
 ) -> Tuple[KRMHDState, Array]:
     """
     Apply Gaussian white noise forcing to Hermite moments (kinetic distribution).
@@ -1061,11 +1064,28 @@ def force_hermite_moments(
 
     The forcing is additive: g_m → g_m + F for each m ∈ forced_moments.
 
+    Forcing band (Issue #174):
+        - ``band="shell"`` (default): the isotropic shell k_min ≤ |k| ≤ k_max of
+          ``gaussian_white_noise_fourier``, with k = 2πn/min(Lx, Ly, Lz). The
+          shell includes the k⊥ = 0 modes (0, 0, ±n_z) with n_z in the band.
+          At k⊥ = 0 both nonlinear terms of the hierarchy, {Φ, g} and {Ψ, g},
+          vanish: every triad through a k⊥ = 0 wavevector has p × q = 0. Free
+          energy injected there never cascades in k⊥. It only phase mixes
+          linearly and is removed by collisions or η_z. Keep this band for the
+          linear FDT validation it was written for.
+        - ``band="perp_lowkz"``: the band of ``force_alfven_modes_balanced``,
+          i.e. n_min ≤ k⊥Lx/2π ≤ n_max and |n_z| ≤ max_nz (default 1), with
+          the n_z = 0 plane excluded unless include_nz0=True. Since n_min ≥ 1,
+          it never forces k⊥ = 0. Use it in turbulence runs that measure how
+          much compressive free energy cascades in k⊥ versus phase mixes.
+
     Args:
         state: Current KRMHD state with Hermite moments
         amplitude: Forcing amplitude (injection rate ∝ amplitude²/dt², see module docstring)
         n_min: Minimum mode number for forcing band (typically n=1 or n=2)
-        n_max: Maximum mode number for forcing band (typically n=2 to n=5)
+        n_max: Maximum mode number for forcing band (typically n=2 to n=5).
+            ``band="shell"`` needs n_min < n_max; ``band="perp_lowkz"`` allows
+            n_min = n_max.
         dt: Timestep size (for white noise scaling)
         key: JAX random key
         forced_moments: Tuple of Hermite moment indices to force (default: (0,) for g₀ only)
@@ -1073,6 +1093,11 @@ def force_hermite_moments(
             - (0,): Force density g₀ only (standard FDT validation)
             - (0, 1): Force both g₀ and g₁ (density + parallel velocity)
             - (0, 1, 2): Force g₀, g₁, g₂ (including parallel pressure)
+        band: ``"shell"`` (default) or ``"perp_lowkz"``; see "Forcing band" above
+        max_nz: Largest |n_z| forced with ``band="perp_lowkz"`` (default 1).
+            Must be left as None with ``band="shell"``.
+        include_nz0: Force the n_z = 0 plane with ``band="perp_lowkz"``
+            (default False). Must be left as None with ``band="shell"``.
 
     Returns:
         new_state: State with forcing applied to specified Hermite moments
@@ -1080,10 +1105,15 @@ def force_hermite_moments(
 
     Example:
         >>> key = jax.random.PRNGKey(42)
-        >>> # Force g₀ at mode n=1 (fundamental mode) for FDT validation
+        >>> # Force g₀ in the shell n ∈ [1, 2] for FDT validation
         >>> state_forced, key = force_hermite_moments(
-        ...     state, amplitude=0.15, n_min=1, n_max=1, dt=0.01, key=key,
+        ...     state, amplitude=0.15, n_min=1, n_max=2, dt=0.01, key=key,
         ...     forced_moments=(0,)
+        ... )
+        >>> # Turbulence run: force g₀ at k⊥Lx/2π ∈ [1, 2], |n_z| = 1 only
+        >>> state_forced, key = force_hermite_moments(
+        ...     state, amplitude=0.15, n_min=1, n_max=2, dt=0.01, key=key,
+        ...     band="perp_lowkz", max_nz=1, include_nz0=False,
         ... )
 
     Physics:
@@ -1109,13 +1139,22 @@ def force_hermite_moments(
     """
     from typing import Tuple as TupleType  # Import for type hint
 
-    # Input validation (gaussian_white_noise_fourier validates n_min, n_max, dt)
+    # Input validation (the noise generators validate n_min, n_max)
     if amplitude <= 0:
         raise ValueError(f"amplitude must be positive, got {amplitude}")
+    if dt <= 0:
+        raise ValueError(f"dt must be positive, got {dt}")
     if not forced_moments:
         raise ValueError("forced_moments cannot be empty")
     if not isinstance(forced_moments, (tuple, list)):
         raise TypeError(f"forced_moments must be tuple or list, got {type(forced_moments)}")
+    if band not in ("shell", "perp_lowkz"):
+        raise ValueError(f"band must be 'shell' or 'perp_lowkz', got {band!r}")
+    if band == "shell" and (max_nz is not None or include_nz0 is not None):
+        raise ValueError(
+            "max_nz and include_nz0 apply only to band='perp_lowkz'; "
+            "the default 'shell' band is isotropic in |k|"
+        )
 
     # Validate moment indices
     for m in forced_moments:
@@ -1127,9 +1166,18 @@ def force_hermite_moments(
             raise ValueError(f"Moment index m={m} exceeds M={state.M}")
 
     # Generate forcing field (same noise for all specified moments)
-    forcing, key = gaussian_white_noise_fourier(
-        state.grid, amplitude, n_min, n_max, dt, key
-    )
+    if band == "shell":
+        forcing, key = gaussian_white_noise_fourier(
+            state.grid, amplitude, n_min, n_max, dt, key
+        )
+    else:
+        forcing, key = gaussian_white_noise_fourier_perp_lowkz(
+            state.grid, amplitude, n_min, n_max,
+            1 if max_nz is None else max_nz,
+            False if include_nz0 is None else include_nz0,
+            dt, key,
+        )
+    forcing = forcing.astype(state.g.dtype)
 
     # Apply forcing to specified Hermite moments
     # g has shape [Nz, Ny, Nx//2+1, M+1], forcing has shape [Nz, Ny, Nx//2+1]

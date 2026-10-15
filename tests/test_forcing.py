@@ -15,12 +15,14 @@ from krmhd import (
     gaussian_white_noise_fourier,
     force_alfven_modes,
     force_alfven_modes_specific,
+    force_hermite_moments,
     compute_energy_injection_rate,
     gandalf_step,
     energy,
 )
 import numpy as np
-from krmhd.spectral import rfftn_inverse
+from krmhd.physics import poisson_bracket_3d
+from krmhd.spectral import enforce_hermitian, rfftn_inverse
 from krmhd.forcing import (
     gaussian_white_noise_fourier_perp_lowkz,
     gandalf_forcing_fourier,
@@ -867,3 +869,163 @@ class TestGaussianWhiteNoiseFourierPerpLowkz:
             )
             assert field.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
             assert jnp.iscomplexobj(field)
+
+
+class TestForceHermiteMomentsBand:
+    """Band options of force_hermite_moments (Issue #174).
+
+    The default isotropic shell forces k⊥ = 0 modes of g, where the
+    hierarchy has no nonlinear coupling. band="perp_lowkz" excludes them.
+    """
+
+    @staticmethod
+    def _state(grid, M: int = 4):
+        return initialize_random_spectrum(grid, M=M, alpha=5/3, amplitude=0.1, seed=3)
+
+    @staticmethod
+    def _mode_numbers(grid):
+        """Integer mode numbers (nz, ny, nx) broadcast to [Nz, Ny, Nx//2+1]."""
+        nx = np.rint(np.asarray(grid.kx) * grid.Lx / (2 * np.pi)).astype(int)
+        ny = np.rint(np.asarray(grid.ky) * grid.Ly / (2 * np.pi)).astype(int)
+        nz = np.rint(np.asarray(grid.kz) * grid.Lz / (2 * np.pi)).astype(int)
+        return np.meshgrid(nz, ny, nx, indexing="ij")
+
+    @staticmethod
+    def _forced(state_before, state_after, m: int = 0):
+        dg = np.asarray(state_after.g[..., m] - state_before.g[..., m])
+        return np.abs(dg) > 0
+
+    def test_default_matches_shell_noise(self):
+        """Default call is unchanged: g₀ gets exactly the isotropic shell noise."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        state = self._state(grid)
+        key = jax.random.PRNGKey(7)
+
+        state_forced, new_key = force_hermite_moments(
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
+        )
+        noise, ref_key = gaussian_white_noise_fourier(
+            grid, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key
+        )
+
+        np.testing.assert_array_equal(np.asarray(state_forced.g[..., 0]),
+                                      np.asarray(state.g[..., 0] + noise))
+        np.testing.assert_array_equal(np.asarray(state_forced.g[..., 1:]),
+                                      np.asarray(state.g[..., 1:]))
+        np.testing.assert_array_equal(np.asarray(new_key), np.asarray(ref_key))
+
+    def test_default_shell_forces_kperp_zero(self):
+        """The default shell includes (0, 0, ±n_z) modes with n_z in the band."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        state = self._state(grid)
+        state_forced, _ = force_hermite_moments(
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=jax.random.PRNGKey(0)
+        )
+        nz, ny, nx = self._mode_numbers(grid)
+        forced = self._forced(state, state_forced)
+        kperp_zero = (nx == 0) & (ny == 0)
+        assert np.any(forced & kperp_zero & (np.abs(nz) == 1))
+        assert np.any(forced & kperp_zero & (np.abs(nz) == 2))
+
+    @pytest.mark.parametrize("max_nz,include_nz0", [(1, False), (1, True), (2, False)])
+    def test_perp_lowkz_forced_set(self, max_nz, include_nz0):
+        """perp_lowkz forces exactly n_min ≤ n⊥ ≤ n_max, |n_z| ≤ max_nz, never k⊥ = 0."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        state = self._state(grid)
+        state_forced, _ = force_hermite_moments(
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=jax.random.PRNGKey(1),
+            band="perp_lowkz", max_nz=max_nz, include_nz0=include_nz0,
+        )
+        nz, ny, nx = self._mode_numbers(grid)
+        nperp2 = nx**2 + ny**2
+        expected = (nperp2 >= 1) & (nperp2 <= 4) & (np.abs(nz) <= max_nz)
+        if not include_nz0:
+            expected &= nz != 0
+
+        forced = self._forced(state, state_forced)
+        np.testing.assert_array_equal(forced, expected)
+        assert not np.any(forced & (nperp2 == 0))
+
+    def test_perp_lowkz_defaults(self):
+        """perp_lowkz defaults to max_nz=1, include_nz0=False (as the Alfvénic band)."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        state = self._state(grid)
+        key = jax.random.PRNGKey(2)
+        default, _ = force_hermite_moments(
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key, band="perp_lowkz"
+        )
+        explicit, _ = force_hermite_moments(
+            state, amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key,
+            band="perp_lowkz", max_nz=1, include_nz0=False,
+        )
+        np.testing.assert_array_equal(np.asarray(default.g), np.asarray(explicit.g))
+
+    def test_perp_lowkz_hermitian_moments_and_dtype(self):
+        """Only forced moments change, the increment is Hermitian, and g keeps its dtype."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        state = self._state(grid)
+        state_forced, _ = force_hermite_moments(
+            state, amplitude=0.1, n_min=1, n_max=3, dt=0.01, key=jax.random.PRNGKey(4),
+            forced_moments=(0, 2), band="perp_lowkz", include_nz0=True,
+        )
+        assert state_forced.g.dtype == state.g.dtype
+        dg = state_forced.g - state.g
+        np.testing.assert_array_equal(np.asarray(dg[..., 0]), np.asarray(dg[..., 2]))
+        for m in (1, 3, 4):
+            assert not np.any(np.asarray(dg[..., m]))
+        assert _anti_hermitian_fraction(dg[..., 0], grid.Nx) < 1e-12
+        assert jnp.array_equal(state_forced.z_plus, state.z_plus)
+        assert jnp.array_equal(state_forced.z_minus, state.z_minus)
+
+    def test_perp_lowkz_allows_single_shell(self):
+        """perp_lowkz accepts n_min = n_max (one k⊥ ring)."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        state = self._state(grid)
+        state_forced, _ = force_hermite_moments(
+            state, amplitude=0.1, n_min=1, n_max=1, dt=0.01, key=jax.random.PRNGKey(5),
+            band="perp_lowkz",
+        )
+        nz, ny, nx = self._mode_numbers(grid)
+        forced = self._forced(state, state_forced)
+        assert np.all(nx[forced]**2 + ny[forced]**2 == 1)
+        assert np.all(np.abs(nz[forced]) == 1)
+
+    def test_validation(self):
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16)
+        state = self._state(grid)
+        key = jax.random.PRNGKey(0)
+        common = dict(amplitude=0.1, n_min=1, n_max=2, dt=0.01, key=key)
+
+        with pytest.raises(ValueError, match="band"):
+            force_hermite_moments(state, band="kperp", **common)
+        with pytest.raises(ValueError, match="perp_lowkz"):
+            force_hermite_moments(state, max_nz=1, **common)
+        with pytest.raises(ValueError, match="perp_lowkz"):
+            force_hermite_moments(state, include_nz0=False, **common)
+        with pytest.raises(ValueError, match="max_nz"):
+            force_hermite_moments(state, band="perp_lowkz", max_nz=-1, **common)
+        with pytest.raises(ValueError, match="dt"):
+            force_hermite_moments(state, amplitude=0.1, n_min=1, n_max=2, dt=0.0,
+                                  key=key, band="perp_lowkz")
+
+    def test_kperp_zero_modes_have_no_nonlinear_coupling(self):
+        """Premise of Issue #174: {f, g} neither feeds nor is fed by k⊥ = 0 modes."""
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
+        shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        rng = np.random.default_rng(0)
+
+        def random_field():
+            f = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+            return enforce_hermitian(jnp.asarray(f, dtype=jnp.complex64), grid.Nx)
+
+        args = (grid.kx, grid.ky, grid.Nz, grid.Ny, grid.Nx, grid.dealias_mask)
+        phi, g = random_field(), random_field()
+
+        # Output at k⊥ = 0 vanishes for arbitrary inputs
+        bracket = poisson_bracket_3d(phi, g, *args)
+        scale = float(jnp.max(jnp.abs(bracket)))
+        assert float(jnp.max(jnp.abs(bracket[:, 0, 0]))) < 1e-5 * scale
+
+        # A g with only k⊥ = 0 content does not enter the bracket at all
+        g_kperp0 = jnp.zeros_like(g).at[:, 0, 0].set(g[:, 0, 0])
+        assert float(jnp.max(jnp.abs(poisson_bracket_3d(phi, g_kperp0, *args)))) < 1e-5 * scale
