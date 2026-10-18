@@ -18,6 +18,8 @@ from modal_support import (  # noqa: E402
     pack_project,
     parse_env_pairs,
     sanitize_output_subdir,
+    script_function_name,
+    script_paths,
     substitute_output_dir,
     tail,
     unpack_project,
@@ -160,3 +162,48 @@ class TestPeriodicCommitter:
     def test_thread_is_daemon(self):
         pc = PeriodicCommitter(lambda: None, interval=10)
         assert isinstance(pc._thread, threading.Thread) and pc._thread.daemon
+
+
+class TestScriptSubmission:
+    def test_script_paths_adds_uncovered_script(self):
+        assert script_paths("scripts/lib, configs", "drive.py") == ["scripts/lib", "configs", "drive.py"]
+
+    def test_script_paths_keeps_covered_script(self):
+        assert script_paths(["scripts/", "configs"], "scripts/drive.py") == ["scripts/", "configs"]
+        assert script_paths("scripts/drive.py", "scripts/drive.py") == ["scripts/drive.py"]
+
+    def test_script_paths_prefix_is_not_a_folder_match(self):
+        assert script_paths("scr", "scripts/drive.py") == ["scr", "scripts/drive.py"]
+
+    def test_function_names(self):
+        assert script_function_name(True) == "run_script_gpu"
+        assert script_function_name(False) == "run_script_cpu"
+
+
+class TestSubmitCLI:
+    """The script/call subcommands of scripts/modal_submit.py, with Modal stubbed out."""
+
+    @pytest.fixture
+    def submit(self, monkeypatch):
+        import modal_submit
+        monkeypatch.setattr(modal_submit, "check_modal_installed", lambda: None)
+        return modal_submit
+
+    def test_script_command(self, submit, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(submit, "spawn_script", lambda *a, **k: seen.update(args=a, kwargs=k))
+        monkeypatch.setattr(sys, "argv", ["modal_submit.py", "script", "--project-dir", "../p", "--include", "s,c",
+                                          "--script", "s/d.py", "--args", "c/r.yaml --out {output_dir}",
+                                          "--output-subdir", "run1", "--env", "A=1", "--cpu"])
+        submit.main()
+        assert seen["args"] == ("../p", "s,c", "s/d.py")
+        assert seen["kwargs"]["args"] == "c/r.yaml --out {output_dir}"
+        assert seen["kwargs"]["output_subdir"] == "run1"
+        assert seen["kwargs"]["use_gpu"] is False and seen["kwargs"]["env"] == "A=1"
+
+    def test_call_command(self, submit, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(submit, "call_status", lambda *a, **k: seen.update(args=a, kwargs=k))
+        monkeypatch.setattr(sys, "argv", ["modal_submit.py", "call", "fc-123", "--wait", "--interval", "5"])
+        submit.main()
+        assert seen["args"] == ("fc-123",) and seen["kwargs"] == {"wait": True, "interval": 5.0}
