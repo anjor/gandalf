@@ -123,6 +123,23 @@ def substitute_output_dir(args: Iterable[str], output_dir: str) -> list[str]:
     return [a.replace(OUTPUT_DIR_PLACEHOLDER, output_dir) for a in args]
 
 
+APP_NAME = "gandalf-krmhd"
+
+
+def script_paths(include: str | Iterable[str], script: str) -> list[str]:
+    """The paths to pack: `include` (comma-separated string or list), plus `script` if no entry covers it."""
+    items = include.split(",") if isinstance(include, str) else list(include)
+    paths = [p.strip() for p in items if p.strip()]
+    if not any(script == p or script.startswith(p.rstrip("/") + "/") for p in paths):
+        paths.append(script)
+    return paths
+
+
+def script_function_name(use_gpu: bool) -> str:
+    """Name of the deployed function that runs an external driver script."""
+    return "run_script_gpu" if use_gpu else "run_script_cpu"
+
+
 def parse_env_pairs(text: str) -> dict[str, str]:
     """Parse "KEY=VALUE,KEY2=VALUE2" into a dict; keys must be valid environment names."""
     out: dict[str, str] = {}

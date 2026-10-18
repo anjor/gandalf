@@ -32,10 +32,19 @@ Usage:
 
     # Monitor job status
     python scripts/modal_submit.py status
+
+    # Spawn your own driver script on the deployed app (after `modal deploy modal_app.py`)
+    python scripts/modal_submit.py script --project-dir ../my-project \\
+        --include scripts,configs --script scripts/drive.py \\
+        --args "configs/run.yaml --out {output_dir}" --output-subdir my_run
+
+    # Status of a spawned call, or wait for it
+    python scripts/modal_submit.py call fc-... --wait
 """
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -215,7 +224,7 @@ def check_modal_installed() -> None:
     """
     try:
         subprocess.run(
-            ["modal", "token", "list"],
+            ["modal", "profile", "current"],  # `modal token list` no longer exists in Modal 1.x
             capture_output=True,
             text=True,
             check=True  # Raise CalledProcessError on non-zero exit
@@ -533,6 +542,77 @@ def show_status() -> None:
     subprocess.run(cmd, check=True)
 
 
+def spawn_script(
+    project_dir: str,
+    include: str,
+    script: str,
+    args: str = "",
+    output_subdir: Optional[str] = None,
+    use_gpu: bool = True,
+    env: str = "",
+    commit_interval: float = 600.0,
+    max_project_mb: float = 200.0,
+) -> str:
+    """Pack the project files and spawn an external driver script on the deployed app.
+
+    The call runs on the deployed app (`modal deploy modal_app.py`), independently of
+    this process, so it survives the local machine sleeping or disconnecting. Returns
+    the function call ID.
+    """
+    import shlex
+    import time
+
+    import modal
+    from modal_support import (APP_NAME, pack_project, parse_env_pairs, sanitize_output_subdir,
+                               script_function_name, script_paths)
+
+    paths = script_paths(include, script)
+    data = pack_project(project_dir, paths, max_bytes=int(max_project_mb * 1024 * 1024))
+    subdir = sanitize_output_subdir(output_subdir or f"script_{time.strftime('%Y%m%d_%H%M%S')}")
+    name = script_function_name(use_gpu)
+    try:
+        fn = modal.Function.from_name(APP_NAME, name)
+        call = fn.spawn(data, script, shlex.split(args), subdir, commit_interval, parse_env_pairs(env))
+    except modal.exception.NotFoundError:
+        print(f"Error: {APP_NAME}.{name} is not deployed; run `modal deploy modal_app.py` first")
+        sys.exit(1)
+    volume = os.environ.get("MODAL_VOLUME_NAME", "gandalf-results")
+    print(f"Spawned {script} on {APP_NAME}.{name} ({len(data) / 1024:.0f} KiB packed)")
+    print(f"Call ID: {call.object_id}")
+    print(f"Output:  {volume}:{subdir}")
+    print(f"\nCheck:    python scripts/modal_submit.py call {call.object_id} [--wait]")
+    print(f"Download: modal volume get {volume} {subdir} ./{subdir.split('/')[-1]}")
+    return call.object_id
+
+
+def call_status(call_id: str, wait: bool = False, interval: float = 60.0) -> Optional[Dict[str, Any]]:
+    """Report a spawned call: still running, or its result summary and the tail of its log."""
+    import time
+
+    import modal
+
+    call = modal.FunctionCall.from_id(call_id)
+    while True:
+        try:
+            result = call.get(timeout=0)
+            break
+        except TimeoutError:
+            if not wait:
+                print(f"{call_id}: running")
+                return None
+            time.sleep(interval)
+        except Exception as exc:  # cancelled, failed or expired
+            print(f"{call_id}: ended with {type(exc).__name__}: {exc}")
+            return None
+    print(f"{call_id}: {result.get('status')} (return code {result.get('returncode')}), "
+          f"{result.get('elapsed_time', 0.0):.0f} s, output {result.get('output_dir')}")
+    if result.get('error'):
+        print(f"Error: {result['error']}")
+    if result.get('log_tail'):
+        print("\nLast lines of the log:\n" + result['log_tail'])
+    return result
+
+
 def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -606,6 +686,27 @@ Examples:
     # Status command
     status_parser = subparsers.add_parser('status', help='Show Modal job status')
 
+    # Script command: spawn an external driver on the deployed app
+    script_parser = subparsers.add_parser(
+        'script', help='Spawn your own driver script on the deployed app (modal deploy modal_app.py first)')
+    script_parser.add_argument('--project-dir', required=True, help='Root of the project to pack')
+    script_parser.add_argument('--include', required=True,
+                               help='Comma-separated files/folders to pack, relative to --project-dir')
+    script_parser.add_argument('--script', required=True, help='Driver script, relative to --project-dir')
+    script_parser.add_argument('--args', default='', help="Arguments for the script; {output_dir} is replaced")
+    script_parser.add_argument('--output-subdir', help='Folder on the results volume')
+    script_parser.add_argument('--cpu', action='store_true', help='Run on CPUs instead of a GPU')
+    script_parser.add_argument('--env', default='', help='Comma-separated KEY=VALUE environment for the script')
+    script_parser.add_argument('--commit-interval', type=float, default=600.0,
+                               help='Seconds between volume commits while the script runs')
+    script_parser.add_argument('--max-project-mb', type=float, default=200.0, help='Size limit of the package')
+
+    # Call command: status of a spawned call
+    call_parser = subparsers.add_parser('call', help='Status or result of a spawned call')
+    call_parser.add_argument('call_id', help='Function call ID (fc-...)')
+    call_parser.add_argument('--wait', action='store_true', help='Wait for the call to finish')
+    call_parser.add_argument('--interval', type=float, default=60.0, help='Polling interval in seconds')
+
     args = parser.parse_args()
 
     if not args.command:
@@ -673,6 +774,14 @@ Examples:
 
     elif args.command == 'status':
         show_status()
+
+    elif args.command == 'script':
+        spawn_script(args.project_dir, args.include, args.script, args=args.args,
+                     output_subdir=args.output_subdir, use_gpu=not args.cpu, env=args.env,
+                     commit_interval=args.commit_interval, max_project_mb=args.max_project_mb)
+
+    elif args.command == 'call':
+        call_status(args.call_id, wait=args.wait, interval=args.interval)
 
 
 if __name__ == "__main__":

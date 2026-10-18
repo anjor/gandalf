@@ -24,10 +24,15 @@ Usage:
     # Run parameter sweep
     modal run modal_app.py::run_parameter_sweep --base-config configs/driven_turbulence.yaml
 
-    # Run your own driver script with files from another project (see docs/MODAL_GUIDE.md)
-    modal run --detach modal_app.py::run_script --project-dir ../my-project \
+    # Run your own driver script with files from another project (see docs/MODAL_GUIDE.md):
+    # long runs: deploy, then spawn on the deployed app
+    modal deploy modal_app.py
+    python scripts/modal_submit.py script --project-dir ../my-project \
         --include scripts,configs --script scripts/drive.py \
         --args "configs/run.yaml --out {output_dir}" --output-subdir my_run
+    # short tests, waiting for the result
+    modal run modal_app.py::run_script --project-dir ../my-project --include scripts,configs \
+        --script scripts/drive.py --args "configs/run.yaml --out {output_dir}"
 
 Requirements:
     pip install modal
@@ -1165,7 +1170,12 @@ def run_script(
     env: str = "",
 ):
     """
-    Run your own driver script on Modal with GANDALF installed.
+    Run your own driver script on Modal with GANDALF installed, waiting for it.
+
+    The call is tied to this client: if the client is suspended (e.g. the laptop
+    sleeps), Modal cancels it, even with `modal run --detach`. For runs longer than
+    a few minutes, deploy the app and use `python scripts/modal_submit.py script`,
+    which spawns the call on the deployed app.
 
     Packs the comma-separated paths `include` (relative to `project_dir`; the script is
     added if not covered), uploads them, and runs `python <script> <args>` in the
@@ -1174,19 +1184,17 @@ def run_script(
     (e.g. "JAX_PLATFORMS=cuda" for a driver that defaults JAX to the CPU).
 
     Usage:
-        modal run --detach modal_app.py::run_script --project-dir ../my-project \
+        modal run modal_app.py::run_script --project-dir ../my-project \
             --include scripts,configs --script scripts/drive.py \
-            --args "configs/run.yaml --out {output_dir}" --output-subdir my_run
+            --args "configs/run.yaml --out {output_dir}" --output-subdir my_test
     """
     import shlex
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
-    from modal_support import pack_project, parse_env_pairs, sanitize_output_subdir
+    from modal_support import pack_project, parse_env_pairs, sanitize_output_subdir, script_paths
 
-    paths = [p.strip() for p in include.split(",") if p.strip()]
-    if not any(script == p or script.startswith(p.rstrip("/") + "/") for p in paths):
-        paths.append(script)
+    paths = script_paths(include, script)
     data = pack_project(project_dir, paths, max_bytes=int(max_project_mb * 1024 * 1024))
     subdir = sanitize_output_subdir(output_subdir or f"script_{time.strftime('%Y%m%d_%H%M%S')}")
     func = run_script_gpu if use_gpu else run_script_cpu

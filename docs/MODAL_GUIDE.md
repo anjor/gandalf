@@ -702,20 +702,34 @@ tail -f modal.log
 ## Running Your Own Driver Script
 
 Projects that drive GANDALF with their own script (their own forcing, diagnostics or
-energy accounting) can run it on Modal with `modal_app.py::run_script`, without writing
-a separate Modal app. Run it from a GANDALF checkout; the container installs that
+energy accounting) can run it on Modal through `run_script_gpu`/`run_script_cpu`, without
+writing a separate Modal app. Work from a GANDALF checkout: the container installs that
 checkout of GANDALF, as for the other functions.
 
+For anything longer than a few minutes, deploy the app and spawn the run on it. A spawned
+call does not depend on the local process, so it survives the local machine sleeping or
+losing its connection:
+
 ```bash
-JAX_VERSION=0.9.1 MODAL_SCRIPT_GPU=A100 \
-modal run --detach modal_app.py::run_script \
+JAX_VERSION=0.9.1 MODAL_SCRIPT_GPU=A100 modal deploy modal_app.py
+
+python scripts/modal_submit.py script \
     --project-dir ../my-project \
     --include scripts,configs/run.yaml,data/spinup/restart.npz \
     --script scripts/drive.py \
     --args "configs/run.yaml --out {output_dir}" \
     --output-subdir my_run_m64 \
     --env "JAX_PLATFORMS=cuda"
+# prints the call ID (fc-...)
+
+python scripts/modal_submit.py call fc-...          # running, or the result
+python scripts/modal_submit.py call fc-... --wait   # wait, then print the result
+modal volume get gandalf-results my_run_m64 ./my_run_m64
 ```
+
+For a short test that waits for the result, `modal run modal_app.py::run_script` takes the
+same options. Its call is tied to the local client: if the client is suspended, for example
+when a laptop sleeps, Modal cancels the call even with `modal run --detach`.
 
 - `--include` lists the files and folders (relative to `--project-dir`) that are packed and
   uploaded; the script is added if not covered. `__pycache__`, `.git` and notebook
@@ -730,12 +744,10 @@ modal run --detach modal_app.py::run_script \
   from them is up to the script.
 - `--env` adds environment variables, for example `JAX_PLATFORMS=cuda` for a driver that
   defaults JAX to the CPU.
-- `--no-use-gpu` runs on CPUs instead. The GPU type (`MODAL_SCRIPT_GPU`, default A100),
-  timeout (`MODAL_TIMEOUT_SCRIPT`, default 24 h, Modal's maximum), CPU count and memory are
-  read from the environment when the app is built, and `JAX_VERSION` pins JAX in both
-  images.
-- With `--detach` the run continues after the local client exits. Download the results with
-  `modal volume get gandalf-results my_run_m64 ./my_run_m64`.
+- `--cpu` (`--no-use-gpu` for `modal run`) runs on CPUs instead. The GPU type
+  (`MODAL_SCRIPT_GPU`, default A100), timeout (`MODAL_TIMEOUT_SCRIPT`, default 24 h, Modal's
+  maximum), CPU count and memory are read from the environment when the app is deployed or
+  built, and `JAX_VERSION` pins JAX in both images.
 
 ## Advanced Usage
 
