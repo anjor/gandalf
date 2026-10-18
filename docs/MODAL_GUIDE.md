@@ -56,7 +56,7 @@ python scripts/modal_submit.py submit configs/driven_turbulence.yaml
 Or directly with Modal CLI:
 
 ```bash
-modal run modal_app.py --config-path configs/driven_turbulence.yaml
+modal run modal_app.py::main --config-path configs/driven_turbulence.yaml
 ```
 
 ### 3. Monitor Progress
@@ -698,6 +698,44 @@ nohup python scripts/modal_submit.py submit configs/modal_high_res.yaml --gpu > 
 # Check logs
 tail -f modal.log
 ```
+
+## Running Your Own Driver Script
+
+Projects that drive GANDALF with their own script (their own forcing, diagnostics or
+energy accounting) can run it on Modal with `modal_app.py::run_script`, without writing
+a separate Modal app. Run it from a GANDALF checkout; the container installs that
+checkout of GANDALF, as for the other functions.
+
+```bash
+JAX_VERSION=0.9.1 MODAL_SCRIPT_GPU=A100 \
+modal run --detach modal_app.py::run_script \
+    --project-dir ../my-project \
+    --include scripts,configs/run.yaml,data/spinup/restart.npz \
+    --script scripts/drive.py \
+    --args "configs/run.yaml --out {output_dir}" \
+    --output-subdir my_run_m64 \
+    --env "JAX_PLATFORMS=cuda"
+```
+
+- `--include` lists the files and folders (relative to `--project-dir`) that are packed and
+  uploaded; the script is added if not covered. `__pycache__`, `.git` and notebook
+  checkpoints are skipped, symbolic links and paths outside the project are refused, and the
+  package is limited to `--max-project-mb` (default 200).
+- The script runs with the project as its working directory. `{output_dir}` in `--args` is
+  replaced by the run's folder on the results volume, `/results/<output-subdir>`, which is
+  also in the environment as `GANDALF_OUTPUT_DIR`. The combined output goes to
+  `modal_run.log` in that folder.
+- The volume is committed every `--commit-interval` seconds (default 600) while the script
+  runs and once at the end, so restart files survive a timeout or a preemption. Resuming
+  from them is up to the script.
+- `--env` adds environment variables, for example `JAX_PLATFORMS=cuda` for a driver that
+  defaults JAX to the CPU.
+- `--no-use-gpu` runs on CPUs instead. The GPU type (`MODAL_SCRIPT_GPU`, default A100),
+  timeout (`MODAL_TIMEOUT_SCRIPT`, default 24 h, Modal's maximum), CPU count and memory are
+  read from the environment when the app is built, and `JAX_VERSION` pins JAX in both
+  images.
+- With `--detach` the run continues after the local client exits. Download the results with
+  `modal volume get gandalf-results my_run_m64 ./my_run_m64`.
 
 ## Advanced Usage
 

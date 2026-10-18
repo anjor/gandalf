@@ -311,7 +311,7 @@ def submit_simulation(
 
     # Build command
     cmd = [
-        "modal", "run", "modal_app.py",
+        "modal", "run", "modal_app.py::main",
         "--config-path", str(config_path)
     ]
 

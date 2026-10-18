@@ -16,13 +16,18 @@ Usage:
     modal deploy modal_app.py
 
     # Run a simulation locally (for testing)
-    modal run modal_app.py --config configs/driven_turbulence.yaml
+    modal run modal_app.py::main --config-path configs/driven_turbulence.yaml
 
     # Run on Modal cloud
     modal run modal_app.py::run_simulation --config-path configs/driven_turbulence.yaml
 
     # Run parameter sweep
     modal run modal_app.py::run_parameter_sweep --base-config configs/driven_turbulence.yaml
+
+    # Run your own driver script with files from another project (see docs/MODAL_GUIDE.md)
+    modal run --detach modal_app.py::run_script --project-dir ../my-project \
+        --include scripts,configs --script scripts/drive.py \
+        --args "configs/run.yaml --out {output_dir}" --output-subdir my_run
 
 Requirements:
     pip install modal
@@ -59,7 +64,14 @@ DEFAULT_CPU_CORES = 8.0
 DEFAULT_CPU_MEMORY_MB = 32768  # 32 GB
 DEFAULT_GPU_CORES = 4.0
 DEFAULT_GPU_MEMORY_MB = 16384  # 16 GB
-DEFAULT_GPU_TYPE = "T4"
+DEFAULT_GPU_TYPE = os.environ.get("MODAL_GPU_TYPE", "T4")
+
+# External driver scripts (run_script_*): GPU type, timeout (Modal allows up to 24 h),
+# and the interval at which the results volume is committed while the script runs
+SCRIPT_GPU_TYPE = os.environ.get("MODAL_SCRIPT_GPU", "A100")
+TIMEOUT_SCRIPT = int(os.environ.get("MODAL_TIMEOUT_SCRIPT", 3600 * 24))
+SCRIPT_CPU_CORES = float(os.environ.get("MODAL_SCRIPT_CPU", 8.0))
+SCRIPT_MEMORY_MB = int(os.environ.get("MODAL_SCRIPT_MEMORY_MB", 32768))
 
 # Volume name (can be overridden via environment variable)
 VOLUME_NAME = os.environ.get("MODAL_VOLUME_NAME", "gandalf-results")
@@ -67,6 +79,11 @@ VOLUME_NAME = os.environ.get("MODAL_VOLUME_NAME", "gandalf-results")
 # JAX CUDA version (configurable for different Modal GPU types)
 # CUDA 12 is the default, but CUDA 11.8 may be needed for older GPUs
 JAX_CUDA_VERSION = os.environ.get("JAX_CUDA_VERSION", "cuda12")
+
+# Optional exact JAX version for both images (e.g. JAX_VERSION=0.9.1), to match a local
+# environment; unset means any JAX >= 0.6
+JAX_VERSION = os.environ.get("JAX_VERSION", "")
+_JAX_SPEC = f"=={JAX_VERSION}" if JAX_VERSION else ">=0.6"
 
 # =============================================================================
 # Modal Configuration
@@ -88,7 +105,7 @@ volume = modal.Volume.from_name(
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "jax[cpu]>=0.6",
+        f"jax[cpu]{_JAX_SPEC}",
         "h5py>=3.11.0",
         "matplotlib>=3.7.0",
         "numpy>=1.24.0",
@@ -96,12 +113,13 @@ image = (
         "pyyaml>=6.0.0",
         "scipy>=1.10.0",
     )
-    # Copy the GANDALF source code into the image
-    .copy_local_dir("src", "/root/gandalf/src")
-    .copy_local_dir("scripts", "/root/gandalf/scripts")  # Copy scripts directory
-    .copy_local_file("pyproject.toml", "/root/gandalf/pyproject.toml")
+    # Copy the GANDALF source code into the image (copy=True: needed by the
+    # editable install below; Modal >= 1.0 removed copy_local_dir/copy_local_file)
+    .add_local_dir("src", "/root/gandalf/src", copy=True)
+    .add_local_dir("scripts", "/root/gandalf/scripts", copy=True)
+    .add_local_file("pyproject.toml", "/root/gandalf/pyproject.toml", copy=True)
     .workdir("/root/gandalf")
-    .pip_install("-e .")  # Install GANDALF in editable mode
+    .run_commands("pip install -e /root/gandalf")  # editable install (Modal >= 1.0 pip_install takes package names only)
 )
 
 # GPU image (optional - use for large simulations)
@@ -110,7 +128,7 @@ image = (
 gpu_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        f"jax[{JAX_CUDA_VERSION}]>=0.6",  # CUDA extra configurable
+        f"jax[{JAX_CUDA_VERSION}]{_JAX_SPEC}",  # CUDA extra configurable
         "h5py>=3.11.0",
         "matplotlib>=3.7.0",
         "numpy>=1.24.0",
@@ -118,11 +136,11 @@ gpu_image = (
         "pyyaml>=6.0.0",
         "scipy>=1.10.0",
     )
-    .copy_local_dir("src", "/root/gandalf/src")
-    .copy_local_dir("scripts", "/root/gandalf/scripts")
-    .copy_local_file("pyproject.toml", "/root/gandalf/pyproject.toml")
+    .add_local_dir("src", "/root/gandalf/src", copy=True)
+    .add_local_dir("scripts", "/root/gandalf/scripts", copy=True)
+    .add_local_file("pyproject.toml", "/root/gandalf/pyproject.toml", copy=True)
     .workdir("/root/gandalf")
-    .pip_install("-e .")
+    .run_commands("pip install -e /root/gandalf")
 )
 
 
@@ -903,6 +921,137 @@ def run_parameter_sweep(
 
 
 # =============================================================================
+# External Driver Scripts
+# =============================================================================
+
+def _run_script_impl(
+    project_tar: bytes,
+    script: str,
+    args: list[str],
+    output_subdir: str,
+    commit_interval: float,
+    backend: str,
+    env_vars: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    """
+    Run an external driver script with GANDALF installed (Modal-compatible).
+
+    Unpacks the caller's project tarball (scripts/modal_support.pack_project) into
+    /root/project, runs `python -u <script> <args>` there with '{output_dir}' in the
+    arguments replaced by /results/<output_subdir>, and writes the combined output to
+    modal_run.log in that folder. The results volume is committed every
+    `commit_interval` seconds while the script runs and once at the end, so files the
+    script writes (e.g. restart files) survive a timeout or a preemption; resuming from
+    them is up to the script. `env_vars` are added to the script's environment.
+    """
+    import collections
+    import subprocess
+    import sys
+    import traceback
+
+    sys.path.insert(0, "/root/gandalf/scripts")
+    from modal_support import (
+        PeriodicCommitter,
+        sanitize_output_subdir,
+        substitute_output_dir,
+        tail,
+        unpack_project,
+    )
+
+    start = time.time()
+    out_dir = None
+    try:
+        out_dir = Path("/results") / sanitize_output_subdir(output_subdir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        project = Path("/root/project")
+        names = unpack_project(project_tar, project)
+        if script not in names:
+            raise FileNotFoundError(f"script {script!r} is not in the packed project")
+        cmd = [sys.executable, "-u", script, *substitute_output_dir(args, str(out_dir))]
+        env = dict(os.environ, **(env_vars or {}), GANDALF_OUTPUT_DIR=str(out_dir), PYTHONUNBUFFERED="1")
+        print(f"[run_script] backend={backend} cwd={project} output={out_dir}", flush=True)
+        print(f"[run_script] command: {' '.join(cmd)}", flush=True)
+
+        last = collections.deque(maxlen=200)
+        report = lambda exc: print(f"[run_script] volume commit failed: {exc}", flush=True)  # noqa: E731
+        with open(out_dir / "modal_run.log", "a") as log, \
+                PeriodicCommitter(volume.commit, commit_interval, on_error=report):
+            proc = subprocess.Popen(cmd, cwd=project, env=env, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+                log.flush()
+                last.append(line)
+            returncode = proc.wait()
+        committed, commit_error = _commit_volume_with_retry(verbose=True)
+        return {
+            'status': 'success' if returncode == 0 else 'failed',
+            'returncode': returncode,
+            'output_dir': str(out_dir),
+            'elapsed_time': time.time() - start,
+            'backend': backend,
+            'log_tail': tail("".join(last)),
+            'volume_committed': committed,
+            'volume_commit_error': commit_error,
+        }
+    except Exception as e:
+        committed, commit_error = _commit_volume_with_retry(verbose=False)
+        return {
+            'status': 'error',
+            'error': str(e),
+            'traceback': traceback.format_exc(),
+            'output_dir': str(out_dir) if out_dir is not None else None,
+            'elapsed_time': time.time() - start,
+            'backend': backend,
+            'volume_committed': committed,
+            'volume_commit_error': commit_error,
+        }
+
+
+@app.function(
+    image=gpu_image,
+    volumes={"/results": volume},
+    timeout=TIMEOUT_SCRIPT,
+    gpu=SCRIPT_GPU_TYPE,
+    cpu=SCRIPT_CPU_CORES,
+    memory=SCRIPT_MEMORY_MB,
+)
+def run_script_gpu(
+    project_tar: bytes,
+    script: str,
+    args: list[str],
+    output_subdir: str,
+    commit_interval: float = 600.0,
+    env_vars: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    """Run an external driver script on a GPU (type MODAL_SCRIPT_GPU, default A100)."""
+    return _run_script_impl(project_tar, script, args, output_subdir, commit_interval, backend='gpu',
+                            env_vars=env_vars)
+
+
+@app.function(
+    image=image,
+    volumes={"/results": volume},
+    timeout=TIMEOUT_SCRIPT,
+    cpu=SCRIPT_CPU_CORES,
+    memory=SCRIPT_MEMORY_MB,
+)
+def run_script_cpu(
+    project_tar: bytes,
+    script: str,
+    args: list[str],
+    output_subdir: str,
+    commit_interval: float = 600.0,
+    env_vars: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    """Run an external driver script on CPUs."""
+    return _run_script_impl(project_tar, script, args, output_subdir, commit_interval, backend='cpu',
+                            env_vars=env_vars)
+
+
+# =============================================================================
 # Utility Functions
 # =============================================================================
 
@@ -960,8 +1109,8 @@ def main(
     Local entry point for running simulations from the CLI.
 
     Usage:
-        modal run modal_app.py --config-path configs/driven_turbulence.yaml
-        modal run modal_app.py --config-path configs/driven_turbulence.yaml --use-gpu
+        modal run modal_app.py::main --config-path configs/driven_turbulence.yaml
+        modal run modal_app.py::main --config-path configs/driven_turbulence.yaml --use-gpu
     """
     from pathlib import Path
 
@@ -1003,11 +1152,69 @@ def main(
     print("="*70)
 
 
+@app.local_entrypoint()
+def run_script(
+    project_dir: str,
+    include: str,
+    script: str,
+    args: str = "",
+    output_subdir: str = "",
+    use_gpu: bool = True,
+    commit_interval: float = 600.0,
+    max_project_mb: float = 200.0,
+    env: str = "",
+):
+    """
+    Run your own driver script on Modal with GANDALF installed.
+
+    Packs the comma-separated paths `include` (relative to `project_dir`; the script is
+    added if not covered), uploads them, and runs `python <script> <args>` in the
+    container. '{output_dir}' in `args` becomes the run's folder on the results volume.
+    `env` is a comma-separated list of KEY=VALUE pairs added to the script's environment
+    (e.g. "JAX_PLATFORMS=cuda" for a driver that defaults JAX to the CPU).
+
+    Usage:
+        modal run --detach modal_app.py::run_script --project-dir ../my-project \
+            --include scripts,configs --script scripts/drive.py \
+            --args "configs/run.yaml --out {output_dir}" --output-subdir my_run
+    """
+    import shlex
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
+    from modal_support import pack_project, parse_env_pairs, sanitize_output_subdir
+
+    paths = [p.strip() for p in include.split(",") if p.strip()]
+    if not any(script == p or script.startswith(p.rstrip("/") + "/") for p in paths):
+        paths.append(script)
+    data = pack_project(project_dir, paths, max_bytes=int(max_project_mb * 1024 * 1024))
+    subdir = sanitize_output_subdir(output_subdir or f"script_{time.strftime('%Y%m%d_%H%M%S')}")
+    func = run_script_gpu if use_gpu else run_script_cpu
+    env_vars = parse_env_pairs(env)
+
+    print(f"\nSubmitting {script} ({len(data) / 1024:.0f} KiB packed) to Modal, "
+          f"{'GPU ' + SCRIPT_GPU_TYPE if use_gpu else 'CPU'}, output {subdir}\n")
+    result = func.remote(data, script, shlex.split(args), subdir, commit_interval, env_vars)
+
+    print("\n" + "=" * 70)
+    print(f"Status: {result['status']}")
+    for key in ('returncode', 'output_dir', 'elapsed_time', 'error'):
+        if result.get(key) is not None:
+            print(f"{key}: {result[key]}")
+    if result.get('log_tail'):
+        print("\nLast lines of the log:\n" + result['log_tail'])
+    if result.get('traceback'):
+        print("\nTraceback:\n" + result['traceback'])
+    print("\nTo download the results:")
+    print(f"  modal volume get {VOLUME_NAME} {subdir} ./{subdir.split('/')[-1]}")
+    print("=" * 70)
+
+
 if __name__ == "__main__":
     # This allows testing locally without Modal
     import sys
     print("This script is designed to run on Modal.")
     print("Usage:")
     print("  modal deploy modal_app.py")
-    print("  modal run modal_app.py --config-path configs/driven_turbulence.yaml")
+    print("  modal run modal_app.py::main --config-path configs/driven_turbulence.yaml")
     sys.exit(0)
