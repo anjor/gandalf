@@ -97,7 +97,10 @@ RMHD is an asymptotic expansion in the small parameter ε:
   - Hermite g: `scheme="imex_rk222"` (default; ARS(2,2,2), streaming + hyper-collisions
     implicit, advection explicit), `"imex_ars343"` (ARS(3,4,3); explicit part stable for
     advection, z± advanced with the same explicit stages; Issue #166) or `"lawson_rk4"`
-    (integrating factor + RK4)
+    (integrating factor + RK4, run in the eigenbasis of the streaming matrix, where
+    streaming and advection are both diagonal; Issue #184)
+  - `lawson_rk4` needs real, well-conditioned eigenvectors of T. At Λ = 1 with odd M,
+    T is defective and the step is wrong (Issue #192); use an IMEX scheme there.
   - The explicit stage of `imex_rk222` amplifies advected modes at every dt. It relies on
     hyper-collisions and hyper-resistivity, so dt_cfl alone does not guarantee stability.
 - **Poisson solver**: k²φ = ∇²⊥A∥ in Fourier space
