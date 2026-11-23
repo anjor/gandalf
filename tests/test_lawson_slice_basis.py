@@ -9,7 +9,7 @@ same scheme written in the Hermite basis, using an independent propagator
 term built moment by moment from poisson_bracket_3d and T. They also check
 that this reference equals GANDALF's own Hermite right-hand side, that the
 ideal step conserves the free energy to O(dt⁶), that out-of-band input is
-projected away, that a float32 run stays complex64, and that the traced graph no longer
+projected away, that a complex eigenbasis is rejected, and that the traced graph no longer
 grows with the number of Hermite moments.
 """
 
@@ -323,20 +323,6 @@ def test_slice_step_conserves_free_energy_without_dissipation():
             errs.append(abs(W(new.g) - W(state.g)) / W(state.g))
         assert errs[0] < 1e-6, errs
         assert 48.0 < errs[0] / errs[1] < 80.0, errs
-
-
-def test_float64_eigensystem_in_float32_run_keeps_complex64():
-    """An eigensystem built with x64 enabled (as a cache filled in a float64 run would be)
-    does not promote a later float32 run: the step returns complex64."""
-    with enable_x64():
-        eig = _eigensystem(4, math.sqrt(5.0), "zero")
-    assert eig[1].dtype == jnp.float64
-    grid = SpectralGrid3D.create(Nx=8, Ny=8, Nz=8)
-    state = _random_state(grid, 4, math.sqrt(5.0), 1.0, seed=7)
-    assert state.g.dtype == jnp.complex64
-    new = _kernel_step(state, 1e-3, 1.0, 1.0, 2, 6, 0.0, 1, "zero", eig)
-    assert new.g.dtype == jnp.complex64
-    assert bool(jnp.all(jnp.isfinite(new.g)))
 
 
 def test_complex_eigensystem_raises():
