@@ -40,9 +40,10 @@ from krmhd.timestepping import (
 )
 
 # Fourier amplitude of the random fields. GANDALF's forward FFT is unnormalised,
-# so on these small grids 50 gives real-space fields of order 1e-1 and an
-# advection step of order 1e-2 at dt = 3e-3: strong enough that an error in the
-# stage algebra shows well above round-off.
+# so on these small grids 50 gives real-space fields of order 1. At dt = 3e-3 the
+# bound k⊥,max·max|∇(Φ + √β_i λ Ψ)|·dt on the advection number is then 0.2-0.5
+# (RK4 is stable to 2√2): strong enough that an error in the stage algebra shows
+# well above round-off.
 AMPLITUDE = 50.0
 
 
