@@ -334,16 +334,13 @@ def _to_slices(g: Array, P_inv: Array) -> Array:
     [Nz, Ny, Nx//2+1, M+1]; the output is moment-major, [M+1, Nz, Ny, Nx//2+1],
     so that each slice is a contiguous 3D field for the batched FFTs.
 
-    For Λ ≥ 1 the eigenvalues of T are real and P⁻¹ is real. A real P⁻¹ is
-    applied to the real and imaginary parts of g separately, which takes half
-    the flops of a complex matmul. P⁻¹ is cast to the precision of g, so the
-    output dtype always matches the input. Precision.HIGHEST keeps float32 runs
-    off reduced-precision (TF32) matmul paths on GPUs.
+    P⁻¹ must be real (the Lawson kernel checks this). It is applied to the
+    real and imaginary parts of g separately, which takes half the flops of a
+    complex matmul, and each slice stays the transform of a real field.
+    Precision.HIGHEST keeps float32 runs off reduced-precision (TF32) matmul
+    paths on GPUs.
     """
     hi = jax.lax.Precision.HIGHEST
-    if jnp.iscomplexobj(P_inv):
-        return jnp.einsum("jm,zyxm->jzyx", P_inv.astype(g.dtype), g, precision=hi)
-    P_inv = P_inv.astype(jnp.real(g).dtype)
     return jax.lax.complex(
         jnp.einsum("jm,zyxm->jzyx", P_inv, jnp.real(g), precision=hi),
         jnp.einsum("jm,zyxm->jzyx", P_inv, jnp.imag(g), precision=hi),
@@ -357,12 +354,9 @@ def _from_slices(h: Array, P: Array) -> Array:
     Takes moment-major slices [M+1, Nz, Ny, Nx//2+1] and returns Hermite
     moments in the state layout [Nz, Ny, Nx//2+1, M+1]. Passing P with its
     rows scaled by per-moment factors applies those factors (the
-    hyper-collisions) in the same matmul.
+    hyper-collisions) in the same matmul. P must be real.
     """
     hi = jax.lax.Precision.HIGHEST
-    if jnp.iscomplexobj(P):
-        return jnp.einsum("mj,jzyx->zyxm", P.astype(h.dtype), h, precision=hi)
-    P = P.astype(jnp.real(h).dtype)
     return jax.lax.complex(
         jnp.einsum("mj,jzyx->zyxm", P, jnp.real(h), precision=hi),
         jnp.einsum("mj,jzyx->zyxm", P, jnp.imag(h), precision=hi),
@@ -495,10 +489,22 @@ def _gandalf_step_lawson_rk4_jit(
     FFTs per moment per stage, a graph unrolled M+1 times). The slice form
     makes 2 matmuls and 3 FFTs per slice per stage, batched over slices, and
     adds each RK4 stage into the result as soon as it is computed. It is the
-    same scheme: the two forms agree to round-off. The eigenvectors of T are
-    well conditioned for Λ > 1 (cond(P) ≈ 1.4 at Λ = √5 for M ≤ 768). T is
-    defective at Λ = 1 with odd M (λ = 0 is a double root with one
-    eigenvector), and the step is then wrong in either form (Issue #192).
+    same scheme: the two forms agree to round-off.
+
+    Conditions on the eigensystem:
+    - It must be real. Each slice is then the transform of a real field, which
+      the real FFTs of _slice_advection_rhs assume. A complex eigensystem
+      (T has complex eigenvalues for Λ < 1) raises a ValueError at trace time.
+    - The eigenvectors are well conditioned away from Λ = 1: cond(P) ≈ 1.4 at
+      Λ = √5 for every M ≤ 768. For odd M, cond(P) grows like (Λ - 1)^(-1/2)
+      as Λ → 1 (about 10 at Λ = 1.01 and 100 at Λ = 1.0001). At Λ = 1 with odd
+      M, T is defective (λ = 0 is a double root with one eigenvector) and the
+      step is wrong in either form (Issue #192).
+
+    At M = 1 the step integrates the system defined by T with the zero
+    closure, (Tg)_1 = T[1,0]·g_0. This differs from _krmhd_rhs_jit and the
+    IMEX schemes, whose g1_rhs reads g[..., 2] at M = 1 and gets g_1 because
+    JAX clamps out-of-range indices (Issue #193).
 
     Args:
         fields: Current KRMHD fields
@@ -624,9 +630,16 @@ def _gandalf_step_lawson_rk4_jit(
         # the Hermite RHS is identically zero and g is only damped below.
         P = streaming_P_T.T
         P_inv = streaming_P_inv_T.T
-        # Eigenvalues of T, real for Λ ≥ 1, in the precision of g so that a
-        # cached float64 eigensystem cannot promote a complex64 state.
-        lam = jnp.real(streaming_eigenvalues).astype(jnp.real(fields.g).dtype)
+        if any(
+            jnp.iscomplexobj(a) for a in (streaming_eigenvalues, P, P_inv)
+        ):
+            # Dtypes are static, so this check runs at trace time.
+            raise ValueError(
+                "scheme='lawson_rk4' needs a real eigensystem of the streaming "
+                "matrix T, but it is complex (T has complex eigenvalues for "
+                "Lambda < 1). Use scheme='imex_rk222' or 'imex_ars343'."
+            )
+        lam = streaming_eigenvalues  # real, checked above
         sqrt_beta = jnp.sqrt(beta_i)
         slice_speeds = sqrt_beta * lam
 
@@ -1689,6 +1702,14 @@ def gandalf_step(
         _, eigenvalues, P, P_inv = compute_streaming_eigensystem(
             state.M, state.Lambda, closure
         )
+        # The slice-basis step needs a real eigenbasis (Issue #184).
+        if any(jnp.iscomplexobj(a) for a in (eigenvalues, P, P_inv)):
+            raise ValueError(
+                f"scheme='lawson_rk4' needs a real eigensystem of the streaming "
+                f"matrix T, but it is complex at Lambda = {state.Lambda} (T has "
+                f"complex eigenvalues for Lambda < 1). Use scheme='imex_rk222' "
+                f"or 'imex_ars343'."
+            )
 
         new_fields = _gandalf_step_lawson_rk4_jit(
             fields,
