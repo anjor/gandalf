@@ -36,6 +36,11 @@ kernel, so XLA updates z±, g in place and the step needs no second copy of the
 state (Issue #186). The arrays of the KRMHDState passed to DeviceLoop become
 the loop's first buffers: they are invalid after the first advance(). Each
 state read from loop.state is valid until the next advance().
+
+Precision: the step runs in the precision of the state's z±. Under
+jax_enable_x64 a complex64 state therefore steps in float32 while the
+accounting hook upcasts the fields and sums in float64: the float32 state with
+float64 budgets of Issue #191 (docs/precision_float32_study.md).
 """
 
 import warnings
@@ -220,6 +225,13 @@ class _Plan:
     nu: float
 
 
+def _cast_floats(tree: Any, dtype: Any) -> Any:
+    """tree with its real floating-point arrays cast to dtype (masks unchanged)."""
+    return jax.tree.map(
+        lambda a: a.astype(dtype) if jnp.issubdtype(a.dtype, jnp.floating) else a, tree
+    )
+
+
 def _scheme_constants(state: KRMHDState, step: StepParams) -> Tuple[Array, ...]:
     """Per-run constants of the scheme's step kernel.
 
@@ -397,7 +409,11 @@ class DeviceLoop:
             nu=nu,
         )
         self._acc0 = () if config.accounting is None else config.accounting.init
-        self._grid = state.grid
+        # The step runs in the precision of z±: wavenumbers, eigensystem and dt in
+        # its real dtype. A complex64 state then stays complex64 under float64,
+        # where the accounting hook can sum in float64 (Issue #191).
+        real = jnp.finfo(state.z_plus.dtype).dtype
+        self._grid = _cast_floats(state.grid, real)
         self._meta = dict(
             M=state.M, beta_i=state.beta_i, v_th=state.v_th, nu=state.nu,
             Lambda=state.Lambda, grid=state.grid,
@@ -415,7 +431,7 @@ class DeviceLoop:
             state, float(dt0), step.eta, nu, step.hyper_r, step.hyper_n, step.scheme,
             step.eta_z, step.hyper_rz, step.closure,
         )
-        self._consts = _scheme_constants(state, step)
+        self._consts = _cast_floats(_scheme_constants(state, step), real)
 
         # A buffer may be donated only once: give z⁻ its own if it shares z⁺'s
         # (zero initial conditions do).
@@ -423,21 +439,21 @@ class DeviceLoop:
         z_minus = jnp.asarray(state.z_minus)
         if z_minus is z_plus:
             z_minus = jnp.copy(z_minus)
-        real = jnp.result_type(float)  # the dtype jit gives gandalf_step's float dt and time
         carry = RunState(
             fields=KRMHDFields(
                 z_plus=z_plus,
                 z_minus=z_minus,
                 g=jnp.asarray(state.g),
-                time=jnp.asarray(state.time, dtype=real),
+                # the dtype jit gives gandalf_step's float time
+                time=jnp.asarray(state.time, dtype=jnp.result_type(float)),
             ),
             key=None if key is None else jnp.copy(key),  # the caller keeps its key
             dt=jnp.asarray(dt0, dtype=real),
             steps=jnp.asarray(steps, dtype=jnp.int32),
         )
-        # The step can promote a field: under float64, a complex64 g meets float64
-        # wavenumbers and comes out complex128 (gandalf_step returns it so). The
-        # loop carry keeps one dtype, so start from the dtypes one step produces.
+        # The step can still promote a field: a complex64 g next to complex128 z±
+        # comes out complex128. The loop carry keeps one dtype, so start from the
+        # dtypes one step produces.
         stepped, _ = jax.eval_shape(
             lambda c, a: _one_step(c, a, self._grid, self._consts, self._plan), carry, self._acc0
         )

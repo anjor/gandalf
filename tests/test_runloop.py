@@ -177,6 +177,34 @@ def test_mixed_precision_state_runs_in_the_promoted_dtype():
         assert loop.state.g.dtype == ref.g.dtype == jnp.complex128
 
 
+@pytest.mark.parametrize("scheme", ["lawson_rk4", "imex_rk222", "imex_ars343"])
+def test_complex64_state_with_float64_accounting(scheme):
+    """Under float64 a complex64 state steps in float32 and the hook sums in float64 (Issue #191)."""
+    with enable_x64():
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16, Lx=1.0, Ly=1.0, Lz=1.0)
+        fields = ("z_plus", "z_minus", "g")
+        state = _state(grid)
+        state32 = state.model_copy(update={k: getattr(state, k).astype(jnp.complex64) for k in fields})
+
+        def free_energy(acc, before, after, increment, dt):
+            return acc + jnp.sum(jnp.abs(after.g.astype(jnp.complex128)) ** 2)
+
+        accounting = Accounting(init=jnp.zeros((), jnp.float64), update=free_energy)
+        config = RunConfig(step=PARAMS._replace(scheme=scheme), dt=CflDt(0.3), forcing=FORCING,
+                           accounting=accounting)
+        key = jax.random.PRNGKey(7)
+        ref = DeviceLoop(state, config, key=key)
+        ref_acc = ref.advance(4)
+        loop = DeviceLoop(state32, config, key=key)
+        acc = loop.advance(4)
+
+        assert all(getattr(loop.state, k).dtype == jnp.complex64 for k in fields)
+        assert loop.dt.dtype == jnp.float32
+        assert acc.dtype == jnp.float64
+        np.testing.assert_allclose(float(acc), float(ref_acc), rtol=1e-5)
+        _assert_close(ref.state, loop.state, rtol=1e-5)
+
+
 def test_chunks_compose():
     """advance(2) then advance(3) is advance(5): the carry holds dt, key and step count."""
     key = jax.random.PRNGKey(11)
