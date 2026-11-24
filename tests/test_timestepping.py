@@ -2657,3 +2657,36 @@ class TestIMEXARS343:
         save_checkpoint(state, str(filename), scheme="imex_ars343")
         _, _, metadata = load_checkpoint(str(filename), expected_scheme="imex_ars343")
         assert metadata.get("scheme") == "imex_ars343"
+
+
+def test_imex222_step_memory():
+    """Issue #186: at 256³ the Hermite RHS goes one moment at a time and the implicit
+    solves one k_z plane at a time, in place, and the stage-B right-hand side absorbs
+    N_1 before N_2 exists. XLA's memory analysis of the compiled step (arguments +
+    outputs + temporaries; the CPU compiler here, nothing is allocated) stays below 5.5
+    copies of g. Before, it needed about 7."""
+    import math
+
+    from krmhd.timestepping import KRMHDFields, _gandalf_step_imex222_jit
+
+    Nx = Ny = Nz = 256
+    M = 31
+    real = jnp.zeros(()).dtype
+    cplx = (jnp.zeros(()) * 1j).dtype
+    S = jax.ShapeDtypeStruct
+    fields = KRMHDFields(
+        z_plus=S((Nz, Ny, Nx // 2 + 1), cplx),
+        z_minus=S((Nz, Ny, Nx // 2 + 1), cplx),
+        g=S((Nz, Ny, Nx // 2 + 1, M + 1), cplx),
+        time=S((), real),
+    )
+    compiled = _gandalf_step_imex222_jit.lower(
+        fields, 1e-3, S((Nx // 2 + 1,), real), S((Ny,), real), S((Nz,), real),
+        S((Nz, Ny, Nx // 2 + 1), jnp.bool_), 1.0, 1.0, 1.0, 1.0, math.sqrt(5.0),
+        M, Nz, Ny, Nx, 2, 3, eta_z=0.0, hyper_rz=1, closure="zero",
+    ).compile()
+    stats = compiled.memory_analysis()
+    peak = (stats.argument_size_in_bytes + stats.output_size_in_bytes
+            + stats.temp_size_in_bytes - stats.alias_size_in_bytes)
+    g_bytes = Nz * Ny * (Nx // 2 + 1) * (M + 1) * cplx.itemsize
+    assert peak < 5.5 * g_bytes, f"peak = {peak / g_bytes:.2f} × g"

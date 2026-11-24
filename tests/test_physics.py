@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import enable_x64
 
+from krmhd import hermite
 from krmhd.hermite import compute_streaming_matrix
 from krmhd.spectral import (
     SpectralGrid2D,
@@ -1985,6 +1986,7 @@ class TestHermiteRHS:
     """g_rhs: ∂g/∂t = -{Φ, g} - √βᵢ(∂z + {Ψ, ·})(T g) for all moments (thesis Eqs. 2.7-2.10)."""
 
     @pytest.mark.parametrize("M,Lambda,closure", [
+        (0, math.sqrt(5.0), "zero"),
         (1, math.sqrt(5.0), "zero"),
         (2, 1.7, "zero"),
         (3, 39.1, "symmetric"),
@@ -1992,9 +1994,14 @@ class TestHermiteRHS:
         (8, -1.0, "zero"),
         (16, math.sqrt(5.0), "zero"),
     ])
-    def test_matches_moment_by_moment_reference(self, M, Lambda, closure):
+    @pytest.mark.parametrize("in_place", [False, True])
+    def test_matches_moment_by_moment_reference(self, M, Lambda, closure, in_place, monkeypatch):
         """Equals the hierarchy built moment by moment from poisson_bracket_3d and
-        T = compute_streaming_matrix(M, Λ, closure), in float64, on a non-cubic grid."""
+        T = compute_streaming_matrix(M, Λ, closure), in float64, on a non-cubic grid.
+        in_place lowers HERMITE_IN_PLACE_ENTRIES to 0, so g_rhs goes one moment at a
+        time, as it does for large g (Issue #186)."""
+        if in_place:
+            monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
         with enable_x64():
             grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=8)
             g, z_plus, z_minus = _random_hermite_inputs(grid, M, seed=M)

@@ -858,17 +858,23 @@ class TestIMEXOperator:
     @pytest.mark.parametrize("closure", ["zero", "symmetric"])
     @pytest.mark.parametrize("Lambda", [1.0, 5.0**0.5, 39.1, -(5.0**0.5), 0.5])
     @pytest.mark.parametrize("M", [0, 1, 2, 3, 8, 128])
-    def test_imex_solve_matches_dense_solve(self, closure, Lambda, M):
+    @pytest.mark.parametrize("in_place", [False, True])
+    def test_imex_solve_matches_dense_solve(self, closure, Lambda, M, in_place, monkeypatch):
         """imex_solve equals a dense solve of (I - γ·dt·L) to float64 round-off.
 
         a = γ·dt·√β·k_z reaches 41. Λ = 0.5 lies in the range where a
         top-down elimination meets a zero pivot at a² = 2Λ/(1-Λ) = 2, and the
-        k_z grid below hits a = √2 exactly.
+        k_z grid below hits a = √2 exactly. in_place lowers
+        HERMITE_IN_PLACE_ENTRIES to 0, so the solve runs one k_z plane at a
+        time, as it does for large g (Issue #186).
         """
         import numpy as np
         from jax.experimental import enable_x64
+        from krmhd import hermite
         from krmhd.hermite import imex_factor, imex_solve
 
+        if in_place:
+            monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
         if closure == "symmetric" and M < 2:
             pytest.skip("symmetric closure needs M >= 2")
         if M == 1 and 0.0 < Lambda < 1.0:

@@ -37,7 +37,7 @@ from krmhd.spectral import (
     enforce_hermitian,
     _rfft_paired_planes,
 )
-from krmhd.hermite import compute_streaming_matrix
+from krmhd.hermite import advance_in_place, compute_streaming_matrix
 
 
 class KRMHDState(BaseModel):
@@ -967,6 +967,12 @@ def g_rhs(
     one forward FFT. That is 3 FFTs per moment plus 4 for the gradients of Φ
     and Ψ, and each transform covers all moments in one batched FFT call.
 
+    Memory (Issue #186): when g has more than hermite.HERMITE_IN_PLACE_ENTRIES
+    entries, the moments go one at a time instead, and each result is written
+    into the output in place. The gradients of gₘ₋₁ and gₘ are carried to the
+    next moment, so the cost stays 3 FFTs per moment and the temporaries are
+    about ten real-space fields rather than several copies of g.
+
     Args:
         g: Hermite moments in Fourier space [Nz, Ny, Nx//2+1, M+1]
         z_plus, z_minus: Elsasser fields in Fourier space [Nz, Ny, Nx//2+1]
@@ -1017,13 +1023,42 @@ def g_rhs(
     dphi_dy = to_real(1j * ky_3d * phi)
     dpsi_dx = to_real(1j * kx_3d * psi)
     dpsi_dy = to_real(1j * ky_3d * psi)
+    sqrt_beta = jnp.sqrt(beta_i)
+
+    if advance_in_place(g):
+        t_up, t_dn = t_up[:, 0, 0, 0], t_dn[:, 0, 0, 0]
+
+        def moment(m: Array) -> Array:
+            return jax.lax.dynamic_index_in_dim(g, m, axis=-1, keepdims=False)
+
+        def gradient(m: Array) -> tuple[Array, Array]:
+            g_m = moment(m)
+            return to_real(1j * kx_3d * g_m), to_real(1j * ky_3d * g_m)
+
+        def one_moment(m: Array, carry: tuple) -> tuple:
+            rhs, (dx_dn, dy_dn), (dx_m, dy_m) = carry
+            up = jnp.minimum(m + 1, M)  # T[M, M+1] = 0, so any finite g at M + 1 will do
+            dx_up, dy_up = gradient(up)
+            T_dx = t_up[m] * dx_up + t_dn[m] * dx_dn
+            T_dy = t_up[m] * dy_up + t_dn[m] * dy_dn
+            bracket = dphi_dx * dy_m - dphi_dy * dx_m + sqrt_beta * (
+                dpsi_dx * T_dy - dpsi_dy * T_dx
+            )
+            T_g = t_up[m] * moment(up) + t_dn[m] * moment(jnp.maximum(m - 1, 0))
+            rhs_m = -(jnp.fft.rfftn(bracket) + sqrt_beta * (1j * kz_3d) * T_g) * dealias_mask
+            rhs_m = rhs_m.at[0, 0, 0].set(0.0)
+            rhs = jax.lax.dynamic_update_index_in_dim(rhs, rhs_m, m, axis=-1)
+            return rhs, (dx_m, dy_m), (dx_up, dy_up)
+
+        zero = jnp.zeros_like(dphi_dx)  # gradient of g₋₁, which T[0, -1] = 0 ignores
+        carry = (jnp.zeros_like(g), (zero, zero), gradient(0))
+        return jax.lax.fori_loop(0, M + 1, one_moment, carry)[0]
 
     # Moment-major [M+1, Nz, Ny, Nx//2+1]: each moment is a contiguous 3D field.
     g_mm = jnp.moveaxis(g, -1, 0)
     dg_dx = to_real(1j * kx_3d * g_mm)
     dg_dy = to_real(1j * ky_3d * g_mm)
 
-    sqrt_beta = jnp.sqrt(beta_i)
     # {Φ, gₘ} + √βᵢ·{Ψ, (T g)ₘ}, with {f, h} = ∂x f·∂y h - ∂y f·∂x h
     brackets = (
         dphi_dx * dg_dy
