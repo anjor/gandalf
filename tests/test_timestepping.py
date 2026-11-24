@@ -2660,17 +2660,18 @@ class TestIMEXARS343:
 
 
 def test_imex222_step_memory():
-    """Issue #186: at 256³ the Hermite RHS goes one moment at a time and the implicit
-    solves one k_z plane at a time, in place, and the stage-B right-hand side absorbs
-    N_1 before N_2 exists. XLA's memory analysis of the compiled step (arguments +
-    outputs + temporaries; the CPU compiler here, nothing is allocated) stays below 5.5
-    copies of g. Before, it needed about 7."""
+    """Issue #186: at 256³ the Hermite RHS goes through the moments in groups of eight
+    and the implicit solves one k_z plane at a time, in place, and the stage-B
+    right-hand side absorbs N_1 before N_2 exists. XLA's memory analysis of the
+    compiled step (arguments + outputs + temporaries; the CPU compiler here, nothing is
+    allocated) stays below 5.5 copies of g at M = 63 (4.6 measured). Before, it needed
+    7.1."""
     import math
 
     from krmhd.timestepping import KRMHDFields, _gandalf_step_imex222_jit
 
     Nx = Ny = Nz = 256
-    M = 31
+    M = 63
     real = jnp.zeros(()).dtype
     cplx = (jnp.zeros(()) * 1j).dtype
     S = jax.ShapeDtypeStruct

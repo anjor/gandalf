@@ -968,10 +968,11 @@ def g_rhs(
     and Ψ, and each transform covers all moments in one batched FFT call.
 
     Memory (Issue #186): when g has more than hermite.HERMITE_IN_PLACE_ENTRIES
-    entries, the moments go one at a time instead, and each result is written
-    into the output in place. The gradients of gₘ₋₁ and gₘ are carried to the
-    next moment, so the cost stays 3 FFTs per moment and the temporaries are
-    about ten real-space fields rather than several copies of g.
+    entries, the moments go one at a time instead, in groups of eight that are
+    read and written together, into the output in place. The gradients of
+    gₘ₋₁ and gₘ are carried to the next moment, so the cost stays 3 FFTs per
+    moment, and the temporaries are two groups of moments and about ten
+    real-space fields rather than several copies of g.
 
     Args:
         g: Hermite moments in Fourier space [Nz, Ny, Nx//2+1, M+1]

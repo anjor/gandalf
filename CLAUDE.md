@@ -104,8 +104,8 @@ RMHD is an asymptotic expansion in the small parameter ε:
   - The explicit stage of `imex_rk222` amplifies advected modes at every dt. It relies on
     hyper-collisions and hyper-resistivity, so dt_cfl alone does not guarantee stability.
   - Memory: g with more than `hermite.HERMITE_IN_PLACE_ENTRIES` (2^26) entries is advanced
-    in place: `lawson_rk4` one slice at a time (`hermite_chunk`), `g_rhs` one moment and
-    `imex_solve` one k_z plane at a time (Issue #186). Smaller g runs all at once.
+    in place: `lawson_rk4` one slice at a time (`hermite_chunk`), `g_rhs` in groups of eight
+    moments and `imex_solve` one k_z plane at a time (Issue #186). Smaller g runs all at once.
 - **Poisson solver**: k²φ = ∇²⊥A∥ in Fourier space
 - **Field line following**: Requires full 3D for interpolation across z-planes
 

@@ -914,10 +914,10 @@ def _gandalf_step_imex222_jit(
         regime), the extra splitting error is negligible.
 
     Memory (Issue #186): for g above hermite.HERMITE_IN_PLACE_ENTRIES
-    entries, g_rhs goes one moment at a time and imex_solve one k_z plane at
-    a time, each in place, and the stage-B right-hand side absorbs N_1
-    before N_2 is computed. The step then holds about four copies of g
-    instead of seven.
+    entries, g_rhs goes through the moments in groups of eight and
+    imex_solve one k_z plane at a time, each in place, and the stage-B
+    right-hand side absorbs N_1 before N_2 is computed. The step then holds
+    about four and a half copies of g instead of seven.
 
     z+/- coupling time (Issue #158):
         Stage B evaluates N(g^(1), z+/-^(γ)) with z+/- sampled at t+γ·dt,
