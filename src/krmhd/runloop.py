@@ -47,16 +47,10 @@ import jax.numpy as jnp
 from jax import Array
 
 from krmhd.forcing import WhiteNoiseBand, _add_to_moments
-from krmhd.hermite import (
-    build_implicit_operator,
-    compute_streaming_eigensystem,
-    factor_imex_operator,
-)
+from krmhd.hermite import compute_streaming_eigensystem
 from krmhd.physics import KRMHDState
 from krmhd.spectral import SpectralGrid3D
 from krmhd.timestepping import (
-    _ARS343_GAMMA,
-    _IMEX_GAMMA,
     HermiteClosure,
     KRMHDFields,
     Scheme,
@@ -226,22 +220,18 @@ class _Plan:
     nu: float
 
 
-def _scheme_constants(state: KRMHDState, step: StepParams, nu: float) -> Tuple[Array, ...]:
+def _scheme_constants(state: KRMHDState, step: StepParams) -> Tuple[Array, ...]:
     """Per-run constants of the scheme's step kernel.
 
-    lawson_rk4: the eigensystem of the streaming matrix. IMEX: the implicit
-    operator L, built once; (I - γ dt L) is factored inside the loop because dt
-    is traced (Issue #187 will replace the dense factorization).
+    lawson_rk4: the eigensystem of the streaming matrix. IMEX: none; the
+    kernels factor the tridiagonal (I - γ dt L) themselves, so dt may be traced.
     """
     if step.scheme == "lawson_rk4":
         _, eigenvalues, P, P_inv = compute_streaming_eigensystem(
             state.M, state.Lambda, step.closure
         )
         return eigenvalues, P.T, P_inv.T
-    L_per_kz = build_implicit_operator(
-        state.grid.kz, state.beta_i, nu, state.M, state.Lambda, step.hyper_n, step.closure
-    )
-    return (L_per_kz,)
+    return ()
 
 
 def _scheme_step(
@@ -255,27 +245,17 @@ def _scheme_step(
     p = plan.step
     args = (
         fields, dt, grid.kx, grid.ky, grid.kz, grid.dealias_mask, p.eta, p.v_A, plan.beta_i,
+        plan.nu, plan.Lambda, plan.M, grid.Nz, grid.Ny, grid.Nx, p.hyper_r, p.hyper_n,
     )
     if p.scheme == "lawson_rk4":
         eigenvalues, P_T, P_inv_T = consts
         return _gandalf_step_lawson_rk4_jit(
-            *args, plan.nu, plan.Lambda, plan.M, grid.Nz, grid.Ny, grid.Nx,
-            p.hyper_r, p.hyper_n, eta_z=p.eta_z, hyper_rz=p.hyper_rz,
+            *args, eta_z=p.eta_z, hyper_rz=p.hyper_rz,
             streaming_eigenvalues=eigenvalues, streaming_P_T=P_T,
             streaming_P_inv_T=P_inv_T, closure=p.closure,
         )
-    (L_per_kz,) = consts
-    if p.scheme == "imex_ars343":
-        lu, piv = factor_imex_operator(L_per_kz, dt, _ARS343_GAMMA)
-        return _gandalf_step_imex343_jit(
-            *args, plan.Lambda, plan.M, grid.Nz, grid.Ny, grid.Nx, p.hyper_r, lu, piv,
-            eta_z=p.eta_z, hyper_rz=p.hyper_rz, closure=p.closure,
-        )
-    lu, piv = factor_imex_operator(L_per_kz, dt, _IMEX_GAMMA)
-    return _gandalf_step_imex222_jit(
-        *args, plan.nu, plan.Lambda, plan.M, grid.Nz, grid.Ny, grid.Nx, p.hyper_r,
-        L_per_kz, lu, piv, eta_z=p.eta_z, hyper_rz=p.hyper_rz, closure=p.closure,
-    )
+    kernel = _gandalf_step_imex343_jit if p.scheme == "imex_ars343" else _gandalf_step_imex222_jit
+    return kernel(*args, eta_z=p.eta_z, hyper_rz=p.hyper_rz, closure=p.closure)
 
 
 def _force(
@@ -435,7 +415,7 @@ class DeviceLoop:
             state, float(dt0), step.eta, nu, step.hyper_r, step.hyper_n, step.scheme,
             step.eta_z, step.hyper_rz, step.closure,
         )
-        self._consts = _scheme_constants(state, step, nu)
+        self._consts = _scheme_constants(state, step)
 
         # A buffer may be donated only once: give z⁻ its own if it shares z⁺'s
         # (zero initial conditions do).
