@@ -39,7 +39,7 @@ eigenvalue of the hierarchy then converges to the root of Λ = 1 + ζZ(ζ).
 """
 
 from functools import lru_cache, partial
-from typing import Optional, Any
+from typing import Any, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -817,7 +817,7 @@ def compute_streaming_eigensystem(
 
 
 # =============================================================================
-# IMEX-RK222 Implicit Operator (Issue #137)
+# IMEX implicit operator (Issues #137, #187)
 # =============================================================================
 
 
@@ -853,107 +853,180 @@ def _damping_diag(M: int, hyper_n: int) -> "np.ndarray":
     return rates
 
 
-def build_implicit_operator(
+def _streaming_diagonals(
+    M: int, Lambda: float, closure: str, dtype: Any
+) -> tuple[Array, Array]:
+    """Off-diagonals of the streaming matrix T as device arrays.
+
+    Returns (upper, lower), each of length M: upper[m] = T[m, m+1] and
+    lower[m] = T[m+1, m]. T has a zero diagonal. Lambda may be a traced
+    value: it enters only lower[0] = T[1, 0] = (1 - 1/Λ)/√2, and the rest
+    comes from compute_streaming_matrix at trace time.
+    """
+    T = compute_streaming_matrix(M, 1.0, closure)  # Λ = 1 gives T[1, 0] = 0
+    upper = jnp.asarray(np.diag(T, 1), dtype)
+    lower = jnp.asarray(np.diag(T, -1), dtype)
+    if M >= 1:
+        lower = lower.at[0].set((1.0 - 1.0 / Lambda) / np.sqrt(2.0))
+    return upper, lower
+
+
+def apply_implicit_operator(
+    g: Array,
     kz: Array,
     beta_i: float,
     nu: float,
-    M: int,
     Lambda: float,
+    M: int,
     hyper_n: int,
     closure: str = "zero",
 ) -> Array:
     """
-    Build the per-k_z implicit operator L = -i*sqrt(beta_i)*kz*T + D.
+    Return L·g for the IMEX implicit operator L = -i·√β_i·k_z·T + ν·D.
 
-    L is block-diagonal in Fourier space and depends only on k_z (shared
-    across k_x, k_y). Returned as a batched complex array of shape
-    (Nz, M+1, M+1). The intermediate computation is done in numpy
-    float64/complex128 for conditioning; the final `jnp.asarray` downcasts
-    to JAX's current complex default (complex64 under default configs;
-    complex128 only if jax_enable_x64 is enabled).
+    T is the tridiagonal streaming matrix (compute_streaming_matrix) and D
+    is diag(_damping_diag(M, hyper_n)), so L·g is a three-point stencil in
+    m. g has the state layout (Nz, Ny, Nx//2+1, M+1). M, hyper_n and
+    closure must be static under jit; the other arguments may be traced.
+    """
+    upper, lower = _streaming_diagonals(M, Lambda, closure, kz.dtype)
+    pad = [(0, 0)] * (g.ndim - 1)
+    T_g = jnp.pad(lower * g[..., :-1], pad + [(1, 0)]) + jnp.pad(
+        upper * g[..., 1:], pad + [(0, 1)]
+    )
+    damping = nu * jnp.asarray(_damping_diag(M, hyper_n), kz.dtype)
+    streaming = -1j * jnp.sqrt(beta_i) * kz[:, None, None, None]
+    return streaming * T_g + damping * g
 
-    Note: the subsequent LU solve inherits the downcast. At M=128 and large
-    k_z the condition number of `(I - gamma dt L)` can reach O(10^3);
-    complex64 residuals are ~3e-7 per test_imex_solve_roundtrip, adequate
-    for typical turbulence runs. Enable jax_enable_x64 for precision-
-    critical work (tracked on Issue #140).
 
-    T is the Hermite streaming coupling matrix (tridiagonal, from
-    compute_streaming_matrix). D is diag(nu * _damping_diag) with zeros at
-    m=0,1 so the damping preserves particle number and momentum.
+class ImexFactor(NamedTuple):
+    """
+    Factors of A = I - γ·dt·L for every k_z, built by imex_factor.
+
+    A is tridiagonal in m with A[m, m] = 1 - γ·dt·ν·D_m ≥ 1 and
+    A[m, m±1] = i·a·T[m, m±1], a = γ·dt·√β_i·k_z. Each field has shape
+    (M+1, Nz). imex_solve eliminates upward from m = M and substitutes
+    downward from m = 0:
+
+        b'_M = b_M,   b'_m = b_m + eliminate[m]·b'_(m+1)          (m < M)
+        x_0 = inv_pivot[0]·b'_0,   x_m = inv_pivot[m]·(b'_m + substitute[m]·x_(m-1))
+
+    with eliminate[m] = -A[m, m+1]/q_(m+1), substitute[m] = -A[m, m-1] and
+    pivots q_M = A[M, M], q_m = A[m, m] + a²·T[m, m+1]·T[m+1, m]/q_(m+1).
+    """
+
+    eliminate: Array  # complex, (M+1, Nz); eliminate[M] = 0
+    substitute: Array  # complex, (M+1, Nz); substitute[0] = 0
+    inv_pivot: Array  # real, (M+1, Nz); 1/q_m
+
+
+def imex_factor(
+    kz: Array,
+    dt: Array | float,
+    gamma: float,
+    beta_i: float,
+    nu: float,
+    Lambda: float,
+    M: int,
+    hyper_n: int,
+    closure: str = "zero",
+) -> ImexFactor:
+    """
+    Factor A = I - γ·dt·L, L = -i·√β_i·k_z·T + ν·D, for each k_z.
+
+    A is tridiagonal along m for both closures and every Λ, because T is
+    tridiagonal and D diagonal, so the factorization costs O(M) per k_z.
+    It runs on the device: M, hyper_n and closure must be static under jit,
+    and kz, dt, beta_i, nu and Lambda may be traced (dt can change every
+    step).
+
+    Pivots. The elimination runs from m = M up to m = 0 without row
+    exchanges. Every pivot q_m is real, because a²·T[m, m+1]·T[m+1, m] is
+    real. For m ≥ 1 the product T[m, m+1]·T[m+1, m] is positive, so
+    q_m ≥ A[m, m] ≥ 1 for every Λ. Λ enters only the last pivot,
+    q_0 = 1 + a²·(1 - 1/Λ)/(2·q_1). It is ≥ 1 for Λ ≥ 1 and Λ < 0. For
+    0 < Λ < 1 it can approach zero, but det A = q_0·q_1·…·q_M, so q_0
+    vanishes only where A itself is singular, i.e. where 1/(γ·dt) is an
+    eigenvalue of L. That range of Λ has a growing mode, so this can
+    happen, and any solver fails there. A top-down sweep instead has the
+    pivot 1 - a²·(1/Λ - 1)/2 at m = 1, which vanishes at a finite a even
+    where A is nonsingular.
+
+    Precision. The factors and the solve run in the dtype of kz:
+    float32/complex64 by default and float64/complex128 when JAX's x64
+    mode is on (JAX_ENABLE_X64=1 in the environment, or
+    jax.config.update("jax_enable_x64", True) before any array is
+    created). x64 mode makes the whole run float64; there is no separate
+    switch for the solve. In complex64 at M = 128 the forward error of
+    imex_solve is below 2e-7 (relative) for √β_i·k_z·dt ≤ 1 and below 7e-7
+    up to √β_i·k_z·dt = 30, for both closures and Λ ∈ {1, ±√5, 0.5}. The
+    batched dense LU it replaced reached 2.2e-6 there (Issue #140).
 
     Args:
-        kz: (Nz,) array of parallel wavenumbers.
+        kz: (Nz,) parallel wavenumbers.
+        dt: Timestep (may be traced).
+        gamma: Diagonal coefficient of the implicit tableau.
         beta_i: Ion plasma beta.
-        nu: Collision frequency (normalized by M inside the diag factors).
+        nu: Collision frequency (the rates in D are normalized to 1 at m = M).
+        Lambda: Kinetic parameter Λ (enters T[1, 0]).
         M: Maximum Hermite moment index.
-        Lambda: Kinetic closure parameter (enters T via g1 kinetic correction).
         hyper_n: Hyper-collision exponent.
         closure: Truncation closure, "zero" (default) or "symmetric".
 
     Returns:
-        L: (Nz, M+1, M+1) complex JAX array.
+        ImexFactor for imex_solve.
     """
-    T = compute_streaming_matrix(M, Lambda, closure)  # (M+1, M+1) float64
-    D_diag = nu * _damping_diag(M, hyper_n)  # (M+1,) float64, zeros at m=0,1
+    upper, lower = _streaming_diagonals(M, Lambda, closure, kz.dtype)
+    dt_gamma = dt * gamma
+    diagonal = 1.0 - (dt_gamma * nu) * jnp.asarray(_damping_diag(M, hyper_n), kz.dtype)
+    a = (dt_gamma * jnp.sqrt(beta_i)) * kz
+    a2_coupling = (a * a)[None, :] * (upper * lower)[:, None]  # (M, Nz)
 
-    kz_np = np.asarray(kz, dtype=np.float64)
-    sqrt_beta = float(np.sqrt(beta_i))
-    # L[z, i, j] = -1j * sqrt(beta_i) * kz[z] * T[i, j] + diag(D_diag)
-    stream = -1j * sqrt_beta * kz_np[:, None, None] * T[None, :, :]
-    L = stream + np.diag(D_diag)[None, :, :]
-    return jnp.asarray(L)
+    def pivot(q_next: Array, row: tuple[Array, Array]) -> tuple[Array, Array]:
+        a_mm, a2_coupling_m = row
+        q = a_mm + a2_coupling_m / q_next
+        return q, q
+
+    q_M = jnp.broadcast_to(diagonal[M], a.shape)
+    _, q_below = jax.lax.scan(pivot, q_M, (diagonal[:M], a2_coupling), reverse=True)
+    q = jnp.concatenate([q_below, q_M[None]])  # (M+1, Nz)
+
+    zero = jnp.zeros_like(a)[None]
+    eliminate = -1j * jnp.concatenate([a * upper[:, None] / q[1:], zero])
+    substitute = -1j * jnp.concatenate([zero, a * lower[:, None]])
+    return ImexFactor(eliminate, substitute, 1.0 / q)
 
 
-def factor_imex_operator(
-    L_per_kz: Array,
-    dt: Array | float,
-    gamma: float,
-) -> tuple[Array, Array]:
+def imex_solve(factor: ImexFactor, rhs: Array) -> Array:
     """
-    LU-factor (I - dt*gamma*L) per k_z for ARS(2,2,2) implicit stages.
+    Solve (I - γ·dt·L)·x = rhs for every Fourier point, with factors from imex_factor.
 
-    Args:
-        L_per_kz: (Nz, M+1, M+1) implicit operator from build_implicit_operator.
-        dt: Timestep (may be traced; factorization rebuilt each step).
-        gamma: ARS(2,2,2) implicit stage coefficient (2 - sqrt(2))/2.
+    rhs has the state layout (Nz, Ny, Nx//2+1, M+1). Both sweeps run over m
+    on the moment-major transpose, so each step reads one contiguous
+    (Nz, Ny, Nx//2+1) slab, and update that one buffer in place: the solve
+    needs one g-sized temporary beyond rhs. Cost is O(M) per Fourier point.
 
     Returns:
-        (lu, piv): batched LU factors; shapes (Nz, M+1, M+1) complex and
-        (Nz, M+1) int32. Consumed by jax.scipy.linalg.lu_solve per k_z.
+        x with the shape and dtype of rhs.
     """
-    size = L_per_kz.shape[-1]
-    # Named `eye` (not `I`) to avoid shadowing the imaginary unit in a file
-    # where complex arithmetic with `1j` is ubiquitous nearby.
-    eye = jnp.eye(size, dtype=L_per_kz.dtype)
-    A = eye[None, :, :] - (dt * gamma) * L_per_kz
-    lu, piv = jax.vmap(jax.scipy.linalg.lu_factor)(A)
-    return lu, piv
+    x = jnp.moveaxis(rhs, -1, 0)
+    M = x.shape[0] - 1
 
+    def row(a: Array, m: Array) -> Array:
+        return jax.lax.dynamic_index_in_dim(a, m, 0, keepdims=False)
 
-def imex_solve(
-    lu: Array,
-    piv: Array,
-    rhs: Array,
-) -> Array:
-    """
-    Solve the per-k_z batched linear system (I - dt*gamma*L) @ x = rhs.
+    def eliminate(i: Array, x: Array) -> Array:
+        m = M - 1 - i
+        x_m = row(x, m) + row(factor.eliminate, m)[:, None, None] * row(x, m + 1)
+        return jax.lax.dynamic_update_index_in_dim(x, x_m, m, 0)
 
-    The leading axis of rhs (Nz) is treated as a batch dimension paired with
-    the LU factors. For each k_z the factored matrix is solved once against
-    all (k_x, k_y) RHS vectors.
+    def substitute(m: Array, x: Array) -> Array:
+        x_m = row(factor.inv_pivot, m)[:, None, None] * (
+            row(x, m) + row(factor.substitute, m)[:, None, None] * row(x, m - 1)
+        )
+        return jax.lax.dynamic_update_index_in_dim(x, x_m, m, 0)
 
-    Args:
-        lu: (Nz, M+1, M+1) LU factors from factor_imex_operator.
-        piv: (Nz, M+1) pivot indices.
-        rhs: (Nz, Ny, Nx//2+1, M+1) complex field array.
-
-    Returns:
-        Solution array with the same shape as rhs.
-    """
-    Nz, Ny, Nxh, Mp1 = rhs.shape
-    # (Nz, Ny, Nxh, M+1) -> (Nz, M+1, Ny*Nxh): put m-axis as matrix row axis,
-    # flatten k_perp into RHS-column axis expected by lu_solve.
-    rhs_batched = jnp.transpose(rhs, (0, 3, 1, 2)).reshape(Nz, Mp1, Ny * Nxh)
-    sol_batched = jax.vmap(jax.scipy.linalg.lu_solve)((lu, piv), rhs_batched)
-    return sol_batched.reshape(Nz, Mp1, Ny, Nxh).transpose(0, 2, 3, 1)
+    x = jax.lax.fori_loop(0, M, eliminate, x)
+    x = x.at[0].multiply(factor.inv_pivot[0][:, None, None])
+    x = jax.lax.fori_loop(1, M + 1, substitute, x)
+    return jnp.moveaxis(x, 0, -1)

@@ -783,7 +783,7 @@ class TestStreamingMatrix:
 
 
 class TestIMEXOperator:
-    """Tests for the IMEX-RK222 implicit operator helpers (Issue #137)."""
+    """Tests for the IMEX implicit operator helpers (Issues #137, #187)."""
 
     def test_damping_diag_conservation_mask(self):
         """_damping_diag zeros out m=0,1 (conserves particle number, momentum)."""
@@ -815,148 +815,129 @@ class TestIMEXOperator:
         for m in range(2, M + 1):
             assert D[m] == pytest.approx(-((m / M) ** n), abs=1e-14)
 
-    def test_build_implicit_operator_shape(self):
-        """L has shape (Nz, M+1, M+1) and is complex-valued."""
+    # (I - γ·dt·L) and L built densely from T and D, independently of the
+    # tridiagonal code under test.
+    @staticmethod
+    def _dense_L(kz, beta_i, nu, M, Lambda, hyper_n, closure):
         import numpy as np
-        from krmhd.hermite import build_implicit_operator
+        from krmhd.hermite import compute_streaming_matrix, _damping_diag
 
-        kz = jnp.array([0.0, 1.0, -1.0, 2.0])
-        L = build_implicit_operator(kz, beta_i=1.0, nu=1.0, M=6, Lambda=1.0, hyper_n=2)
-        assert L.shape == (4, 7, 7)
-        assert jnp.iscomplexobj(L)
+        T = compute_streaming_matrix(M, Lambda, closure)
+        D = np.diag(nu * _damping_diag(M, hyper_n))
+        return -1j * np.sqrt(beta_i) * np.asarray(kz)[:, None, None] * T + D
 
-    def test_build_implicit_operator_kz_zero_is_damping_only(self):
-        """At kz=0, L reduces to pure damping diag(nu * D_diag)."""
+    @staticmethod
+    def _random_rhs(shape, seed):
         import numpy as np
-        from krmhd.hermite import build_implicit_operator, _damping_diag
 
-        kz = jnp.array([0.0])
-        nu = 2.5
-        M, hyper_n = 8, 3
-        L = build_implicit_operator(kz, beta_i=4.0, nu=nu, M=M, Lambda=1.0, hyper_n=hyper_n)
-        expected = np.diag(nu * _damping_diag(M, hyper_n))
-        actual = np.asarray(L[0])
-        assert np.allclose(actual, expected, atol=1e-6)
+        rng = np.random.default_rng(seed)
+        return rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
 
-    def test_build_implicit_operator_streaming_structure(self):
-        """At nu=0, L reduces to -i*sqrt(beta_i)*kz*T (pure streaming)."""
-        import numpy as np
-        from krmhd.hermite import build_implicit_operator, compute_streaming_matrix
+    @pytest.mark.parametrize("closure", ["zero", "symmetric"])
+    @pytest.mark.parametrize("Lambda", [1.0, 5.0**0.5, 39.1, -(5.0**0.5), 0.5])
+    @pytest.mark.parametrize("M", [0, 1, 2, 3, 8, 128])
+    def test_imex_solve_matches_dense_solve(self, closure, Lambda, M):
+        """imex_solve equals a dense solve of (I - γ·dt·L) to float64 round-off.
 
-        beta_i = 2.0
-        kz_val = 1.5
-        M = 5
-        Lambda = 2.0
-        kz = jnp.array([kz_val])
-        L = build_implicit_operator(kz, beta_i=beta_i, nu=0.0, M=M, Lambda=Lambda, hyper_n=2)
-        T = compute_streaming_matrix(M, Lambda)
-        expected = -1j * np.sqrt(beta_i) * kz_val * T
-        actual = np.asarray(L[0])
-        assert np.allclose(actual, expected, atol=1e-5)
-
-    def test_factor_imex_operator_shapes(self):
-        """LU factorization returns (Nz, M+1, M+1) and (Nz, M+1)."""
-        import numpy as np
-        from krmhd.hermite import build_implicit_operator, factor_imex_operator
-
-        kz = jnp.array([0.0, 0.5, 1.0])
-        L = build_implicit_operator(kz, beta_i=1.0, nu=1.0, M=4, Lambda=1.0, hyper_n=2)
-        gamma = (2.0 - np.sqrt(2.0)) / 2.0
-        lu, piv = factor_imex_operator(L, dt=0.1, gamma=gamma)
-        assert lu.shape == (3, 5, 5)
-        assert piv.shape == (3, 5)
-
-    def test_imex_solve_roundtrip(self):
-        """Solve round-trip: (I - dt*gamma*L) @ solve((...), rhs) == rhs."""
-        import numpy as np
-        from krmhd.hermite import (
-            build_implicit_operator,
-            factor_imex_operator,
-            imex_solve,
-        )
-
-        Nz, Ny, Nxh, M = 4, 3, 3, 4
-        dt = 0.05
-        gamma = (2.0 - np.sqrt(2.0)) / 2.0
-
-        kz = jnp.linspace(-1.0, 1.0, Nz)
-        L = build_implicit_operator(kz, beta_i=1.0, nu=1.5, M=M, Lambda=1.0, hyper_n=2)
-        lu, piv = factor_imex_operator(L, dt, gamma)
-
-        rng = np.random.default_rng(42)
-        rhs_np = (rng.standard_normal((Nz, Ny, Nxh, M + 1))
-                  + 1j * rng.standard_normal((Nz, Ny, Nxh, M + 1))).astype(np.complex64)
-        rhs = jnp.asarray(rhs_np)
-
-        x = imex_solve(lu, piv, rhs)
-
-        # Verify A @ x == rhs
-        Mp1 = M + 1
-        I = jnp.eye(Mp1, dtype=L.dtype)
-        A = I[None, :, :] - dt * gamma * L
-        Ax = jnp.einsum("zij,zyxj->zyxi", A, x)
-        # Residual bound: the batched complex64 LU solve of a well-conditioned
-        # (M+1)x(M+1) system produces max |Ax - rhs| ~ 3e-7 empirically here.
-        # 5e-6 leaves ~20x headroom for machine-dependent variation without
-        # masking a regression (e.g. a silent dtype downcast would bump this
-        # well above 5e-6).
-        max_err = float(jnp.max(jnp.abs(Ax - rhs)))
-        assert max_err < 5e-6, f"residual too large: {max_err}"
-
-    def test_L_times_g_einsum_axis_ordering(self):
-        """Lock down the (zij, zyxj -> zyxi) contraction used in stage B.
-
-        At kz=0 and nu=c>0 the operator L is diagonal with
-        L[0, m, m] = c * _damping_diag[m]. Applied to a g with a single
-        nonzero moment at m0, the result must be a single nonzero entry at
-        m0 with value L[0, m0, m0] * g[0, y, x, m0]. If the einsum axes
-        were swapped (e.g. \"zji,zyxj->zyxi\"), this test would fail.
+        a = γ·dt·√β·k_z reaches 41. Λ = 0.5 lies in the range where a
+        top-down elimination meets a zero pivot at a² = 2Λ/(1-Λ) = 2, and the
+        k_z grid below hits a = √2 exactly.
         """
         import numpy as np
-        from krmhd.hermite import build_implicit_operator, _damping_diag
+        from jax.experimental import enable_x64
+        from krmhd.hermite import imex_factor, imex_solve
 
-        Nz, Ny, Nxh, M = 1, 2, 2, 6
-        nu = 3.0
-        kz = jnp.array([0.0])
-        L = build_implicit_operator(kz, beta_i=1.0, nu=nu, M=M, Lambda=1.0, hyper_n=2)
+        if closure == "symmetric" and M < 2:
+            pytest.skip("symmetric closure needs M >= 2")
+        if M == 1 and 0.0 < Lambda < 1.0:
+            pytest.skip("for M = 1 the a = √2 point makes A itself singular")
+        gamma, dt, beta_i = 0.29, 0.5, 2.0
+        a_sqrt2 = np.sqrt(2.0) / (gamma * dt * np.sqrt(beta_i))
+        kz_np = np.array([0.0, a_sqrt2, -1.0, 3.7, 200.0])
+        rhs_np = self._random_rhs((kz_np.size, 3, 2, M + 1), seed=M)
+        for nu, hyper_n in [(0.0, 2), (1.3, 3)] if M >= 2 else [(0.0, 2)]:
+            A = np.eye(M + 1) - gamma * dt * self._dense_L(
+                kz_np, beta_i, nu, M, Lambda, hyper_n, closure
+            )
+            expected = np.linalg.solve(A[:, None, None], rhs_np[..., None])[..., 0]
+            with enable_x64():
+                factor = imex_factor(
+                    jnp.asarray(kz_np), dt, gamma, beta_i, nu, Lambda, M, hyper_n, closure
+                )
+                x = np.asarray(imex_solve(factor, jnp.asarray(rhs_np)))
+            err = np.abs(x - expected).max() / np.abs(expected).max()
+            assert err < 1e-12, f"nu={nu}: relative error {err:.2e}"
 
-        g = jnp.zeros((Nz, Ny, Nxh, M + 1), dtype=L.dtype)
-        m0 = 4
-        g = g.at[0, 1, 0, m0].set(1.0 + 0.5j)
+    def test_imex_solve_complex64_residual(self):
+        """In complex64 the residual |A·x - rhs| stays at float32 round-off."""
+        import numpy as np
+        from krmhd.hermite import imex_factor, imex_solve
 
-        L_g = jnp.einsum("zij,zyxj->zyxi", L, g)
+        M, gamma, dt = 32, 0.29, 0.05
+        kz_np = np.linspace(-40.0, 40.0, 5)
+        rhs = jnp.asarray(self._random_rhs((5, 3, 3, M + 1), seed=42), jnp.complex64)
+        factor = imex_factor(jnp.asarray(kz_np, jnp.float32), dt, gamma, 1.0, 1.5, 1.0, M, 2)
+        x = imex_solve(factor, rhs)
+        assert x.dtype == jnp.complex64
+        A = np.eye(M + 1) - gamma * dt * self._dense_L(kz_np, 1.0, 1.5, M, 1.0, 2, "zero")
+        residual = np.einsum("zij,zyxj->zyxi", A, np.asarray(x, np.complex128)) - np.asarray(rhs)
+        assert np.abs(residual).max() < 5e-6
 
-        # Expected: only the [0, 1, 0, m0] slot is nonzero,
-        # with value = nu * _damping_diag[m0] * g[0,1,0,m0].
-        expected_val = nu * _damping_diag(M, 2)[m0] * (1.0 + 0.5j)
-        assert jnp.allclose(L_g[0, 1, 0, m0], expected_val, atol=1e-6)
-        # And every other slot is zero.
-        mask = np.ones((Nz, Ny, Nxh, M + 1), dtype=bool)
-        mask[0, 1, 0, m0] = False
-        assert jnp.allclose(L_g[jnp.asarray(mask)], 0.0, atol=1e-6)
+    @pytest.mark.parametrize("closure", ["zero", "symmetric"])
+    @pytest.mark.parametrize("Lambda", [1.0, 5.0**0.5, -(5.0**0.5), 0.5])
+    def test_apply_implicit_operator_matches_dense(self, closure, Lambda):
+        """apply_implicit_operator(g) equals the dense L·g, with L = -i√β k_z T + ν D."""
+        import numpy as np
+        from jax.experimental import enable_x64
+        from krmhd.hermite import apply_implicit_operator
+
+        M, beta_i, nu, hyper_n = 6, 2.0, 2.5, 3
+        kz_np = np.array([0.0, 1.0, -2.5])
+        g_np = self._random_rhs((3, 2, 2, M + 1), seed=3)
+        expected = np.einsum(
+            "zij,zyxj->zyxi",
+            self._dense_L(kz_np, beta_i, nu, M, Lambda, hyper_n, closure),
+            g_np,
+        )
+        with enable_x64():
+            L_g = apply_implicit_operator(
+                jnp.asarray(g_np), jnp.asarray(kz_np), beta_i, nu, Lambda, M, hyper_n, closure
+            )
+        np.testing.assert_allclose(np.asarray(L_g), expected, rtol=0, atol=1e-13)
+
+    def test_imex_factor_takes_traced_dt(self):
+        """imex_factor runs under jit with dt (and Λ) traced, as a fori_loop step needs."""
+        import numpy as np
+        from krmhd.hermite import imex_factor, imex_solve
+
+        M = 8
+        kz = jnp.asarray([0.0, 2.0, -5.0], jnp.float32)
+        rhs = jnp.asarray(self._random_rhs((3, 2, 2, M + 1), seed=5), jnp.complex64)
+
+        @jax.jit
+        def solve(dt, Lambda):
+            return imex_solve(imex_factor(kz, dt, 0.29, 1.0, 0.5, Lambda, M, 2), rhs)
+
+        for dt in (0.01, 0.2):
+            eager = imex_solve(imex_factor(kz, dt, 0.29, 1.0, 0.5, 3.0, M, 2), rhs)
+            np.testing.assert_allclose(solve(dt, 3.0), eager, rtol=1e-6, atol=1e-6)
 
     def test_imex_solve_preserves_m0_m1_at_zero_streaming(self):
         """At kz=0, (I - dt*gamma*L) is identity on m=0,1; they pass through."""
         import numpy as np
-        from krmhd.hermite import (
-            build_implicit_operator,
-            factor_imex_operator,
-            imex_solve,
-        )
+        from krmhd.hermite import imex_factor, imex_solve
 
         Nz, Ny, Nxh, M = 1, 2, 2, 4
         dt = 0.1
         gamma = (2.0 - np.sqrt(2.0)) / 2.0
 
-        kz = jnp.array([0.0])
-        L = build_implicit_operator(kz, beta_i=1.0, nu=10.0, M=M, Lambda=1.0, hyper_n=2)
-        lu, piv = factor_imex_operator(L, dt, gamma)
+        factor = imex_factor(jnp.array([0.0]), dt, gamma, 1.0, 10.0, 1.0, M, 2)
 
         rng = np.random.default_rng(7)
         rhs_np = (rng.standard_normal((Nz, Ny, Nxh, M + 1))
                   + 1j * rng.standard_normal((Nz, Ny, Nxh, M + 1))).astype(np.complex64)
         rhs = jnp.asarray(rhs_np)
-        x = imex_solve(lu, piv, rhs)
+        x = imex_solve(factor, rhs)
         # m=0 and m=1 slices unchanged to roundoff
         assert jnp.allclose(x[..., 0], rhs[..., 0], atol=1e-6)
         assert jnp.allclose(x[..., 1], rhs[..., 1], atol=1e-6)

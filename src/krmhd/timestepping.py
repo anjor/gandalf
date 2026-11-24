@@ -61,8 +61,8 @@ from krmhd.physics import (
 from krmhd.hermite import (
     compute_streaming_matrix,
     compute_streaming_eigensystem,
-    build_implicit_operator,
-    factor_imex_operator,
+    apply_implicit_operator,
+    imex_factor,
     imex_solve,
     validate_closure,
 )
@@ -729,19 +729,16 @@ _IMEX_GAMMA: float = (2.0 - math.sqrt(2.0)) / 2.0        # gamma = (2 - sqrt(2))
 _IMEX_DELTA: float = 1.0 - 1.0 / (2.0 * _IMEX_GAMMA)     # delta = 1 - 1/(2*gamma) ~ -0.7071
 
 # Sentinel passed as nu to _krmhd_rhs_jit on the IMEX path. Hyper-collisional
-# damping is folded into the implicit operator L via _damping_diag in
-# build_implicit_operator, so the explicit RHS must NOT double-count it.
+# damping is folded into the implicit operator L (hermite.imex_factor), so
+# the explicit RHS must NOT double-count it.
 # Using this named constant makes the "deliberately zero" intent readable at
 # every call site (otherwise a bare literal `0.0` looks like a mistake).
 _NU_IN_IMPLICIT_OPERATOR: float = 0.0
 
 
-# Note: hyper_n is deliberately absent from static_argnames because it is
-# baked into L_per_kz (via _damping_diag) before this JIT kernel is called.
-# Adding it here would force a needless recompile whenever hyper_n changed,
-# even though the traced graph has no direct dependence on it.
 @partial(
-    jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_rz", "closure"]
+    jax.jit,
+    static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n", "hyper_rz", "closure"],
 )
 def _gandalf_step_imex222_jit(
     fields: KRMHDFields,
@@ -760,9 +757,7 @@ def _gandalf_step_imex222_jit(
     Ny: int,
     Nx: int,
     hyper_r: int,
-    L_per_kz: Array,
-    lu: Array,
-    piv: Array,
+    hyper_n: int,
     eta_z: float = 0.0,
     hyper_rz: int = 1,
     closure: str = "zero",
@@ -771,7 +766,8 @@ def _gandalf_step_imex222_jit(
     JIT-compiled IMEX-RK222 (Ascher-Ruuth-Spiteri 1997, ARS(2,2,2)) stepper.
 
     Linear Hermite streaming and hyper-collisional damping are treated
-    implicitly via a per-kz batched LU solve; the Poisson-bracket nonlinear
+    implicitly via a tridiagonal solve along m per Fourier point
+    (hermite.imex_factor, hermite.imex_solve); the Poisson-bracket nonlinear
     advection is treated explicitly. Elsasser z+/z- use the current
     integrating-factor RK2 midpoint. The Elsasser formula is identical to
     the Lawson path (z_plus_rhs / z_minus_rhs do not depend on g), but the
@@ -806,9 +802,10 @@ def _gandalf_step_imex222_jit(
     where z±^(γ) = e^(±ikz·γ·dt)·[z±^n + γ·dt·NL±^n] is the Lawson
     predictor to t+γ·dt.
 
-    L and its factorization (lu, piv) are precomputed per step outside
-    this JIT kernel (see gandalf_step). Hyper-collisional damping is folded
-    into L; the exponential collision factor is therefore NOT applied here.
+    The factors of (I - dt·γ·L) are built inside this kernel from
+    (kz, dt, beta_i, nu, Lambda, hyper_n, closure), so dt may be traced.
+    Hyper-collisional damping is folded into L; the exponential collision
+    factor is therefore NOT applied here.
 
     Parallel (kz) hyper-dissipation (eta_z, hyper_rz): applied post-step as
     exp(-eta_z*(kz^2/kz_max^2)^hyper_rz*dt) to z+/-, and to all Hermite
@@ -915,9 +912,11 @@ def _gandalf_step_imex222_jit(
     # IMEX tableau stage 2 (c=gamma): N evaluated at (g^n, z+/-^n); u^(1)=g^n is trivial
     N_1 = compute_nl_g(fields)
 
-    # Solve (I - dt*gamma*L) g^(1) = g^n + dt*gamma * N_1
+    # Solve (I - dt*gamma*L) g^(1) = g^n + dt*gamma * N_1. Both stages share
+    # the diagonal gamma, so one factorization serves both solves.
+    factor = imex_factor(kz, dt, _IMEX_GAMMA, beta_i, nu, Lambda, M, hyper_n, closure)
     rhs_1 = fields.g + (dt * _IMEX_GAMMA) * N_1
-    g_1 = imex_solve(lu, piv, rhs_1)
+    g_1 = imex_solve(factor, rhs_1)
 
     # Elsasser midpoint RHS (needed for the z+/- full-step update only)
     fields_half = KRMHDFields(
@@ -957,8 +956,8 @@ def _gandalf_step_imex222_jit(
     )
     N_2 = compute_nl_g(fields_gamma)
 
-    # Explicit L*g^(1) mat-vec (per-kz; (M+1, M+1) @ (M+1,) for each (ky, kx))
-    L_g1 = jnp.einsum("zij,zyxj->zyxi", L_per_kz, g_1)
+    # Explicit L*g^(1): a three-point stencil in m
+    L_g1 = apply_implicit_operator(g_1, kz, beta_i, nu, Lambda, M, hyper_n, closure)
 
     rhs_2 = (
         fields.g
@@ -966,7 +965,7 @@ def _gandalf_step_imex222_jit(
         + (dt * _IMEX_DELTA) * N_1
         + (dt * (1.0 - _IMEX_DELTA)) * N_2
     )
-    g_new = imex_solve(lu, piv, rhs_2)
+    g_new = imex_solve(factor, rhs_2)
 
     # -------------------------------------------------------------------------
     # Post-step dissipation (resistivity) and dealiasing
@@ -1135,7 +1134,8 @@ def _post_step_dissipation(
 
 
 @partial(
-    jax.jit, static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_rz", "closure"]
+    jax.jit,
+    static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n", "hyper_rz", "closure"],
 )
 def _gandalf_step_imex343_jit(
     fields: KRMHDFields,
@@ -1147,14 +1147,14 @@ def _gandalf_step_imex343_jit(
     eta: float,
     v_A: float,
     beta_i: float,
+    nu: float,
     Lambda: float,
     M: int,
     Nz: int,
     Ny: int,
     Nx: int,
     hyper_r: int,
-    lu: Array,
-    piv: Array,
+    hyper_n: int,
     eta_z: float = 0.0,
     hyper_rz: int = 1,
     closure: str = "zero",
@@ -1183,11 +1183,11 @@ def _gandalf_step_imex343_jit(
 
     Hermite moments g: linear streaming and hyper-collisions (L, implicit)
     and the Poisson-bracket advection N (explicit). The three implicit
-    stages share the diagonal γ, so one LU factorization of (I - γ·dt·L)
-    serves all of them. The implicit part is stiffly accurate, so
+    stages share the diagonal γ, so one factorization of the tridiagonal
+    (I - γ·dt·L) serves all of them. The implicit part is stiffly accurate, so
     gⁿ⁺¹ = G₄ + dt·Σⱼ (b̂ⱼ - â₄ⱼ)·Nⱼ and needs no extra solve. The terms
     dt·L·Gᵢ that later stages need come from the stage equation itself,
-    dt·L·Gᵢ = (Gᵢ - rhsᵢ)/γ, which avoids a dense (M+1)² mat-vec.
+    dt·L·Gᵢ = (Gᵢ - rhsᵢ)/γ, which avoids a mat-vec.
 
     Elsasser z±: the same explicit tableau in Lawson (interaction-picture)
     form. Stage values are
@@ -1200,8 +1200,8 @@ def _gandalf_step_imex343_jit(
     Each stage makes one _krmhd_rhs_jit call with kz = 0 and η = 0, which
     returns the nonlinear terms of z± and g together (the linear
     propagation and streaming terms are the only kz-dependent parts). The
-    step costs four RHS calls and three LU solves; imex_rk222 makes four
-    RHS calls and two solves.
+    step costs four RHS calls and three tridiagonal solves; imex_rk222 makes
+    four RHS calls and two solves.
 
     Order: third order for the coupled (z±, g) system with η = η_z = 0.
     Resistive and parallel damping are applied after the step with exact
@@ -1235,6 +1235,7 @@ def _gandalf_step_imex343_jit(
     ep_one, em_one = propagator(1.0)
 
     zp_n, zm_n, g_n = fields.z_plus, fields.z_minus, fields.g
+    factor = imex_factor(kz, dt, gam, beta_i, nu, Lambda, M, hyper_n, closure)
 
     # Stage 1 (c = 0): Z₁ = zⁿ, G₁ = gⁿ.
     nlp_1, nlm_1, N_1 = nonlinear(fields)
@@ -1243,7 +1244,7 @@ def _gandalf_step_imex343_jit(
     zp_2 = ep_gam * (zp_n + (dt * gam) * nlp_1)
     zm_2 = em_gam * (zm_n + (dt * gam) * nlm_1)
     rhs_2 = g_n + (dt * gam) * N_1
-    G_2 = imex_solve(lu, piv, rhs_2)
+    G_2 = imex_solve(factor, rhs_2)
     dtLG_2 = (G_2 - rhs_2) / gam
     nlp_2, nlm_2, N_2 = nonlinear(
         KRMHDFields(z_plus=zp_2, z_minus=zm_2, g=G_2, time=fields.time + gam * dt)
@@ -1258,7 +1259,7 @@ def _gandalf_step_imex343_jit(
         + (dt * _ARS343_A31) * N_1
         + (dt * _ARS343_A32) * N_2
     )
-    G_3 = imex_solve(lu, piv, rhs_3)
+    G_3 = imex_solve(factor, rhs_3)
     dtLG_3 = (G_3 - rhs_3) / gam
     nlp_3, nlm_3, N_3 = nonlinear(
         KRMHDFields(z_plus=zp_3, z_minus=zm_3, g=G_3, time=fields.time + c3 * dt)
@@ -1283,7 +1284,7 @@ def _gandalf_step_imex343_jit(
         + (dt * _ARS343_A42) * N_2
         + (dt * _ARS343_A43) * N_3
     )
-    G_4 = imex_solve(lu, piv, rhs_4)
+    G_4 = imex_solve(factor, rhs_4)
     nlp_4, nlm_4, N_4 = nonlinear(
         KRMHDFields(z_plus=zp_4, z_minus=zm_4, g=G_4, time=fields.time + dt)
     )
@@ -1377,8 +1378,8 @@ def gandalf_step(
               without dissipation. z± use the same explicit tableau in
               Lawson form, so the z± trajectory differs from the midpoint
               RK2 of the other two schemes. Third order for the coupled
-              system with η = η_z = 0. Costs one more LU solve per step
-              than imex_rk222.
+              system with η = η_z = 0. Costs one more tridiagonal solve
+              per step than imex_rk222.
             - "lawson_rk4": legacy mixed integrating-factor + Lawson-RK4 path,
               retained for comparison and rollback. Known to be unstable at
               high M·k_z (see Issue #137).
@@ -1468,11 +1469,10 @@ def gandalf_step(
         ...                          scheme="imex_rk222")
 
     Performance:
-        - IMEX path rebuilds `L` and its LU factorization on every call
-          (128 batched 129x129 solves at M=Nz=128). Measured overhead:
-          ~22 ms/step on Apple M-series CPU (build 5 ms + factor 17 ms).
-          Small relative to the four RHS FFT evaluations at 128^3, but
-          not free. See Issue #139 for the caching follow-up.
+        - The IMEX implicit operator (I - γ·dt·L) is tridiagonal along m
+          (Issue #187). Each step factors it on the device in O(M·Nz) and
+          solves it with two O(M) sweeps per Fourier point
+          (hermite.imex_factor, hermite.imex_solve).
         - IMEX calls `_krmhd_rhs_jit` 4 times per step (2 real k_z for
           the Elsasser midpoint + 2 k_z=0 for the IMEX nonlinear stages).
           XLA drops the unused half of each call, so the compiled step
@@ -1483,8 +1483,8 @@ def gandalf_step(
           one back (2 dense (M+1)x(M+1) matmuls per step). Its compile time
           does not grow with M.
         - imex_ars343 also evaluates `_krmhd_rhs_jit` 4 times per step, all
-          with k_z=0, one per stage. It makes three LU solves to imex_rk222's
-          two and skips the dense `L*g` mat-vec.
+          with k_z=0, one per stage. It makes three tridiagonal solves to
+          imex_rk222's two and skips the `L*g` stencil.
         - Resistive damping is applied as a post-step exp() factor, the same
           as the Lawson convention. This is a 1st-order Strang split with
           the IMEX solve; `eta*dt*|k_perp|^(2r) << 1` in typical turbulence
@@ -1690,19 +1690,6 @@ def gandalf_step(
             closure=closure,
         )
     elif scheme == "imex_ars343":
-        # Same implicit operator as imex_rk222. All three ARS(3,4,3) implicit
-        # stages share the diagonal gamma, so one factorization serves them.
-        L_per_kz = build_implicit_operator(
-            grid.kz,
-            state.beta_i,
-            nu_effective,
-            state.M,
-            state.Lambda,
-            hyper_n,
-            closure,
-        )
-        lu, piv = factor_imex_operator(L_per_kz, dt, _ARS343_GAMMA)
-
         new_fields = _gandalf_step_imex343_jit(
             fields,
             dt,
@@ -1713,33 +1700,19 @@ def gandalf_step(
             eta,
             v_A,
             state.beta_i,
+            nu_effective,
             state.Lambda,
             state.M,
             grid.Nz,
             grid.Ny,
             grid.Nx,
             hyper_r,
-            lu,
-            piv,
+            hyper_n,
             eta_z=eta_z,
             hyper_rz=hyper_rz,
             closure=closure,
         )
     else:  # scheme == "imex_rk222"
-        # Build the implicit operator L(k_z) = -i*sqrt(beta_i)*kz*T + D(nu, M, hyper_n)
-        # and factor (I - dt*gamma*L) once per step. L is cheap to rebuild because
-        # only Nz distinct (M+1)x(M+1) matrices exist (shared across k_perp).
-        L_per_kz = build_implicit_operator(
-            grid.kz,
-            state.beta_i,
-            nu_effective,
-            state.M,
-            state.Lambda,
-            hyper_n,
-            closure,
-        )
-        lu, piv = factor_imex_operator(L_per_kz, dt, _IMEX_GAMMA)
-
         new_fields = _gandalf_step_imex222_jit(
             fields,
             dt,
@@ -1757,9 +1730,7 @@ def gandalf_step(
             grid.Ny,
             grid.Nx,
             hyper_r,
-            L_per_kz,
-            lu,
-            piv,
+            hyper_n,
             eta_z=eta_z,
             hyper_rz=hyper_rz,
             closure=closure,
