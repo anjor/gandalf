@@ -38,7 +38,10 @@ Usage:
         --include scripts,configs --script scripts/drive.py \\
         --args "configs/run.yaml --out {output_dir}" --output-subdir my_run
 
-    # Status of a spawned call, or wait for it
+    # Long runs: a script that pauses (exit status 3) continues itself on Modal
+    python scripts/modal_submit.py script ... --max-segments 20
+
+    # Status of a spawned call, or wait for it (following a chain to its last call)
     python scripts/modal_submit.py call fc-... --wait
 """
 
@@ -552,12 +555,15 @@ def spawn_script(
     env: str = "",
     commit_interval: float = 600.0,
     max_project_mb: float = 200.0,
+    max_segments: int = 1,
 ) -> str:
     """Pack the project files and spawn an external driver script on the deployed app.
 
     The call runs on the deployed app (`modal deploy modal_app.py`), independently of
-    this process, so it survives the local machine sleeping or disconnecting. Returns
-    the function call ID.
+    this process, so it survives the local machine sleeping or disconnecting. With
+    max_segments > 1, a script that exits with status 3 (paused) is continued on Modal
+    by a new call with the same command, up to max_segments calls in all. Returns the
+    function call ID.
     """
     import shlex
     import time
@@ -572,7 +578,8 @@ def spawn_script(
     name = script_function_name(use_gpu)
     try:
         fn = modal.Function.from_name(APP_NAME, name)
-        call = fn.spawn(data, script, shlex.split(args), subdir, commit_interval, parse_env_pairs(env))
+        chain = {"max_segments": max_segments} if max_segments > 1 else {}
+        call = fn.spawn(data, script, shlex.split(args), subdir, commit_interval, parse_env_pairs(env), **chain)
     except modal.exception.NotFoundError:
         print(f"Error: {APP_NAME}.{name} is not deployed; run `modal deploy modal_app.py` first")
         sys.exit(1)
@@ -580,34 +587,47 @@ def spawn_script(
     print(f"Spawned {script} on {APP_NAME}.{name} ({len(data) / 1024:.0f} KiB packed)")
     print(f"Call ID: {call.object_id}")
     print(f"Output:  {volume}:{subdir}")
+    if max_segments > 1:
+        print(f"Chain:   up to {max_segments} calls; segment records in {volume}:{subdir}/chain/")
     print(f"\nCheck:    python scripts/modal_submit.py call {call.object_id} [--wait]")
     print(f"Download: modal volume get {volume} {subdir} ./{subdir.split('/')[-1]}")
     return call.object_id
 
 
 def call_status(call_id: str, wait: bool = False, interval: float = 60.0) -> Optional[Dict[str, Any]]:
-    """Report a spawned call: still running, or its result summary and the tail of its log."""
+    """Report a spawned call: still running, or its result summary and the tail of its log.
+
+    With `wait`, a call that continued its chain in a new call is followed to the
+    chain's last call.
+    """
     import time
 
     import modal
 
-    call = modal.FunctionCall.from_id(call_id)
     while True:
         try:
-            result = call.get(timeout=0)
-            break
+            result = modal.FunctionCall.from_id(call_id).get(timeout=0)
         except TimeoutError:
             if not wait:
                 print(f"{call_id}: running")
                 return None
             time.sleep(interval)
+            continue
         except Exception as exc:  # cancelled, failed or expired
             print(f"{call_id}: ended with {type(exc).__name__}: {exc}")
             return None
-    print(f"{call_id}: {result.get('status')} (return code {result.get('returncode')}), "
-          f"{result.get('elapsed_time', 0.0):.0f} s, output {result.get('output_dir')}")
-    if result.get('error'):
-        print(f"Error: {result['error']}")
+        print(f"{call_id}: {result.get('status')} (return code {result.get('returncode')}), "
+              f"{result.get('elapsed_time', 0.0):.0f} s, output {result.get('output_dir')}")
+        for key in ('error', 'reason'):
+            if result.get(key):
+                print(f"{key.capitalize()}: {result[key]}")
+        chain = result.get('chain') or {}
+        if chain.get('stop_reason'):
+            print(f"Chain stopped after segment {chain['segment']}: {chain['stop_reason']}")
+        if not (wait and chain.get('next_call_id')):
+            break
+        print(f"Segment {chain['segment']} paused; continued in {chain['next_call_id']}")
+        call_id = chain['next_call_id']
     if result.get('log_tail'):
         print("\nLast lines of the log:\n" + result['log_tail'])
     return result
@@ -700,6 +720,8 @@ Examples:
     script_parser.add_argument('--commit-interval', type=float, default=600.0,
                                help='Seconds between volume commits while the script runs')
     script_parser.add_argument('--max-project-mb', type=float, default=200.0, help='Size limit of the package')
+    script_parser.add_argument('--max-segments', type=int, default=1,
+                               help='Continue a paused script (exit status 3) on Modal, up to this many calls')
 
     # Call command: status of a spawned call
     call_parser = subparsers.add_parser('call', help='Status or result of a spawned call')
@@ -778,7 +800,8 @@ Examples:
     elif args.command == 'script':
         spawn_script(args.project_dir, args.include, args.script, args=args.args,
                      output_subdir=args.output_subdir, use_gpu=not args.cpu, env=args.env,
-                     commit_interval=args.commit_interval, max_project_mb=args.max_project_mb)
+                     commit_interval=args.commit_interval, max_project_mb=args.max_project_mb,
+                     max_segments=args.max_segments)
 
     elif args.command == 'call':
         call_status(args.call_id, wait=args.wait, interval=args.interval)

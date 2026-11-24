@@ -15,15 +15,30 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from modal_support import (  # noqa: E402
     PeriodicCommitter,
+    claim_segment,
+    finish_segment,
     pack_project,
     parse_env_pairs,
+    paused_time,
+    read_segments,
     sanitize_output_subdir,
     script_function_name,
     script_paths,
     substitute_output_dir,
     tail,
     unpack_project,
+    write_segment,
 )
+
+
+class FakeClaims(dict):
+    """modal.Dict stand-in: put(..., skip_if_exists=True) refuses an existing key."""
+
+    def put(self, key, value, *, skip_if_exists=False):
+        if skip_if_exists and key in self:
+            return False
+        self[key] = value
+        return True
 
 
 def _make_project(root: Path) -> None:
@@ -207,3 +222,120 @@ class TestSubmitCLI:
         monkeypatch.setattr(sys, "argv", ["modal_submit.py", "call", "fc-123", "--wait", "--interval", "5"])
         submit.main()
         assert seen["args"] == ("fc-123",) and seen["kwargs"] == {"wait": True, "interval": 5.0}
+
+    def test_script_command_max_segments(self, submit, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(submit, "spawn_script", lambda *a, **k: seen.update(kwargs=k))
+        monkeypatch.setattr(sys, "argv", ["modal_submit.py", "script", "--project-dir", ".", "--include", "s",
+                                          "--script", "s/d.py", "--max-segments", "20"])
+        submit.main()
+        assert seen["kwargs"]["max_segments"] == 20
+
+
+def _seg(k, call_id, outcome, **extra):
+    return {"segment": k, "call_id": call_id, "outcome": outcome, **extra}
+
+
+class TestChainClaims:
+    """claim_segment: which call runs which segment of a server-side chain."""
+
+    def claim(self, segments, requested, call_id, live=(), claims=None, max_segments=5):
+        claims = FakeClaims() if claims is None else claims
+        return claim_segment(segments, requested, call_id, max_segments, claims, "vol/run",
+                             is_live=lambda c: c in live)
+
+    def test_first_submission_runs_segment_0(self):
+        assert self.claim([], None, "fc-a") == (0, "claimed")
+
+    def test_successor_runs_its_segment(self):
+        assert self.claim([_seg(0, "fc-a", "paused")], 1, "fc-b") == (1, "claimed")
+
+    def test_duplicate_successor_is_refused(self):
+        claims = FakeClaims()
+        segs = [_seg(0, "fc-a", "paused")]
+        assert self.claim(segs, 1, "fc-b", claims=claims)[0] == 1
+        k, reason = self.claim(segs, 1, "fc-c", claims=claims, live={"fc-b"})
+        assert k is None and "held by call fc-b" in reason
+        # refused even when the holder has died: only a submission skips a dead segment
+        assert self.claim(segs, 1, "fc-c", claims=claims)[0] is None
+
+    def test_second_submission_while_chain_runs_is_refused(self):
+        k, reason = self.claim([_seg(0, "fc-a", "running")], None, "fc-b", live={"fc-a"})
+        assert k is None and "fc-a is still running" in reason
+
+    def test_submission_while_successor_is_pending_is_refused(self):
+        segs = [_seg(0, "fc-a", "paused", next_call_id="fc-b")]
+        assert self.claim(segs, None, "fc-c", live={"fc-b"})[0] is None
+
+    def test_submission_after_a_dead_segment_continues_after_it(self):
+        assert self.claim([_seg(0, "fc-a", "running")], None, "fc-b") == (1, "claimed")
+
+    def test_submission_skips_a_segment_claimed_by_a_dead_call(self):
+        claims = FakeClaims({"vol/run#1": "fc-dead"})
+        assert self.claim([_seg(0, "fc-a", "failed")], None, "fc-b", claims=claims) == (2, "claimed")
+
+    def test_submission_does_not_skip_a_segment_claimed_by_a_live_call(self):
+        claims = FakeClaims({"vol/run#1": "fc-live"})
+        k, _ = self.claim([_seg(0, "fc-a", "failed")], None, "fc-b", claims=claims, live={"fc-live"})
+        assert k is None
+
+    def test_restarted_call_reruns_its_unfinished_segment(self):
+        claims = FakeClaims({"vol/run#1": "fc-b"})
+        segs = [_seg(0, "fc-a", "paused"), _seg(1, "fc-b", "running")]
+        assert self.claim(segs, 1, "fc-b", claims=claims) == (1, "claimed")
+
+    def test_restarted_call_does_not_rerun_an_ended_segment(self):
+        segs = [_seg(0, "fc-a", "paused", next_call_id="fc-b")]
+        k, reason = self.claim(segs, None, "fc-a")
+        assert k is None and "already ran segment 0" in reason
+
+    @pytest.mark.parametrize("requested", [None, 2])
+    def test_finished_run_never_runs_again(self, requested):
+        segs = [_seg(0, "fc-a", "paused"), _seg(1, "fc-b", "finished")]
+        assert self.claim(segs, requested, "fc-c") == (None, "the run has finished")
+
+    def test_cap(self):
+        k, reason = self.claim([_seg(k, f"fc-{k}", "paused") for k in range(5)], 5, "fc-x")
+        assert k is None and "max_segments = 5" in reason
+
+
+class TestChainFinish:
+    def test_finished(self):
+        rec = _seg(0, "fc-a", "running")
+        assert finish_segment(rec, 0, "done\n", [], 5) is False
+        assert rec["outcome"] == "finished" and rec["returncode"] == 0
+
+    def test_paused_continues(self):
+        rec = _seg(1, "fc-b", "running")
+        prev = [_seg(0, "fc-a", "paused", t=1.0)]
+        assert finish_segment(rec, 3, "paused at t = 2.5000, step 9\n", prev, 5) is True
+        assert rec["outcome"] == "paused" and rec["t"] == 2.5 and "stop_reason" not in rec
+
+    def test_paused_without_progress_stops(self):
+        rec = _seg(1, "fc-b", "running")
+        prev = [_seg(0, "fc-a", "paused", t=2.5)]
+        assert finish_segment(rec, 3, "paused at t = 2.5, step 9\n", prev, 5) is False
+        assert rec["stop_reason"].startswith("no progress")
+
+    def test_paused_at_the_cap_stops(self):
+        rec = _seg(4, "fc-e", "running")
+        assert finish_segment(rec, 3, "", [], 5) is False
+        assert "max_segments = 5" in rec["stop_reason"]
+
+    def test_crash_stops(self):
+        rec = _seg(0, "fc-a", "running")
+        assert finish_segment(rec, 1, "Traceback ...\n", [], 5) is False
+        assert rec["outcome"] == "failed"
+
+    def test_paused_time(self):
+        assert paused_time("x\npaused at t = 1.5, step 3\npaused at t = 2e+01, step 4\n") == 20.0
+        assert paused_time("[run] paused at t = 12.3456, step 7, after 23 h") == 12.3456
+        assert paused_time("no pause here") is None
+
+    def test_segment_records_round_trip(self, tmp_path):
+        write_segment(tmp_path, _seg(1, "fc-b", "paused"))
+        write_segment(tmp_path, _seg(0, "fc-a", "paused"))
+        write_segment(tmp_path, _seg(1, "fc-b", "finished"))
+        assert [(s["segment"], s["outcome"]) for s in read_segments(tmp_path)] == [(0, "paused"), (1, "finished")]
+        assert read_segments(tmp_path / "missing") == []
+        assert not list((tmp_path / "chain").glob("*.tmp"))

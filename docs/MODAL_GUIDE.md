@@ -546,21 +546,13 @@ This will create checkpoints at:
 
 ### Resuming from Checkpoint
 
-If a simulation is interrupted:
-
-1. **Download the latest checkpoint**:
-   ```bash
-   # Find the latest checkpoint
-   modal volume ls gandalf-results/<your_run_dir>
-
-   # Download it
-   modal volume get gandalf-results/<your_run_dir>/checkpoint_step002000.h5 ./checkpoint.h5
-   ```
-
-2. **Manual resume workflow** (config-based resume not yet implemented):
-   - Modify your simulation script to call `load_checkpoint()` at startup
-   - Pass checkpoint path as command-line argument or environment variable
-   - Re-submit the modified script to Modal
+`scripts/run_simulation.py --resume` continues from the latest `checkpoint_step<N>.h5` in
+the output folder: state, step, time, timestep, forcing key and energy history, so the
+continued run matches an uninterrupted one. Without a checkpoint it starts a new run.
+`--max-wall-hours H` checkpoints and exits with status 3 once the call has run for H hours.
+Together they make a run that Modal continues past 24 h by itself; see
+[Runs longer than 24 hours](#runs-longer-than-24-hours). The `submit` command does not
+resume.
 
 ### Best Practices
 
@@ -570,16 +562,6 @@ If a simulation is interrupted:
 - **Monitor job progress**: Check logs periodically for long runs
 - **Set realistic timeouts**: Estimate 2× expected runtime as safety margin
 - **Download checkpoints regularly**: Don't rely solely on Modal volume for long-term storage
-
-**Checkpoint Resume Status**: The core I/O functions (`save_checkpoint()`, `load_checkpoint()`) are implemented and working in Modal runs. However, config-based automatic resume is **not yet implemented** (planned for future release). For now, checkpoint resume requires manually modifying simulation scripts to call `load_checkpoint()` with the appropriate checkpoint file path.
-
-**TODO (planned feature)**: Add config-based checkpoint resume support:
-```yaml
-# Planned feature (not yet available)
-initial_condition:
-  type: checkpoint
-  checkpoint_path: ./checkpoint.h5
-```
 
 ## Troubleshooting
 
@@ -748,6 +730,51 @@ when a laptop sleeps, Modal cancels the call even with `modal run --detach`.
   (`MODAL_SCRIPT_GPU`, default A100), timeout (`MODAL_TIMEOUT_SCRIPT`, default 24 h, Modal's
   maximum), CPU count and memory are read from the environment when the app is deployed or
   built, and `JAX_VERSION` pins JAX in both images.
+
+### Runs longer than 24 hours
+
+A Modal call stops at 24 h. With `--max-segments N`, a script that pauses is continued on
+Modal by a new call, a segment, with the same command, up to N segments in all. No local
+process has to stay connected, so the chain survives the laptop sleeping:
+
+```bash
+python scripts/modal_submit.py script --project-dir . \
+    --include scripts/run_simulation.py,configs/run.yaml --script scripts/run_simulation.py \
+    --args "configs/run.yaml --output-dir {output_dir} --resume --max-wall-hours 23" \
+    --output-subdir long_run --max-segments 20
+python scripts/modal_submit.py call fc-... --wait   # follows the chain to its last segment
+```
+
+A script is chainable when it follows this contract:
+
+- Every segment runs the same command. The script continues the run in `{output_dir}` if
+  there is one to continue, and starts a new one otherwise (`run_simulation.py --resume`).
+- Before the 24 h limit it saves its state and exits with status 3 (paused). Exit status 0
+  means finished; any other status stops the chain.
+- On pausing it prints `paused at t = <simulation time>`. A segment that pauses at a time no
+  later than the previous segment's stops the chain. Without this line the chain is bounded
+  only by `--max-segments`.
+
+Each segment writes its record to `<output-subdir>/chain/segment_<k>.json` (call ID,
+outcome, exit status, pause time, the next segment's call ID or why the chain stopped).
+Which call runs a segment is decided by an atomic claim in the `gandalf-chain-claims`
+`modal.Dict`, so a duplicated or retried spawn runs no segment twice. A call that Modal
+restarts after a preemption runs its segment again only if the segment had not ended. A
+finished run is never run again; submitting the same command for it returns `skipped`, as
+does a submission while the chain's current segment is still pending or running. To
+continue a chain that stopped (a crash, the cap), fix the cause and submit the same command
+again: it continues with the next segment. Chaining needs the deployed app: the
+`modal run` entry point stops its spawned calls when it exits.
+
+### JAX compilation cache
+
+Every function that runs JAX keeps its compilation cache on the `gandalf-jax-cache` volume
+(`MODAL_JAX_CACHE_VOLUME`), mounted at `/jax-cache` and set as `JAX_COMPILATION_CACHE_DIR`
+for the function and the scripts it starts. A chained segment or a new container reuses the
+kernels earlier calls compiled for the same JAX version, device and shapes, instead of
+recompiling for minutes at large M. JAX's defaults cache every kernel that takes at least
+1 s to compile, with no size limits. A script that sets `jax_compilation_cache_dir` itself
+overrides this.
 
 ## Advanced Usage
 

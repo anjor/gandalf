@@ -12,13 +12,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 import yaml
 
 # Add scripts directory to path to import run_simulation
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from run_simulation import run_simulation
+from run_simulation import PAUSED_EXIT, SimulationPaused, run_simulation
 from krmhd.config import (
     SimulationConfig,
     GridConfig,
@@ -336,3 +337,63 @@ class TestCheckpointIntervalValidation:
             # Step 1 and 3 should not have checkpoints
             assert not (Path(tmpdir) / 'checkpoint_step000001.h5').exists()
             assert not (Path(tmpdir) / 'checkpoint_step000003.h5').exists()
+
+
+class TestPauseResume:
+    """--max-wall-hours pauses with a checkpoint; --resume continues it (Issue #190)."""
+
+    @staticmethod
+    def _config(output_dir, checkpoint_interval=None):
+        from krmhd.config import ForcingConfig
+        return decaying_turbulence_config(
+            grid=GridConfig(Nx=8, Ny=8, Nz=8),
+            time_integration=TimeIntegrationConfig(n_steps=5, save_interval=1,
+                                                   checkpoint_interval=checkpoint_interval),
+            io=IOConfig(output_dir=str(output_dir)),
+            forcing=ForcingConfig(enabled=True, amplitude=0.1, k_min=1.0, k_max=3.0, seed=7),
+        )
+
+    def test_paused_and_resumed_run_matches_uninterrupted_run(self, tmp_path):
+        ref_state, ref_history, _ = run_simulation(self._config(tmp_path / "ref"), verbose=False)
+
+        config = self._config(tmp_path / "chained", checkpoint_interval=2)
+        steps = []
+        for _ in range(10):
+            try:
+                state, history, _ = run_simulation(config, verbose=False, resume=True, max_wall_hours=0.0)
+                break
+            except SimulationPaused as pause:
+                steps.append(pause.step)
+        assert steps == [1, 2, 3, 4]  # a pause after every step; the last step finishes the run
+        np.testing.assert_array_equal(np.asarray(state.z_plus), np.asarray(ref_state.z_plus))
+        np.testing.assert_array_equal(np.asarray(state.g), np.asarray(ref_state.g))
+        assert history.times == pytest.approx(ref_history.times)
+        assert history.E_total == pytest.approx(ref_history.E_total)
+
+    def test_resume_from_an_older_checkpoint_drops_later_history(self, tmp_path):
+        ref_state, ref_history, _ = run_simulation(self._config(tmp_path / "ref"), verbose=False)
+        out = tmp_path / "run"
+        run_simulation(self._config(out, checkpoint_interval=2), verbose=False)
+        (out / "checkpoint_step000004.h5").unlink()  # latest left: step 2
+        state, history, _ = run_simulation(self._config(out, checkpoint_interval=2), verbose=False, resume=True)
+        np.testing.assert_array_equal(np.asarray(state.z_plus), np.asarray(ref_state.z_plus))
+        assert history.times == pytest.approx(ref_history.times)
+
+    def test_cli_exit_status_and_resume_in_a_non_empty_folder(self, tmp_path, monkeypatch):
+        import run_simulation as cli
+        out = tmp_path / "run"
+        out.mkdir()
+        (out / "modal_run.log").write_text("written by modal_app before the driver starts\n")
+        config_file = tmp_path / "config.yaml"
+        self._config(out).to_yaml(config_file)
+
+        argv = ["run_simulation.py", str(config_file), "--resume", "-q"]
+        monkeypatch.setattr(sys, "argv", argv + ["--max-wall-hours", "0"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == PAUSED_EXIT
+        assert (out / "checkpoint_step000001.h5").exists()
+
+        monkeypatch.setattr(sys, "argv", argv)
+        cli.main()  # resumes and finishes
+        assert (out / "final_state.h5").exists()
