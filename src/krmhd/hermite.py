@@ -770,7 +770,6 @@ def free_energy_weights(M: int, Lambda: float, closure: str = "zero") -> np.ndar
     return weights
 
 
-@lru_cache(maxsize=None)
 def compute_streaming_eigensystem(
     M: int, Lambda: float = 1.0, closure: str = "zero"
 ) -> tuple[Array, Array, Array, Array]:
@@ -783,6 +782,10 @@ def compute_streaming_eigensystem(
     Uses eigh (symmetric solver) when T is symmetric (guaranteed real eigenvalues,
     better conditioned), falling back to eig (general solver) for asymmetric T.
 
+    The arrays are in the default precision of the call: float32, or float64
+    under jax_enable_x64. The cache is keyed on that precision, so a process
+    that switches it gets arrays of the new precision (Issue #194).
+
     Args:
         M: Maximum Hermite moment index
         Lambda: Kinetic closure parameter
@@ -794,8 +797,14 @@ def compute_streaming_eigensystem(
         P: (M+1, M+1) matrix of right eigenvectors
         P_inv: (M+1, M+1) inverse of P
     """
-    import numpy as np
+    return _streaming_eigensystem(M, Lambda, closure, jnp.result_type(float))
 
+
+@lru_cache(maxsize=None)
+def _streaming_eigensystem(
+    M: int, Lambda: float, closure: str, default_float: Any
+) -> tuple[Array, Array, Array, Array]:
+    """compute_streaming_eigensystem, cached per default float dtype."""
     T = compute_streaming_matrix(M, Lambda, closure)
 
     # Use symmetric solver when T is symmetric (real eigenvalues guaranteed)
@@ -867,7 +876,7 @@ def _streaming_diagonals(
     upper = jnp.asarray(np.diag(T, 1), dtype)
     lower = jnp.asarray(np.diag(T, -1), dtype)
     if M >= 1:
-        lower = lower.at[0].set((1.0 - 1.0 / Lambda) / np.sqrt(2.0))
+        lower = lower.at[0].set(jnp.asarray((1.0 - 1.0 / Lambda) / np.sqrt(2.0), dtype))
     return upper, lower
 
 

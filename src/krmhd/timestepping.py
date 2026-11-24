@@ -692,7 +692,7 @@ def _gandalf_step_lawson_rk4_jit(
         # Note: gandalf_step() wrapper enforces M>=2 only when nu>0.
         if M >= 2:
             # Static branch: collision damping requires M>=2 to avoid division by zero in (m/M)^n
-            moment_indices = jnp.arange(M + 1)  # [0, 1, 2, ..., M]
+            moment_indices = jnp.arange(M + 1, dtype=P.dtype)  # [0, 1, 2, ..., M]
             collision_damping_rate = nu * ((moment_indices / M) ** hyper_n)
             collision_factors = jnp.where(
                 moment_indices >= 2,

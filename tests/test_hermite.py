@@ -781,6 +781,28 @@ class TestStreamingMatrix:
         with pytest.raises(ValueError, match="complex eigenvalues"):
             compute_streaming_eigensystem(5, Lambda=0.5)
 
+    @pytest.mark.parametrize("x64_first", [False, True])
+    def test_eigensystem_in_precision_of_each_call(self, x64_first):
+        """Issue #194: the cache does not hand a later call the precision of the first one."""
+        import numpy as np
+        from jax.experimental import enable_x64
+        from krmhd.hermite import compute_streaming_eigensystem
+
+        args = (7, 2.5 if x64_first else 3.5, "zero")  # a key of its own: first call in this test
+
+        def under_x64():
+            with enable_x64():
+                return compute_streaming_eigensystem(*args)
+
+        if x64_first:
+            arrays64, arrays32 = under_x64(), compute_streaming_eigensystem(*args)
+        else:
+            arrays32 = compute_streaming_eigensystem(*args)
+            arrays64 = under_x64()
+        assert all(a.dtype == jnp.float32 for a in arrays32)
+        assert all(a.dtype == jnp.float64 for a in arrays64)
+        np.testing.assert_allclose(np.asarray(arrays32[2]), np.asarray(arrays64[2]), atol=1e-6)
+
 
 class TestIMEXOperator:
     """Tests for the IMEX implicit operator helpers (Issues #137, #187)."""
