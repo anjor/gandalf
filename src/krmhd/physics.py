@@ -1060,13 +1060,14 @@ def g_rhs(
                 rhs_m, grads = one_moment(j0 + i, near[i], near[i + 2], grads)
                 return jax.lax.dynamic_update_index_in_dim(buf, rhs_m, i, axis=0), grads
 
-            buf = jnp.zeros((size,) + g.shape[:-1], g.dtype)
+            buf = jnp.zeros((size,) + g.shape[:-1], rhs.dtype)
             buf, grads = jax.lax.fori_loop(0, size, fill, (buf, grads))
             rhs = jax.lax.dynamic_update_slice_in_dim(rhs, jnp.moveaxis(buf, 0, -1), j0, axis=-1)
             return rhs, grads
 
         zero = jnp.zeros_like(dphi_dx)  # gradient of g₋₁
-        carry = (jnp.zeros_like(g), ((zero, zero), gradient(g[..., 0])))
+        dtype = jnp.result_type(g, z_plus, z_minus, kx, ky, kz)  # as the batched path
+        carry = (jnp.zeros(g.shape, dtype), ((zero, zero), gradient(g[..., 0])))
         size = min(8, M + 1)
         n_full, rem = divmod(M + 1, size)
         carry = jax.lax.fori_loop(0, n_full, lambda i, c: group(i * size, size, c), carry)

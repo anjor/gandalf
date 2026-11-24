@@ -773,7 +773,10 @@ def _gandalf_step_lawson_rk4_jit(
                     g, jnp.moveaxis(acc, 0, 3), j0, axis=3
                 )
 
-            g = _apply_moment_matrix(fields.g, P_inv)
+            # The dtype the all-at-once path would give: g promoted with the
+            # eigensystem, the Elsasser fields and the wavenumbers.
+            dtype = jnp.result_type(fields.g, P, fields.z_plus, fields.z_minus, kx, ky, kz)
+            g = _apply_moment_matrix(fields.g.astype(dtype), P_inv)
             n_full, rem = divmod(M + 1, chunk)
             g = jax.lax.fori_loop(0, n_full, lambda i, g: advance(g, i * chunk, chunk), g)
             if rem:

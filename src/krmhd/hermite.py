@@ -1040,6 +1040,7 @@ def imex_solve(factor: ImexFactor, rhs: Array) -> Array:
             x = _imex_solve_all(f, jax.lax.dynamic_slice_in_dim(b, iz, 1, axis=0))
             return jax.lax.dynamic_update_slice_in_dim(b, x, iz, axis=0)
 
+        rhs = rhs.astype(jnp.result_type(rhs, *factor))  # as the all-at-once solve
         return jax.lax.fori_loop(0, rhs.shape[0], plane, rhs)
     return _imex_solve_all(factor, rhs)
 

@@ -2691,3 +2691,44 @@ def test_imex222_step_memory():
             + stats.temp_size_in_bytes - stats.alias_size_in_bytes)
     g_bytes = Nz * Ny * (Nx // 2 + 1) * (M + 1) * cplx.itemsize
     assert peak < 5.5 * g_bytes, f"peak = {peak / g_bytes:.2f} × g"
+
+
+@pytest.mark.parametrize("scheme", ["lawson_rk4", "imex_rk222", "imex_ars343"])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_in_place_step_keeps_dtypes(scheme, mixed, monkeypatch):
+    """Issue #186: the in-place path for large g gives the dtypes and values of the
+    all-at-once path, also for a complex64 state under float64 and for complex64 g next
+    to complex128 z±. HERMITE_IN_PLACE_ENTRIES = 0 forces it on this small grid."""
+    from jax.experimental import enable_x64
+
+    from krmhd import hermite
+    from krmhd.physics import KRMHDState, enforce_hermitian_state
+
+    def step(state):
+        return gandalf_step(state, dt=2e-3, eta=0.4, v_A=1.0, nu=0.7, hyper_r=2,
+                            hyper_n=3, scheme=scheme, eta_z=0.3, hyper_rz=2)
+
+    with enable_x64():
+        grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=6 if mixed else 8)
+        rng = np.random.default_rng(1)
+        shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        mask = np.asarray(grid.dealias_mask)
+
+        def draw(*s):
+            a = rng.standard_normal(s) + 1j * rng.standard_normal(s)
+            return jnp.asarray(a * mask.reshape(shape + (1,) * (len(s) - 3)))
+
+        z_dtype = jnp.complex128 if mixed else jnp.complex64
+        state = enforce_hermitian_state(KRMHDState(
+            z_plus=draw(*shape).astype(z_dtype), z_minus=draw(*shape).astype(z_dtype),
+            g=draw(*shape, 6).astype(jnp.complex64), M=5, beta_i=0.7, v_th=1.0, nu=0.7,
+            Lambda=5.0**0.5, time=0.0, grid=grid,
+        ))
+        ref = step(state)
+        monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
+        jax.clear_caches()
+        new = step(state)
+        for name in ("z_plus", "z_minus", "g"):
+            a, b = getattr(new, name), getattr(ref, name)
+            assert a.dtype == b.dtype, (name, a.dtype, b.dtype)
+            assert float(jnp.max(jnp.abs(a - b))) <= 1e-5 * float(jnp.max(jnp.abs(b)))
