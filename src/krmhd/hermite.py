@@ -1001,31 +1001,32 @@ def imex_solve(factor: ImexFactor, rhs: Array) -> Array:
     """
     Solve (I - γ·dt·L)·x = rhs for every Fourier point, with factors from imex_factor.
 
-    rhs has the state layout (Nz, Ny, Nx//2+1, M+1). The two sweeps run
-    over m with lax.scan on the moment-major transpose, so each step reads
-    one contiguous (Nz, Ny, Nx//2+1) slab. Cost is O(M) per Fourier point.
+    rhs has the state layout (Nz, Ny, Nx//2+1, M+1). Both sweeps run over m
+    on the moment-major transpose, so each step reads one contiguous
+    (Nz, Ny, Nx//2+1) slab, and update that one buffer in place: the solve
+    needs one g-sized temporary beyond rhs. Cost is O(M) per Fourier point.
 
     Returns:
         x with the shape and dtype of rhs.
     """
-    b = jnp.moveaxis(rhs, -1, 0)
-    zero = jnp.zeros_like(b[0])
+    x = jnp.moveaxis(rhs, -1, 0)
+    M = x.shape[0] - 1
 
-    def eliminate(b_next: Array, row: tuple[Array, Array]) -> tuple[Array, Array]:
-        b_m, c_m = row
-        b_m = b_m + c_m[:, None, None] * b_next
-        return b_m, b_m
+    def row(a: Array, m: Array) -> Array:
+        return jax.lax.dynamic_index_in_dim(a, m, 0, keepdims=False)
 
-    _, b = jax.lax.scan(eliminate, zero, (b, factor.eliminate), reverse=True)
+    def eliminate(i: Array, x: Array) -> Array:
+        m = M - 1 - i
+        x_m = row(x, m) + row(factor.eliminate, m)[:, None, None] * row(x, m + 1)
+        return jax.lax.dynamic_update_index_in_dim(x, x_m, m, 0)
 
-    def substitute(
-        x_prev: Array, row: tuple[Array, Array, Array]
-    ) -> tuple[Array, Array]:
-        b_m, c_m, inv_q_m = row
-        x_m = inv_q_m[:, None, None] * (b_m + c_m[:, None, None] * x_prev)
-        return x_m, x_m
+    def substitute(m: Array, x: Array) -> Array:
+        x_m = row(factor.inv_pivot, m)[:, None, None] * (
+            row(x, m) + row(factor.substitute, m)[:, None, None] * row(x, m - 1)
+        )
+        return jax.lax.dynamic_update_index_in_dim(x, x_m, m, 0)
 
-    _, x = jax.lax.scan(
-        substitute, zero, (b, factor.substitute, factor.inv_pivot)
-    )
+    x = jax.lax.fori_loop(0, M, eliminate, x)
+    x = x.at[0].multiply(factor.inv_pivot[0][:, None, None])
+    x = jax.lax.fori_loop(1, M + 1, substitute, x)
     return jnp.moveaxis(x, 0, -1)
