@@ -2135,9 +2135,9 @@ class TestIMEX222:
         assert diff_minus < 5e-4, f"z_minus parity broken at nu=2.5: {diff_minus}"
 
     def test_imex222_adaptive_dt_rebuilds_operator(self):
-        """Changing dt between calls must trigger a fresh L/LU factorization.
-        Exercises the "no stale cache" path if/when caching is added (#139).
-        Today no cache exists — this is a defensive smoke test."""
+        """Changing dt between calls must use factors of (I - γ·dt·L) for the
+        new dt. The step builds them inside the jitted kernel from the traced
+        dt (#187), so nothing is cached — this is a defensive smoke test."""
         state = self._make_random_state(M=4, nu=1.0, z_amp=0.01, g_amp=0.01)
         # Two calls with different dt; both must produce finite output and
         # neither should crash due to a dt-dependent factorization mismatch.
@@ -2213,9 +2213,9 @@ class TestIMEX222:
         log_dts = np.log(dts)
         log_errs = np.log(errs)
         slope = np.polyfit(log_dts, log_errs, 1)[0]
-        # ARS(2,2,2) is 2nd order. The floor 1.7 (not 1.9) absorbs float32 LU
-        # roundoff, which starts to flatten the curve at the smallest dt; see
-        # test_imex_solve_roundtrip for the complex64 residual magnitude.
+        # ARS(2,2,2) is 2nd order. The floor 1.7 (not 1.9) absorbs complex64
+        # solve roundoff, which starts to flatten the curve at the smallest dt;
+        # see test_imex_solve_complex64_residual for the residual magnitude.
         assert slope >= 1.7, (
             f"IMEX damped-convergence slope too low: {slope:.2f}, errs={errs}"
         )
@@ -2283,8 +2283,8 @@ class TestIMEX222:
         log_errs = np.log(errs)
         slope = np.polyfit(log_dts, log_errs, 1)[0]
         # ARS(2,2,2) is 2nd order. Floor at 1.7 (not 1.9) because at small dt
-        # the complex64 LU residual (~3e-7, see test_imex_solve_roundtrip) is
-        # comparable to the scheme's truncation error, flattening the slope.
+        # the complex64 solve residual (see test_imex_solve_complex64_residual)
+        # is comparable to the scheme's truncation error, flattening the slope.
         assert slope >= 1.7, (
             f"IMEX convergence slope too low: {slope:.2f}, errs={errs}"
         )
