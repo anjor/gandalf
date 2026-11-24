@@ -42,6 +42,12 @@ jax_enable_x64 a complex64 state therefore steps in float32 while the
 accounting hook can upcast the fields and sum in float64.
 docs/precision_float32_study.md measures what the float32 rounding does to
 energy budgets (Issue #191).
+
+Several devices: StepParams(mesh=...) shards the lawson_rk4 slices over a
+one-axis mesh, as gandalf_step(mesh=...) does (Issue #191). The loop keeps g
+split along k_z and everything else on every device, and draws the forcing on
+every device. The accounting hook sees the whole g; XLA adds the reductions
+over its split axis. docs/multi_gpu_slices.md has the tradeoff.
 """
 
 import warnings
@@ -484,11 +490,11 @@ class DeviceLoop:
         )
         if step.mesh is not None:
             # g split along k_z over the mesh, everything else on every device.
-            # (tree.map: SpectralGrid3D cannot be rebuilt from device_put's
-            # placeholder leaves.)
             whole = NamedSharding(step.mesh, PartitionSpec())
 
             def replicate(tree: Any) -> Any:
+                # Leaf by leaf: device_put of a whole SpectralGrid3D fails its
+                # validation on placeholder leaves.
                 return jax.tree.map(lambda x: jax.device_put(x, whole), tree)
 
             c = self._carry

@@ -131,10 +131,9 @@ def place_on_mesh(fields: KRMHDFields, mesh: Mesh) -> KRMHDFields:
     """fields with z± replicated on every device of mesh and g split along k_z."""
     specs = _mesh_specs(mesh)
     return fields._replace(
-        **{
-            name: jax.device_put(getattr(fields, name), NamedSharding(mesh, getattr(specs, name)))
-            for name in ("z_plus", "z_minus", "g")
-        }
+        z_plus=jax.device_put(fields.z_plus, NamedSharding(mesh, specs.z_plus)),
+        z_minus=jax.device_put(fields.z_minus, NamedSharding(mesh, specs.z_minus)),
+        g=jax.device_put(fields.g, NamedSharding(mesh, specs.g)),
     )
 
 

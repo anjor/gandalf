@@ -106,6 +106,10 @@ RMHD is an asymptotic expansion in the small parameter ε:
   - Memory: g with more than `hermite.HERMITE_IN_PLACE_ENTRIES` (2^26) entries is advanced
     in place: `lawson_rk4` one slice at a time (`hermite_chunk`), `g_rhs` in groups of eight
     moments and `imex_solve` one k_z plane at a time (Issue #186). Smaller g runs all at once.
+  - Multi-GPU: `lawson_rk4` shards its slices over a one-axis `jax.sharding.Mesh`
+    (`gandalf_step(mesh=...)`, `StepParams(mesh=...)`; Issue #191). g is split along k_z,
+    z± are replicated, and each step makes two all-to-alls of g's size. This cuts wall
+    time, not cost. See docs/multi_gpu_slices.md.
 - **Poisson solver**: k²φ = ∇²⊥A∥ in Fourier space
 - **Field line following**: Requires full 3D for interpolation across z-planes
 
