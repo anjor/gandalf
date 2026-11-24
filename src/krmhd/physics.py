@@ -1035,8 +1035,8 @@ def g_rhs(
             g_m = moment(m)
             return to_real(1j * kx_3d * g_m), to_real(1j * ky_3d * g_m)
 
-        def one_moment(m: Array, carry: tuple) -> tuple:
-            rhs, (dx_dn, dy_dn), (dx_m, dy_m) = carry
+        def one_moment(m: Array, grads: tuple) -> tuple[Array, tuple]:
+            (dx_dn, dy_dn), (dx_m, dy_m) = grads
             up = jnp.minimum(m + 1, M)  # T[M, M+1] = 0, so any finite g at M + 1 will do
             dx_up, dy_up = gradient(up)
             T_dx = t_up[m] * dx_up + t_dn[m] * dx_dn
@@ -1046,13 +1046,31 @@ def g_rhs(
             )
             T_g = t_up[m] * moment(up) + t_dn[m] * moment(jnp.maximum(m - 1, 0))
             rhs_m = -(jnp.fft.rfftn(bracket) + sqrt_beta * (1j * kz_3d) * T_g) * dealias_mask
-            rhs_m = rhs_m.at[0, 0, 0].set(0.0)
-            rhs = jax.lax.dynamic_update_index_in_dim(rhs, rhs_m, m, axis=-1)
-            return rhs, (dx_m, dy_m), (dx_up, dy_up)
+            return rhs_m.at[0, 0, 0].set(0.0), ((dx_m, dy_m), (dx_up, dy_up))
+
+        # The moments are written to the output in groups: one moment alone is
+        # a strided write that touches every cache line of the output.
+        def group(j0: Array | int, size: int, carry: tuple) -> tuple:
+            rhs, grads = carry
+
+            def fill(i: Array, c: tuple) -> tuple:
+                buf, grads = c
+                rhs_m, grads = one_moment(j0 + i, grads)
+                return jax.lax.dynamic_update_index_in_dim(buf, rhs_m, i, axis=0), grads
+
+            buf = jnp.zeros((size,) + g.shape[:-1], g.dtype)
+            buf, grads = jax.lax.fori_loop(0, size, fill, (buf, grads))
+            rhs = jax.lax.dynamic_update_slice_in_dim(rhs, jnp.moveaxis(buf, 0, -1), j0, axis=-1)
+            return rhs, grads
 
         zero = jnp.zeros_like(dphi_dx)  # gradient of g₋₁, which T[0, -1] = 0 ignores
-        carry = (jnp.zeros_like(g), (zero, zero), gradient(0))
-        return jax.lax.fori_loop(0, M + 1, one_moment, carry)[0]
+        carry = (jnp.zeros_like(g), ((zero, zero), gradient(0)))
+        size = min(8, M + 1)
+        n_full, rem = divmod(M + 1, size)
+        carry = jax.lax.fori_loop(0, n_full, lambda i, c: group(i * size, size, c), carry)
+        if rem:
+            carry = group(n_full * size, rem, carry)
+        return carry[0]
 
     # Moment-major [M+1, Nz, Ny, Nx//2+1]: each moment is a contiguous 3D field.
     g_mm = jnp.moveaxis(g, -1, 0)
