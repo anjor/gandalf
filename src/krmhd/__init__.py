@@ -75,6 +75,7 @@ from krmhd.timestepping import (
     krmhd_rhs,
     gandalf_step,
     compute_cfl_timestep,
+    slice_advection_radius,
 )
 
 from krmhd.diagnostics import (
@@ -172,6 +173,7 @@ __all__ = [
     "krmhd_rhs",
     "gandalf_step",
     "compute_cfl_timestep",
+    "slice_advection_radius",
     # Diagnostics
     "energy_spectrum_1d",
     "energy_spectrum_perpendicular",
