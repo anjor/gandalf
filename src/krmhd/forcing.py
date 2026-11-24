@@ -22,7 +22,8 @@ Physics context:
     ξ ~ N(0,1), not a force multiplied by dt. The energy injected per step is
     ∝ amplitude²/dt, so the injection rate per unit time is ∝ amplitude²/dt².
     Halving dt at fixed amplitude raises the injection rate by 4×. Rescale
-    amplitude ∝ dt to keep the injection rate fixed when changing dt.
+    amplitude ∝ dt to keep the injection rate fixed when changing dt
+    (WhiteNoiseBand.dt_ref does this every step of the device run loop).
 
     Mode numbers n are integers (n=1,2,3,...) that correspond to physical wavenumbers
     k = 2πn/L, where L is the domain size. This eliminates confusion about 2π factors.
@@ -655,6 +656,13 @@ class WhiteNoiseBand:
     to 1, include_nz0 to False), with the same key splits and the same values.
     draw is traceable in dt and key, so the device run loop (krmhd.runloop)
     calls it inside jit.
+
+    The injection rate of that increment is ∝ amplitude²/dt², so it changes
+    with dt. dt_ref fixes it: with dt_ref set, draw uses the amplitude
+    amplitude·dt/dt_ref, and the band injects at the rate of `amplitude` at
+    dt = dt_ref, whatever dt the step takes. A run with an adaptive dt sets
+    dt_ref to its initial dt. With dt_ref = None (the default), or dt = dt_ref,
+    draw uses `amplitude` unchanged.
     """
 
     amplitude: float
@@ -663,10 +671,13 @@ class WhiteNoiseBand:
     band: Literal["shell", "perp_lowkz"] = "shell"
     max_nz: Optional[int] = None
     include_nz0: Optional[bool] = None
+    dt_ref: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.amplitude <= 0:
             raise ValueError(f"amplitude must be positive, got {self.amplitude}")
+        if self.dt_ref is not None and not self.dt_ref > 0:
+            raise ValueError(f"dt_ref must be positive, got {self.dt_ref}")
         if self.band == "shell":
             if self.max_nz is not None or self.include_nz0 is not None:
                 raise ValueError(
@@ -685,10 +696,17 @@ class WhiteNoiseBand:
 
     def draw(self, grid: SpectralGrid3D, dt: float, key: Array) -> Tuple[Array, Array]:
         """One forcing increment on the band and the next key."""
+        amplitude = self.amplitude
+        if self.dt_ref is not None:
+            # Under jit, XLA turns dt/dt_ref into dt·(1/dt_ref) and reorders the
+            # product with 1/√dt, which can move the increment by an ulp at
+            # dt = dt_ref. Selecting the plain amplitude there keeps a step at
+            # dt_ref bitwise equal to one without dt_ref.
+            amplitude = jnp.where(dt == self.dt_ref, amplitude, amplitude * (dt / self.dt_ref))
         if self.band == "shell":
-            return _shell_noise(grid, self.amplitude, self.n_min, self.n_max, dt, key)
+            return _shell_noise(grid, amplitude, self.n_min, self.n_max, dt, key)
         return _perp_lowkz_noise(
-            grid, self.amplitude, self.n_min, self.n_max, self._max_nz,
+            grid, amplitude, self.n_min, self.n_max, self._max_nz,
             bool(self.include_nz0), dt, key,
         )
 

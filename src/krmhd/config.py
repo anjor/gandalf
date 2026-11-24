@@ -218,6 +218,12 @@ class ForcingConfig(BaseModel):
     but the forcing API (force_alfven_modes) expects integer mode numbers (n_min, n_max).
     The conversion k = 2πn/L is performed at runtime (see Issue #97).
 
+    amplitude sets the injection rate at the run's initial dt. White noise
+    injects at a rate ∝ amplitude²/dt², and run_simulation.py re-evaluates the
+    CFL dt every step, so it scales the amplitude by dt/dt₀ (dt₀ the initial
+    dt, saved in checkpoints as forcing_dt_ref) and the rate stays at its
+    initial value. With dt_fixed the scaling is 1.
+
     Example:
         For a domain with L=1.0:
         - k_min=2.0 → n_min=0 (rounded from 2.0/(2π) ≈ 0.32, clamped to 1)
@@ -227,7 +233,9 @@ class ForcingConfig(BaseModel):
 
     enabled: bool = Field(False, description="Enable forcing")
 
-    amplitude: float = Field(0.3, ge=0, description="Forcing amplitude")
+    amplitude: float = Field(
+        0.3, ge=0, description="Forcing amplitude at the initial dt; scaled by dt/dt₀ as dt adapts"
+    )
     k_min: float = Field(2.0, gt=0, description="Minimum forcing wavenumber (converted to mode number at runtime)")
     k_max: float = Field(5.0, gt=0, description="Maximum forcing wavenumber (converted to mode number at runtime)")
 

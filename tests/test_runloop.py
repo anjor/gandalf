@@ -8,6 +8,7 @@ to round-off, carry the PRNG key exactly, hand the accounting hook the actual
 step inputs, and own (donate) its buffers without warnings.
 """
 
+import dataclasses
 import warnings
 
 import jax
@@ -268,3 +269,62 @@ def test_rejects_forcing_without_key_and_bad_moments():
         DeviceLoop(_state(), RunConfig(step=PARAMS._replace(hyper_r=3), dt=FixedDt(1e-3)))
     with pytest.raises(ValueError, match="perp_lowkz"):
         WhiteNoiseBand(0.1, 1, 2, max_nz=1)
+    with pytest.raises(ValueError, match="dt_ref"):
+        WhiteNoiseBand(0.1, 1, 2, dt_ref=0.0)
+
+
+def _with_dt_ref(forcing: Forcing, dt_ref: float) -> Forcing:
+    return dataclasses.replace(
+        forcing,
+        alfven=dataclasses.replace(forcing.alfven, dt_ref=dt_ref),
+        hermite=dataclasses.replace(forcing.hermite, dt_ref=dt_ref),
+    )
+
+
+def _record_injection(n_steps: int) -> Accounting:
+    """Accounting that records each step's dt and Σ|F|²/dt of the Alfvénic and Hermite increments."""
+    def update(acc, before, after, increment, dt):
+        dts, rates, i = acc
+        power = jnp.stack([jnp.sum(jnp.abs(increment.alfven) ** 2), jnp.sum(jnp.abs(increment.hermite) ** 2)])
+        return dts.at[i].set(dt), rates.at[i].set(power / dt), i + 1
+
+    return Accounting(init=(jnp.zeros(n_steps), jnp.zeros((n_steps, 2)), jnp.zeros((), jnp.int32)), update=update)
+
+
+def _forced_run(dt_policy, forcing: Forcing, n_steps: int):
+    key = jax.random.PRNGKey(7)
+    config = RunConfig(step=PARAMS, dt=dt_policy, forcing=forcing, accounting=_record_injection(n_steps))
+    dts, rates, _ = DeviceLoop(_zero_state(), config, key=key).advance(n_steps)
+    return np.asarray(dts), np.asarray(rates)
+
+
+def test_dt_ref_keeps_the_injection_rate_as_dt_adapts():
+    """With dt_ref, each step injects Σ|F|²/dt of a fixed-dt run at dt_ref, whatever its dt.
+
+    The noise ξ depends only on the key, so with one key the steps of every run
+    draw the same ξ, and Σ|F|²/dt compares exactly, step by step.
+    """
+    n, dt_ref = 6, 0.01
+    fixed_dts, fixed_rates = _forced_run(FixedDt(dt_ref), FORCING, n)
+    dts, rates = _forced_run(CflDt(0.3), _with_dt_ref(FORCING, dt_ref), n)
+
+    assert dts.max() > 1.5 * dts.min()  # the spin-up changes dt
+    np.testing.assert_allclose(rates, fixed_rates, rtol=1e-5)
+
+    # Without dt_ref the rate goes as 1/dt²
+    free_dts, free_rates = _forced_run(CflDt(0.3), FORCING, n)
+    np.testing.assert_allclose(free_rates, fixed_rates * (dt_ref / free_dts[:, None]) ** 2, rtol=1e-5)
+
+
+def test_dt_ref_equal_to_dt_changes_nothing():
+    key = jax.random.PRNGKey(7)
+    loops = [
+        DeviceLoop(_state(), RunConfig(step=PARAMS, dt=FixedDt(1e-3), forcing=forcing), key=key)
+        for forcing in (FORCING, _with_dt_ref(FORCING, 1e-3))
+    ]
+    for loop in loops:
+        loop.advance(3)
+    ref, out = (loop.state for loop in loops)
+    for name in ("z_plus", "z_minus", "g"):
+        np.testing.assert_array_equal(np.asarray(getattr(out, name)), np.asarray(getattr(ref, name)))
+    np.testing.assert_array_equal(np.asarray(loops[1].key), np.asarray(loops[0].key))

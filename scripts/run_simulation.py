@@ -91,7 +91,8 @@ def latest_checkpoint(output_dir: Path) -> Optional[Path]:
 
 
 def _save_resume_point(state: KRMHDState, history: EnergyHistory, config: SimulationConfig,
-                       output_dir: Path, step: int, t: float, dt: float, key: Any) -> Path:
+                       output_dir: Path, step: int, t: float, dt: float, key: Any,
+                       forcing_dt_ref: Optional[float]) -> Path:
     """Write the checkpoint of `step`, and the energy history so far, for --resume.
 
     Each file is written under a temporary name and renamed, so an interrupted write
@@ -102,6 +103,8 @@ def _save_resume_point(state: KRMHDState, history: EnergyHistory, config: Simula
                 'eta': config.physics.eta, 'nu': config.physics.nu}
     if key is not None:
         metadata['forcing_key'] = np.asarray(key)
+    if forcing_dt_ref is not None:
+        metadata['forcing_dt_ref'] = forcing_dt_ref
     tmp = output_dir / f".{path.name}.tmp"
     save_checkpoint(state, str(tmp), metadata=metadata, overwrite=True)
     os.replace(tmp, path)
@@ -193,7 +196,7 @@ def run_simulation(
     config.to_yaml(output_dir / "config.yaml")
 
     # Continue from the latest checkpoint
-    step0, t, dt_resumed = 0, 0.0, None
+    step0, t, dt_resumed, dt_ref_resumed = 0, 0.0, None, None
     checkpoint = latest_checkpoint(output_dir) if resume else None
     if checkpoint is not None:
         # The arrays as saved, so that the resumed run continues the same trajectory
@@ -203,6 +206,7 @@ def run_simulation(
                              f"g {loaded.g.shape} vs {state.z_plus.shape}, {state.g.shape}")
         state = loaded
         step0, t, dt_resumed = int(meta['step']), float(meta['time']), meta.get('dt')
+        dt_ref_resumed = meta.get('forcing_dt_ref')
         if key is not None and 'forcing_key' in meta:
             key = jnp.asarray(meta['forcing_key'], dtype=jnp.uint32)
         history_file = output_dir / "energy_history.h5"
@@ -263,11 +267,29 @@ def run_simulation(
             print(f"Using fixed timestep: dt = {dt:.6e} (CFL suggests {dt_cfl:.6e})")
         dt_policy = FixedDt(dt)
     else:
+        dt = compute_cfl_timestep(
+            state,
+            v_A=physics.v_A,
+            cfl_safety=config.time_integration.cfl_safety,
+            closure=physics.closure,
+        )
         dt_policy = CflDt(config.time_integration.cfl_safety)
+    if dt_resumed is not None:
+        dt = float(dt_resumed)  # the run's own timestep, not the CFL step of the resumed state
 
-    forcing = Forcing()
+    # White noise injects at a rate ∝ amplitude²/dt². The band scales its amplitude by
+    # dt/dt_ref, so the run injects at the rate of its initial dt as dt adapts.
+    forcing, dt_ref = Forcing(), None
     if config.forcing.enabled:
-        forcing = Forcing(alfven=WhiteNoiseBand(config.forcing.amplitude, *_forcing_modes(config, grid)))
+        dt_ref = dt if checkpoint is None else dt_ref_resumed
+        if dt_ref is None:
+            dt_ref = dt
+            print(f"{checkpoint.name} has no forcing_dt_ref (written before Issue #188): "
+                  f"forcing keeps the injection rate of the resumed dt = {dt:.6e}", flush=True)
+        dt_ref = float(dt_ref)
+        forcing = Forcing(alfven=WhiteNoiseBand(
+            config.forcing.amplitude, *_forcing_modes(config, grid), dt_ref=dt_ref
+        ))
 
     # config.physics.nu overrides state.nu, as in gandalf_step
     step_params = StepParams(
@@ -280,16 +302,11 @@ def run_simulation(
         hyper_rz=physics.hyper_rz,
         closure=physics.closure,
     )
-    # A resumed run starts with the dt it saved: the next step of the interrupted run
     loop = DeviceLoop(
-        state,
-        RunConfig(step=step_params, dt=dt_policy, forcing=forcing),
-        key=key,
-        dt=None if dt_resumed is None else float(dt_resumed),
-        steps=step0,
+        state, RunConfig(step=step_params, dt=dt_policy, forcing=forcing), key=key, dt=dt, steps=step0
     )
     if verbose and config.time_integration.dt_fixed is None:
-        print(f"CFL timestep, re-evaluated every step: initial dt = {float(loop.dt):.6e}")
+        print(f"CFL timestep, re-evaluated every step: initial dt = {dt:.6e}")
 
     # Main loop: the steps between two sample or checkpoint steps run on the device
     # as one chunk; the host syncs, saves and checks the wall time between chunks.
@@ -325,7 +342,7 @@ def run_simulation(
         saved = checkpoint_interval is not None and step % checkpoint_interval == 0
         if saved:
             checkpoint_file = _save_resume_point(state, energy_history, config, output_dir,
-                                                 step, t, float(loop.dt), loop.key)
+                                                 step, t, float(loop.dt), loop.key, dt_ref)
             if verbose:
                 print(f"    ✓ Saved checkpoint: {checkpoint_file.name}")
 
@@ -335,7 +352,7 @@ def run_simulation(
                 and time.time() - start_time >= 3600 * max_wall_hours):
             if not saved:
                 _save_resume_point(state, energy_history, config, output_dir, step, t,
-                                   float(loop.dt), loop.key)
+                                   float(loop.dt), loop.key, dt_ref)
             print(f"paused at t = {t:.6f}, step {step}, after {max_wall_hours:g} h of wall time; "
                   "continue with --resume", flush=True)
             raise SimulationPaused(t, step)
