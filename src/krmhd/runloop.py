@@ -315,6 +315,20 @@ def _next_dt(after: KRMHDFields, dt: Array, steps: Array, grid: SpectralGrid3D, 
     return jax.lax.cond(steps % policy.every == 0, estimate, lambda: dt)
 
 
+def _one_step(
+    state: RunState, acc: Any, grid: SpectralGrid3D, consts: Tuple[Array, ...], plan: _Plan
+) -> Tuple[RunState, Any]:
+    """One loop step: forcing, the scheme's step, the accounting hook, the dt update."""
+    before, dt = state.fields, state.dt
+    forced, increment, key = _force(before, dt, state.key, grid, plan.forcing)
+    after = _scheme_step(forced, dt, grid, consts, plan)
+    if plan.update is not None:
+        acc = plan.update(acc, before, after, increment, dt)
+    steps = state.steps + 1
+    dt = _next_dt(after, dt, steps, grid, plan)
+    return RunState(fields=after, key=key, dt=dt, steps=steps), acc
+
+
 def _advance_impl(
     carry: RunState,
     acc: Any,
@@ -323,18 +337,9 @@ def _advance_impl(
     consts: Tuple[Array, ...],
     plan: _Plan,
 ) -> Tuple[RunState, Any]:
-    def body(_: Array, loop: Tuple[RunState, Any]) -> Tuple[RunState, Any]:
-        state, acc = loop
-        before, dt = state.fields, state.dt
-        forced, increment, key = _force(before, dt, state.key, grid, plan.forcing)
-        after = _scheme_step(forced, dt, grid, consts, plan)
-        if plan.update is not None:
-            acc = plan.update(acc, before, after, increment, dt)
-        steps = state.steps + 1
-        dt = _next_dt(after, dt, steps, grid, plan)
-        return RunState(fields=after, key=key, dt=dt, steps=steps), acc
-
-    return jax.lax.fori_loop(0, n_steps, body, (carry, acc))
+    return jax.lax.fori_loop(
+        0, n_steps, lambda _, loop: _one_step(*loop, grid, consts, plan), (carry, acc)
+    )
 
 
 # The carry (argument 0) is donated: XLA writes the new fields into its buffers.
@@ -439,7 +444,7 @@ class DeviceLoop:
         if z_minus is z_plus:
             z_minus = jnp.copy(z_minus)
         real = jnp.result_type(float)  # the dtype jit gives gandalf_step's float dt and time
-        self._carry = RunState(
+        carry = RunState(
             fields=KRMHDFields(
                 z_plus=z_plus,
                 z_minus=z_minus,
@@ -449,6 +454,15 @@ class DeviceLoop:
             key=None if key is None else jnp.copy(key),  # the caller keeps its key
             dt=jnp.asarray(dt0, dtype=real),
             steps=jnp.asarray(steps, dtype=jnp.int32),
+        )
+        # The step can promote a field: under float64, a complex64 g meets float64
+        # wavenumbers and comes out complex128 (gandalf_step returns it so). The
+        # loop carry keeps one dtype, so start from the dtypes one step produces.
+        stepped, _ = jax.eval_shape(
+            lambda c, a: _one_step(c, a, self._grid, self._consts, self._plan), carry, self._acc0
+        )
+        self._carry = jax.tree.map(
+            lambda x, out: x if x.dtype == out.dtype else x.astype(out.dtype), carry, stepped
         )
 
     def advance(self, n_steps: int) -> Any:

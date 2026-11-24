@@ -37,11 +37,11 @@ M = 4
 RTOL = 5e-6
 
 
-def _state() -> KRMHDState:
+def _state(grid: SpectralGrid3D = GRID) -> KRMHDState:
     """Random z± spectrum and small in-band random g."""
-    s = initialize_random_spectrum(GRID, M=M, alpha=5 / 3, amplitude=0.5, k_min=1.0, k_max=8.0, seed=1)
+    s = initialize_random_spectrum(grid, M=M, alpha=5 / 3, amplitude=0.5, k_min=1.0, k_max=8.0, seed=1)
     g = jax.random.normal(jax.random.PRNGKey(3), s.g.shape) * 1e-2
-    g = (g + 0j).astype(s.g.dtype) * GRID.dealias_mask[..., None]
+    g = (g + 0j).astype(s.z_plus.dtype) * grid.dealias_mask[..., None]
     return s.model_copy(update=dict(g=g))
 
 
@@ -135,22 +135,45 @@ def test_forcing_and_adaptive_dt_match_python_loop():
     np.testing.assert_array_equal(np.asarray(loop.key), np.asarray(ref_key))
 
 
+@pytest.mark.parametrize("forced", [False, True])
 @pytest.mark.parametrize("scheme", ["lawson_rk4", "imex_rk222", "imex_ars343"])
-def test_forced_spin_up_matches_python_loop_float64(scheme):
-    """In float64 (the P1 runs' precision) the forced, adaptive-dt loop agrees to round-off."""
+def test_adaptive_dt_matches_python_loop_float64(scheme, forced):
+    """In float64 (the P1 runs' precision) the steps and the CFL dt agree to float64 round-off.
+
+    The forcing increments are drawn in float32 by design (gaussian_white_noise_fourier).
+    Compiled in a different graph they can round differently by one float32 ulp
+    (seen on x86 with JAX 0.7.2), so the forced case is held to float32 precision.
+    """
     with enable_x64():
         grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16, Lx=1.0, Ly=1.0, Lz=1.0)
         params = PARAMS._replace(scheme=scheme)
-        key = jax.random.PRNGKey(7)
-        ref, _, ref_dts = _python_loop(_zero_state(grid, jnp.complex128), params, 4, key=key)
+        key = jax.random.PRNGKey(7) if forced else None
+        start = (lambda: _zero_state(grid, jnp.complex128)) if forced else (lambda: _state(grid))
+        ref, _, ref_dts = _python_loop(start(), params, 4, key=key)
 
-        config = RunConfig(step=params, dt=CflDt(0.3), forcing=FORCING, accounting=_record_dt(4))
-        loop = DeviceLoop(_zero_state(grid, jnp.complex128), config, key=key)
+        forcing = FORCING if forced else Forcing()
+        config = RunConfig(step=params, dt=CflDt(0.3), forcing=forcing, accounting=_record_dt(4))
+        loop = DeviceLoop(start(), config, key=key)
         dts, _ = loop.advance(4)
 
+        rtol = 1e-6 if forced else 1e-12
         assert loop.state.g.dtype == jnp.complex128
-        np.testing.assert_allclose(np.asarray(dts), ref_dts, rtol=1e-13)
-        _assert_close(ref, loop.state, rtol=1e-12)
+        np.testing.assert_allclose(np.asarray(dts), ref_dts, rtol=rtol)
+        _assert_close(ref, loop.state, rtol=rtol)
+
+
+def test_mixed_precision_state_runs_in_the_promoted_dtype():
+    """Under float64 a complex64 g comes out of gandalf_step as complex128; the loop starts there."""
+    with enable_x64():
+        grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=16, Lx=1.0, Ly=1.0, Lz=1.0)
+        state = _state(grid)
+        state = state.model_copy(update=dict(g=state.g.astype(jnp.complex64)))
+        ref = gandalf_step(state, 1e-3, **PARAMS._replace(scheme="lawson_rk4")._asdict())
+
+        loop = DeviceLoop(state, RunConfig(step=PARAMS._replace(scheme="lawson_rk4"), dt=FixedDt(1e-3)))
+        loop.advance(2)
+
+        assert loop.state.g.dtype == ref.g.dtype == jnp.complex128
 
 
 def test_chunks_compose():
