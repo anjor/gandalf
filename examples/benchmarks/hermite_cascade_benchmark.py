@@ -233,7 +233,7 @@ def main():
     parser.add_argument('--force-amplitude', type=float, default=0.01,
                         help='Forcing amplitude (default: 0.01, reduced from 0.1)')
     parser.add_argument('--lambda-param', type=float, default=-1.0,
-                        help='Kinetic parameter Lambda in g1_rhs (default: -1.0 matching thesis)')
+                        help='Kinetic parameter Lambda in the g1 equation (default: -1.0 matching thesis)')
     parser.add_argument('--force-g0-only', action='store_true',
                         help='Force only g₀ (density), not g₁ (momentum)')
     parser.add_argument('--single-k-mode', action='store_true',

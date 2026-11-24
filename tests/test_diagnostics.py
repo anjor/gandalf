@@ -1477,7 +1477,7 @@ class TestHermiteFlux:
         """
         from krmhd.diagnostics import hermite_flux
         from krmhd.hermite import compute_streaming_matrix
-        from krmhd.physics import g0_rhs, g1_rhs, gm_rhs
+        from krmhd.physics import g_rhs
         from krmhd.spectral import rfftn_forward
 
         N, M, beta_i = 16, 4, 1.5
@@ -1505,9 +1505,8 @@ class TestHermiteFlux:
         )
 
         args = (state.z_plus, state.z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask)
-        rhs = [g0_rhs(g, *args, beta_i, N, N, N), g1_rhs(g, *args, beta_i, Lambda, N, N, N)]
-        rhs += [gm_rhs(g, *args, m, beta_i, N, N, N, closure=closure)
-                for m in range(2, M + 1)]
+        dg_dt = g_rhs(g, *args, beta_i, Lambda, N, N, N, closure=closure)
+        rhs = [dg_dt[..., m] for m in range(M + 1)]
 
         # rfft weights: kx>0 counted twice, kx=0 (and Nyquist) once
         w = jnp.full(N // 2 + 1, 2.0).at[0].set(1.0).at[-1].set(1.0)[None, None, :]

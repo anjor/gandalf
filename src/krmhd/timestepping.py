@@ -56,9 +56,7 @@ from krmhd.physics import (
     KRMHDState,
     z_plus_rhs,
     z_minus_rhs,
-    g0_rhs,
-    g1_rhs,
-    gm_rhs,
+    g_rhs,
 )
 from krmhd.hermite import (
     compute_streaming_matrix,
@@ -192,24 +190,8 @@ def _krmhd_rhs_jit(
         # Pure fluid mode: no kinetic response, g = 0 throughout evolution
         dg_dt = jnp.zeros_like(fields.g)
     else:
-        # Full kinetic mode: evolve Hermite moment hierarchy
-        # Compute g0 RHS (density moment, thesis Eq. 2.7)
-        dg_dt_0 = g0_rhs(
-            fields.g,
-            fields.z_plus,
-            fields.z_minus,
-            kx,
-            ky,
-            kz,
-            dealias_mask,
-            beta_i,
-            Nz,
-            Ny,
-            Nx,
-        )
-
-        # Compute g1 RHS (velocity moment, thesis Eq. 2.8)
-        dg_dt_1 = g1_rhs(
+        # Full kinetic mode: all moments of the Hermite hierarchy (thesis Eqs. 2.7-2.10)
+        dg_dt = g_rhs(
             fields.g,
             fields.z_plus,
             fields.z_minus,
@@ -222,36 +204,8 @@ def _krmhd_rhs_jit(
             Nz,
             Ny,
             Nx,
+            closure=closure,
         )
-
-        # Initialize dg_dt array and populate first two moments
-        dg_dt = jnp.zeros_like(fields.g)
-        dg_dt = dg_dt.at[:, :, :, 0].set(dg_dt_0)
-        dg_dt = dg_dt.at[:, :, :, 1].set(dg_dt_1)
-
-        # Compute higher moment RHS (m >= 2, thesis Eq. 2.9)
-        # NOTE: Python for loop is correct here! Since M is in static_argnames, the JIT compiler
-        # sees the iteration count at compile time and fully unrolls this loop into separate
-        # gm_rhs() calls for each m. This is necessary because gm_rhs() requires m as a static
-        # argument (for compile-time optimization of Hermite recurrence coefficients).
-        # Using vmap/scan would make m dynamic, breaking the static_argnames contract.
-        for m in range(2, M + 1):
-            dg_dt_m = gm_rhs(
-                fields.g,
-                fields.z_plus,
-                fields.z_minus,
-                kx,
-                ky,
-                kz,
-                dealias_mask,
-                m,
-                beta_i,
-                Nz,
-                Ny,
-                Nx,
-                closure=closure,
-            )
-            dg_dt = dg_dt.at[:, :, :, m].set(dg_dt_m)
 
     return KRMHDFields(
         z_plus=dz_plus_dt,
@@ -378,7 +332,7 @@ def _slice_advection_rhs(
     """
     Explicit Hermite right-hand side in the slice basis, for all slices at once.
 
-    Physics: the Hermite hierarchy (g0_rhs, g1_rhs, gm_rhs) reads
+    Physics: the Hermite hierarchy (physics.g_rhs) reads
         ∂g/∂t = -{Φ, g} - √β_i (∂z + {Ψ, ·})(T g),
     with T the streaming matrix (hermite.compute_streaming_matrix, including
     the (1 - 1/Λ) coupling and the closure). T acts on the moment index and
@@ -406,7 +360,7 @@ def _slice_advection_rhs(
 
     Returns:
         ∂h/∂t from perpendicular advection, dealiased, with the k = 0 mode of
-        every slice set to zero (as in g0_rhs, g1_rhs and gm_rhs).
+        every slice set to zero (as in physics.g_rhs).
     """
     phi = (z_plus + z_minus) / 2.0
     psi = (z_plus - z_minus) / 2.0
@@ -502,9 +456,8 @@ def _gandalf_step_lawson_rk4_jit(
       step is wrong in either form (Issue #192).
 
     At M = 1 the step integrates the system defined by T with the zero
-    closure, (Tg)_1 = T[1,0]·g_0. This differs from _krmhd_rhs_jit and the
-    IMEX schemes, whose g1_rhs reads g[..., 2] at M = 1 and gets g_1 because
-    JAX clamps out-of-range indices (Issue #193).
+    closure, (Tg)_1 = T[1,0]·g_0, as _krmhd_rhs_jit and the IMEX schemes do
+    (Issue #193).
 
     Args:
         fields: Current KRMHD fields
@@ -910,14 +863,14 @@ def _gandalf_step_imex222_jit(
     phase_plus_gamma = jnp.exp(+1j * kz_3d * (_IMEX_GAMMA * dt))
     phase_minus_gamma = jnp.exp(-1j * kz_3d * (_IMEX_GAMMA * dt))
 
-    # In g's RHS (physics.g0_rhs, g1_rhs, gm_rhs), kz enters only through the
-    # linear streaming term derivative_z(...) that couples m to m+/-1. The
-    # perpendicular Poisson brackets {Phi, g_m} and {Psi, coupled_term} and
+    # In g's RHS (physics.g_rhs), kz enters only through the
+    # linear streaming term i*kz*(T g) that couples m to m+/-1. The
+    # perpendicular Poisson brackets {Phi, g_m} and {Psi, (T g)_m} and
     # the (1-1/Lambda) kinetic correction are all kz-independent. Forcing
     # kz to zero therefore strips ONLY the streaming contribution and leaves
     # the nonlinear advection intact — which is exactly what N must be.
-    # No double-counting of collisions: g{0,1,m}_rhs do NOT take nu, and
-    # physics.py:1049 explicitly states collisions are applied in the
+    # No double-counting of collisions: g_rhs does NOT take nu, and its
+    # docstring states that collisions are applied in the
     # timestepper, not in the RHS. The nu argument below is a no-op for
     # g's RHS; collisions enter only via D inside the implicit operator L.
     kz_zero = jnp.zeros_like(kz)
@@ -1520,10 +1473,10 @@ def gandalf_step(
           ~22 ms/step on Apple M-series CPU (build 5 ms + factor 17 ms).
           Small relative to the four RHS FFT evaluations at 128^3, but
           not free. See Issue #139 for the caching follow-up.
-        - IMEX evaluates `_krmhd_rhs_jit` 4 times per step (2 real k_z for
+        - IMEX calls `_krmhd_rhs_jit` 4 times per step (2 real k_z for
           the Elsasser midpoint + 2 k_z=0 for the IMEX nonlinear stages).
-          Issue #141 tracks dropping IMEX to 2 by deriving N from `rhs_*.g`
-          and the already-computed `L*g` mat-vec.
+          XLA drops the unused half of each call, so the compiled step
+          evaluates the Hermite RHS twice: 6 FFTs per moment (Issue #141).
         - lawson_rk4 evaluates the Elsasser RHS twice and advances g in the
           eigenbasis of T (Issue #184): 4 stages of 3 FFTs per slice,
           batched over all slices, plus one projection onto the slices and

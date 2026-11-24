@@ -2361,7 +2361,7 @@ def hermite_flux(state: KRMHDState) -> Array:
               Negative flux → phase unmixing (energy flows back to lower m)
 
     Physics:
-        The hierarchy evolved by physics.g0_rhs/g1_rhs/gm_rhs couples
+        The hierarchy evolved by physics.g_rhs couples
         moments m and m+1 through √βᵢ·√((m+1)/2)·∇∥ (with the (1 - 1/Λ)
         factor on the g₁ ← g₀ link). The free energy
         W = ½[(1 - 1/Λ)|g₀|² + Σ_{m≥1} |gₘ|²] then obeys, per moment,

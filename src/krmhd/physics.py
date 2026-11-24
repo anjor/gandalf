@@ -19,6 +19,7 @@ from functools import partial
 from typing import Optional, Dict
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
@@ -36,7 +37,7 @@ from krmhd.spectral import (
     enforce_hermitian,
     _rfft_paired_planes,
 )
-from krmhd.hermite import closure_symmetric, closure_zero
+from krmhd.hermite import compute_streaming_matrix
 
 
 class KRMHDState(BaseModel):
@@ -927,83 +928,8 @@ def z_minus_rhs(
 # =============================================================================
 
 
-@partial(jax.jit, static_argnums=(8, 9, 10))
-def g0_rhs(
-    g: Array,
-    z_plus: Array,
-    z_minus: Array,
-    kx: Array,
-    ky: Array,
-    kz: Array,
-    dealias_mask: Array,
-    beta_i: float,
-    Nz: int,
-    Ny: int,
-    Nx: int,
-) -> Array:
-    """
-    Compute RHS for zeroth Hermite moment: dg₀/dt + √βᵢ∇∥(g₁/√2) = 0.
-
-    This implements thesis Eq. 2.7 for the density perturbation moment.
-    g₀ is the density moment of the ion compressive distribution G±.
-
-    The full equation including convective derivatives (Eq. 2.10) is:
-        [∂/∂t + {Φ,...}]g₀ + √βᵢ[∂/∂z + {Ψ,...}](g₁/√2) = 0
-
-    Moving to RHS form:
-        ∂g₀/∂t = -{Φ, g₀} - √βᵢ·∂(g₁/√2)/∂z - √βᵢ·{Ψ, g₁/√2}
-
-    Where:
-        Φ = (ξ⁺ + ξ⁻)/2 = stream function (same as φ)
-        Ψ = (ξ⁺ - ξ⁻)/2 = parallel vector potential (same as A∥)
-
-    Args:
-        g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
-        z_plus: Elsasser z⁺ field
-        z_minus: Elsasser z⁻ field
-        kx, ky, kz: Wavenumber arrays
-        dealias_mask: 2/3 dealiasing mask
-        beta_i: Ion plasma beta β_i = 8πn_i T_i / B₀²
-        Nz, Ny, Nx: Grid dimensions (static)
-
-    Returns:
-        Time derivative ∂g₀/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
-
-    Reference:
-        Thesis §2.2, Eq. 2.7
-    """
-    # Extract g₀ and g₁ from moment array
-    g0 = g[:, :, :, 0]
-    g1 = g[:, :, :, 1]
-
-    # Compute Φ = (z⁺ + z⁻)/2 and Ψ = (z⁺ - z⁻)/2
-    phi = (z_plus + z_minus) / 2.0
-    psi = (z_plus - z_minus) / 2.0
-
-    # Term 1: -{Φ, g₀} (perpendicular advection)
-    bracket_phi_g0 = poisson_bracket_3d(phi, g0, kx, ky, Nz, Ny, Nx, dealias_mask)
-
-    # Term 2: -√βᵢ·∂(g₁/√2)/∂z = -√(βᵢ/2)·∂g₁/∂z (parallel streaming)
-    parallel_grad_g1 = derivative_z(g1, kz)
-    term2 = jnp.sqrt(beta_i / 2.0) * parallel_grad_g1
-
-    # Term 3: -√βᵢ·{Ψ, g₁/√2} = -√(βᵢ/2)·{Ψ, g₁} (field line advection)
-    bracket_psi_g1 = poisson_bracket_3d(psi, g1, kx, ky, Nz, Ny, Nx, dealias_mask)
-    term3 = jnp.sqrt(beta_i / 2.0) * bracket_psi_g1
-
-    # Assemble RHS and defensively reproject after the linear combination.
-    # Each Poisson bracket is already dealiased individually, but the sum can
-    # pick up tiny out-of-band round-off that should not accumulate over long runs.
-    rhs = (-bracket_phi_g0 - term2 - term3) * dealias_mask
-
-    # Zero out k=0 mode
-    rhs = zero_k0_mode(rhs)
-
-    return rhs
-
-
-@partial(jax.jit, static_argnums=(9, 10, 11))
-def g1_rhs(
+@partial(jax.jit, static_argnames=("Nz", "Ny", "Nx", "closure"))
+def g_rhs(
     g: Array,
     z_plus: Array,
     z_minus: Array,
@@ -1016,171 +942,99 @@ def g1_rhs(
     Nz: int,
     Ny: int,
     Nx: int,
-) -> Array:
-    """
-    Compute RHS for first Hermite moment: dg₁/dt + √βᵢ∇∥(g₂ + (1-1/Λ)/√2·g₀) = 0.
-
-    This implements thesis Eq. 2.8 for the parallel velocity moment.
-    g₁ is the parallel-velocity moment of the ion compressive distribution G±.
-
-    The (1-1/Λ) term couples g₁ back to g₀, representing kinetic corrections.
-
-    The full equation is:
-        ∂g₁/∂t = -{Φ, g₁} - √βᵢ·∂/∂z[g₂ + (1-1/Λ)/√2·g₀] - √βᵢ·{Ψ, g₂ + (1-1/Λ)/√2·g₀}
-
-    Args:
-        g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
-            Must contain at least 3 moments (M ≥ 2) to access g₀, g₁, g₂.
-        z_plus: Elsasser z⁺ field
-        z_minus: Elsasser z⁻ field
-        kx, ky, kz: Wavenumber arrays
-        dealias_mask: 2/3 dealiasing mask
-        beta_i: Ion plasma beta
-        Lambda: Kinetic parameter Λ appearing in (1-1/Λ) factor
-        Nz, Ny, Nx: Grid dimensions (static)
-
-    Returns:
-        Time derivative ∂g₁/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
-
-    Reference:
-        Thesis §2.2, Eq. 2.8
-    """
-    # Extract g₀, g₁, g₂ from moment array
-    g0 = g[:, :, :, 0]
-    g1 = g[:, :, :, 1]
-    g2 = g[:, :, :, 2]
-
-    # Compute Φ and Ψ
-    phi = (z_plus + z_minus) / 2.0
-    psi = (z_plus - z_minus) / 2.0
-
-    # Compute combined term: g₂ + (1-1/Λ)/√2·g₀
-    coupling_factor = (1.0 - 1.0 / Lambda) / jnp.sqrt(2.0)
-    combined_term = g2 + coupling_factor * g0
-
-    # Term 1: -{Φ, g₁} (perpendicular advection)
-    bracket_phi_g1 = poisson_bracket_3d(phi, g1, kx, ky, Nz, Ny, Nx, dealias_mask)
-
-    # Term 2: -√βᵢ·∂/∂z[combined_term] (parallel streaming)
-    parallel_grad_combined = derivative_z(combined_term, kz)
-    term2 = jnp.sqrt(beta_i) * parallel_grad_combined
-
-    # Term 3: -√βᵢ·{Ψ, combined_term} (field line advection)
-    bracket_psi_combined = poisson_bracket_3d(psi, combined_term, kx, ky, Nz, Ny, Nx, dealias_mask)
-    term3 = jnp.sqrt(beta_i) * bracket_psi_combined
-
-    # Assemble RHS and defensively reproject after the linear combination.
-    rhs = (-bracket_phi_g1 - term2 - term3) * dealias_mask
-
-    # Zero out k=0 mode
-    rhs = zero_k0_mode(rhs)
-
-    return rhs
-
-
-@partial(jax.jit, static_argnums=(7, 9, 10, 11), static_argnames=("closure",))
-def gm_rhs(
-    g: Array,
-    z_plus: Array,
-    z_minus: Array,
-    kx: Array,
-    ky: Array,
-    kz: Array,
-    dealias_mask: Array,
-    m: int,
-    beta_i: float,
-    Nz: int,
-    Ny: int,
-    Nx: int,
     closure: str = "zero",
 ) -> Array:
     """
-    Compute RHS for higher Hermite moments (m ≥ 2):
-        dgₘ/dt + √βᵢ∇∥[√((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁] = 0
+    Right-hand side of the Hermite hierarchy for all moments (thesis Eqs. 2.7-2.10).
 
-    This implements thesis Eq. 2.9 for the kinetic cascade in velocity space.
-    The parallel streaming couples each moment to its neighbors (m-1 and m+1),
-    representing phase mixing in the parallel velocity coordinate.
+        ∂gₘ/∂t = -{Φ, gₘ} - √βᵢ·(∂/∂z + {Ψ, ·})(T g)ₘ
 
-    Note: Collisions are handled by the exponential step in the timestepper
-    (not in the RHS), matching the treatment of resistive dissipation.
+    with Φ = (ξ⁺ + ξ⁻)/2, Ψ = (ξ⁺ - ξ⁻)/2 and T the tridiagonal streaming matrix
+    of hermite.compute_streaming_matrix(M, Λ, closure):
+        (T g)₀ = g₁/√2
+        (T g)₁ = g₂ + (1 - 1/Λ)/√2·g₀
+        (T g)ₘ = √((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁       (m ≥ 2)
+    The closure supplies the unretained gₘ₊₁ at m = M: 0 ("zero") or gₘ₋₁
+    ("symmetric"). It enters both the streaming term and the {Ψ, ·}
+    field-line part of ∇∥. At M = 1 the zero closure gives
+    (T g)₁ = (1 - 1/Λ)/√2·g₀ (Issue #193). Collisions are not included; the
+    timestepper applies them.
 
-    The full equation is:
-        ∂gₘ/∂t = -{Φ, gₘ}
-                 - √βᵢ·∂/∂z[√((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁]
-                 - √βᵢ·{Ψ, √((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁}
+    Cost: ∂x gₘ and ∂y gₘ go to real space once per moment (2 inverse FFTs).
+    T acts on the moment index and the gradient on space, so
+    ∇(T g)ₘ = T[m,m+1]·∇gₘ₊₁ + T[m,m-1]·∇gₘ₋₁ is formed in real space from the
+    neighbouring moments, and the two brackets of a moment are summed before
+    one forward FFT. That is 3 FFTs per moment plus 4 for the gradients of Φ
+    and Ψ, and each transform covers all moments in one batched FFT call.
 
     Args:
-        g: Hermite moment array (shape: [Nz, Ny, Nx//2+1, M+1])
-            Must contain at least m+1 moments (M ≥ m) for interior moments.
-            For highest moment M, use with appropriate closure (see Issue #24).
-        z_plus: Elsasser z⁺ field
-        z_minus: Elsasser z⁻ field
+        g: Hermite moments in Fourier space [Nz, Ny, Nx//2+1, M+1]
+        z_plus, z_minus: Elsasser fields in Fourier space [Nz, Ny, Nx//2+1]
         kx, ky, kz: Wavenumber arrays
-        dealias_mask: 2/3 dealiasing mask
-        m: Moment index (2 ≤ m < M for interior moments, m = M requires closure)
+        dealias_mask: 2/3 dealiasing mask [Nz, Ny, Nx//2+1]
         beta_i: Ion plasma beta
+        Lambda: Kinetic parameter Λ in T[1,0] = (1 - 1/Λ)/√2
         Nz, Ny, Nx: Grid dimensions (static)
-        closure: Closure for the unretained gₘ₊₁ at m = M (static):
-            - "zero" (default): gₘ₊₁ = 0 (krmhd.hermite.closure_zero)
-            - "symmetric": gₘ₊₁ = gₘ₋₁ (krmhd.hermite.closure_symmetric)
-            The closure enters both the streaming and the {Ψ, ·} field-line
-            advection terms. Use krmhd.hermite.check_hermite_convergence(g) to
-            verify the truncation is valid.
+        closure: "zero" (default) or "symmetric" (static; requires M ≥ 2)
 
     Returns:
-        Time derivative ∂gₘ/∂t in Fourier space (shape: [Nz, Ny, Nx//2+1])
-
-    Warning:
-        The closure matters only when gₘ is not negligible; with collisional
-        damping and sufficiently large M the two closures should agree.
+        ∂g/∂t [Nz, Ny, Nx//2+1, M+1], projected onto the 2/3 band, with the
+        k = 0 mode of every moment set to zero.
 
     Reference:
-        Thesis §2.2, Eq. 2.9
+        Thesis §2.2, Eqs. 2.7-2.10
     """
-    # Extract gₘ, gₘ₋₁ from moment array
-    gm = g[:, :, :, m]
-    gm_minus = g[:, :, :, m - 1]
+    M = g.shape[-1] - 1
+    real_dtype = jnp.finfo(g.dtype).dtype
 
-    # Extract gₘ₊₁ with boundary handling
-    # Since m is static_argnums, Python conditionals are fine (evaluated at compile time)
-    M = g.shape[3] - 1  # Maximum moment index
-    if m + 1 <= M:
-        gm_plus = g[:, :, :, m + 1]
-    elif closure == "symmetric":
-        gm_plus = closure_symmetric(g, M)
-    else:
-        gm_plus = closure_zero(g, M)
+    # Only T[1,0] depends on Λ, which is traced here: take T at Λ = 1, where
+    # T[1,0] = 0, and set that entry from Λ.
+    T = compute_streaming_matrix(M, 1.0, closure)
+    t_up = jnp.asarray(np.append(np.diag(T, 1), 0.0), dtype=real_dtype)  # T[m, m+1]
+    t_dn = jnp.asarray(np.insert(np.diag(T, -1), 0, 0.0), dtype=real_dtype)  # T[m, m-1]
+    if M >= 1:
+        t_dn = t_dn.at[1].set((1.0 - 1.0 / Lambda) / jnp.sqrt(2.0))
+    t_up = t_up[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
+    t_dn = t_dn[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
 
-    # Compute Φ and Ψ
+    def apply_T(f: Array) -> Array:
+        """(T f)ₘ along the leading moment axis of f."""
+        pad = jnp.zeros_like(f[:1])
+        f_up = jnp.concatenate([f[1:], pad])  # fₘ₊₁
+        f_dn = jnp.concatenate([pad, f[:-1]])  # fₘ₋₁
+        return t_up * f_up + t_dn * f_dn
+
+    def to_real(field_fourier: Array) -> Array:
+        """Inverse rfft over the last three axes (any leading batch axis)."""
+        return jnp.fft.irfftn(field_fourier, s=(Nz, Ny, Nx), axes=(-3, -2, -1))
+
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
     phi = (z_plus + z_minus) / 2.0
     psi = (z_plus - z_minus) / 2.0
+    dphi_dx = to_real(1j * kx_3d * phi)
+    dphi_dy = to_real(1j * ky_3d * phi)
+    dpsi_dx = to_real(1j * kx_3d * psi)
+    dpsi_dy = to_real(1j * ky_3d * psi)
 
-    # Compute Hermite recurrence coupling:
-    # √((m+1)/2)·gₘ₊₁ + √(m/2)·gₘ₋₁
-    coeff_plus = jnp.sqrt((m + 1) / 2.0)
-    coeff_minus = jnp.sqrt(m / 2.0)
-    coupled_term = coeff_plus * gm_plus + coeff_minus * gm_minus
+    # Moment-major [M+1, Nz, Ny, Nx//2+1]: each moment is a contiguous 3D field.
+    g_mm = jnp.moveaxis(g, -1, 0)
+    dg_dx = to_real(1j * kx_3d * g_mm)
+    dg_dy = to_real(1j * ky_3d * g_mm)
 
-    # Term 1: -{Φ, gₘ} (perpendicular advection)
-    bracket_phi_gm = poisson_bracket_3d(phi, gm, kx, ky, Nz, Ny, Nx, dealias_mask)
+    sqrt_beta = jnp.sqrt(beta_i)
+    # {Φ, gₘ} + √βᵢ·{Ψ, (T g)ₘ}, with {f, h} = ∂x f·∂y h - ∂y f·∂x h
+    brackets = (
+        dphi_dx * dg_dy
+        - dphi_dy * dg_dx
+        + sqrt_beta * (dpsi_dx * apply_T(dg_dy) - dpsi_dy * apply_T(dg_dx))
+    )
+    streaming = sqrt_beta * (1j * kz_3d) * apply_T(g_mm)
 
-    # Term 2: -√βᵢ·∂/∂z[coupled_term] (parallel streaming)
-    parallel_grad_coupled = derivative_z(coupled_term, kz)
-    term2 = jnp.sqrt(beta_i) * parallel_grad_coupled
-
-    # Term 3: -√βᵢ·{Ψ, coupled_term} (field line advection)
-    bracket_psi_coupled = poisson_bracket_3d(psi, coupled_term, kx, ky, Nz, Ny, Nx, dealias_mask)
-    term3 = jnp.sqrt(beta_i) * bracket_psi_coupled
-
-    # Assemble RHS and defensively reproject after the linear combination.
-    # Collisions are handled by the exponential step in the timestepper.
-    rhs = (-bracket_phi_gm - term2 - term3) * dealias_mask
-
-    # Zero out k=0 mode
-    rhs = zero_k0_mode(rhs)
-
-    return rhs
+    rhs = -(jnp.fft.rfftn(brackets, axes=(-3, -2, -1)) + streaming) * dealias_mask
+    rhs = rhs.at[:, 0, 0, 0].set(0.0)
+    return jnp.moveaxis(rhs, 0, -1)
 
 
 # =============================================================================
