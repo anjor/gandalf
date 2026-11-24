@@ -52,13 +52,13 @@ from krmhd.config import (
     orszag_tang_config,
 )
 from krmhd import (
-    gandalf_step,
     compute_cfl_timestep,
     energy as compute_energy,
-    force_alfven_modes,
     KRMHDState,
     SpectralGrid3D,
 )
+from krmhd.forcing import WhiteNoiseBand
+from krmhd.runloop import CflDt, DeviceLoop, FixedDt, Forcing, RunConfig, StepParams
 from krmhd.diagnostics import (
     EnergyHistory,
     energy_spectrum_1d,
@@ -112,6 +112,14 @@ def _save_resume_point(state: KRMHDState, history: EnergyHistory, config: Simula
     return path
 
 
+def _forcing_modes(config: SimulationConfig, grid: SpectralGrid3D) -> tuple[int, int]:
+    """The forcing band's integer mode numbers n = k·L_min/2π (Issue #97), at least one mode."""
+    L_min = min(grid.Lx, grid.Ly, grid.Lz)
+    n_min = max(1, int(np.round(config.forcing.k_min * L_min / (2 * np.pi))))
+    n_max = max(n_min, int(np.round(config.forcing.k_max * L_min / (2 * np.pi))))
+    return n_min, n_max
+
+
 def run_simulation(
     config: SimulationConfig,
     verbose: bool = True,
@@ -128,7 +136,8 @@ def run_simulation(
             (state, step, time, dt, forcing key and energy history); start a new run if
             there is none. The output directory may then be non-empty.
         max_wall_hours: Once this call has run this long, checkpoint the state and raise
-            SimulationPaused, so that the run can be continued with resume=True.
+            SimulationPaused, so that the run can be continued with resume=True. The
+            wall time is checked between chunks, i.e. at sample and checkpoint steps.
 
     Returns:
         tuple: (final_state, energy_history, grid)
@@ -158,11 +167,7 @@ def run_simulation(
         key = jr.PRNGKey(config.forcing.seed or 42)
         if verbose:
             # Show both physical wavenumbers and mode numbers for clarity
-            L_min = min(grid.Lx, grid.Ly, grid.Lz)
-            n_min = int(np.round(config.forcing.k_min * L_min / (2 * np.pi)))
-            n_max = int(np.round(config.forcing.k_max * L_min / (2 * np.pi)))
-            n_min = max(1, n_min)
-            n_max = max(n_min, n_max)
+            n_min, n_max = _forcing_modes(config, grid)
             print(f"✓ Forcing enabled: k ∈ [{config.forcing.k_min:.2f}, {config.forcing.k_max:.2f}], modes n ∈ [{n_min}, {n_max}]")
     else:
         key = None
@@ -222,16 +227,18 @@ def run_simulation(
         print("Time evolution:")
         print("-" * 70)
 
-    # Determine timestep
+    # Time step: the fixed dt, or the CFL estimate re-evaluated after every step
+    # on the device (a run forced from rest must shorten dt as it spins up)
+    physics = config.physics
     if config.time_integration.dt_fixed is not None:
         dt = config.time_integration.dt_fixed
 
         # Validate fixed timestep against CFL
         dt_cfl = compute_cfl_timestep(
             state,
-            v_A=config.physics.v_A,
+            v_A=physics.v_A,
             cfl_safety=config.time_integration.cfl_safety,
-            closure=config.physics.closure,
+            closure=physics.closure,
         )
 
         # Error on severe CFL violations (>10× CFL limit)
@@ -254,92 +261,84 @@ def run_simulation(
 
         if verbose:
             print(f"Using fixed timestep: dt = {dt:.6e} (CFL suggests {dt_cfl:.6e})")
+        dt_policy = FixedDt(dt)
     else:
-        dt = compute_cfl_timestep(
-            state,
-            v_A=config.physics.v_A,
-            cfl_safety=config.time_integration.cfl_safety,
-            closure=config.physics.closure,
-        )
-        if verbose:
-            print(f"CFL timestep: dt = {dt:.6e}")
-    if dt_resumed is not None:
-        dt = float(dt_resumed)  # the run's own timestep, not the CFL step of the resumed state
+        dt_policy = CflDt(config.time_integration.cfl_safety)
 
-    # Main loop
+    forcing = Forcing()
+    if config.forcing.enabled:
+        forcing = Forcing(alfven=WhiteNoiseBand(config.forcing.amplitude, *_forcing_modes(config, grid)))
+
+    # config.physics.nu overrides state.nu, as in gandalf_step
+    step_params = StepParams(
+        eta=physics.eta,
+        v_A=physics.v_A,
+        nu=physics.nu,
+        hyper_r=physics.hyper_r,
+        hyper_n=physics.hyper_n,
+        eta_z=physics.eta_z,
+        hyper_rz=physics.hyper_rz,
+        closure=physics.closure,
+    )
+    # A resumed run starts with the dt it saved: the next step of the interrupted run
+    loop = DeviceLoop(
+        state,
+        RunConfig(step=step_params, dt=dt_policy, forcing=forcing),
+        key=key,
+        dt=None if dt_resumed is None else float(dt_resumed),
+        steps=step0,
+    )
+    if verbose and config.time_integration.dt_fixed is None:
+        print(f"CFL timestep, re-evaluated every step: initial dt = {float(loop.dt):.6e}")
+
+    # Main loop: the steps between two sample or checkpoint steps run on the device
+    # as one chunk; the host syncs, saves and checks the wall time between chunks.
     start_time = time.time()
     n_steps = config.time_integration.n_steps
+    save_interval = config.time_integration.save_interval
+    checkpoint_interval = config.time_integration.checkpoint_interval
 
-    for step in range(step0, n_steps):
-        # Apply forcing if enabled
-        if config.forcing.enabled:
-            # Convert physical wavenumbers to integer mode numbers (Issue #97)
-            # k = 2πn/L_min, so n = k*L_min/(2π)
-            L_min = min(grid.Lx, grid.Ly, grid.Lz)
-            n_min = int(np.round(config.forcing.k_min * L_min / (2 * np.pi)))
-            n_max = int(np.round(config.forcing.k_max * L_min / (2 * np.pi)))
-
-            # Ensure at least one mode
-            n_min = max(1, n_min)
-            n_max = max(n_min, n_max)
-
-            state, key = force_alfven_modes(
-                state,
-                amplitude=config.forcing.amplitude,
-                n_min=n_min,
-                n_max=n_max,
-                dt=dt,
-                key=key
-            )
-
-        # Time step
-        # Note: config.physics.nu provides runtime control of collision frequency
-        # gandalf_step uses config.physics.nu if provided, otherwise defaults to state.nu
-        # This avoids needing to recreate state when changing collision parameters
-        state = gandalf_step(
-            state,
-            dt=dt,
-            eta=config.physics.eta,
-            v_A=config.physics.v_A,
-            nu=config.physics.nu,
-            hyper_r=config.physics.hyper_r,
-            hyper_n=config.physics.hyper_n,
-            eta_z=config.physics.eta_z,
-            hyper_rz=config.physics.hyper_rz,
-            closure=config.physics.closure,
-        )
-        t += dt
+    step = step0
+    while step < n_steps:
+        stop = min(n_steps, (step // save_interval + 1) * save_interval)
+        if checkpoint_interval is not None:
+            stop = min(stop, (step // checkpoint_interval + 1) * checkpoint_interval)
+        loop.advance(stop - step)
+        step = stop
+        state = loop.state  # valid until the next advance()
+        t = state.time
 
         # Save diagnostics
-        if (step + 1) % config.time_integration.save_interval == 0:
+        if step % save_interval == 0:
             energy_history.append(state)
             E = compute_energy(state)
 
             if verbose:
                 mag_frac = E['magnetic'] / E['total'] if E['total'] > 0 else 0
                 print(
-                    f"  Step {step+1:5d}/{config.time_integration.n_steps}: "
-                    f"t = {t:.4f}, E = {E['total']:.6e}, "
+                    f"  Step {step:5d}/{n_steps}: "
+                    f"t = {t:.4f}, dt = {float(loop.dt):.3e}, E = {E['total']:.6e}, "
                     f"E_mag/E_tot = {mag_frac:.3f}"
                 )
 
         # Save checkpoint if enabled
-        saved = (config.time_integration.checkpoint_interval is not None and
-                 (step + 1) % config.time_integration.checkpoint_interval == 0)
+        saved = checkpoint_interval is not None and step % checkpoint_interval == 0
         if saved:
             checkpoint_file = _save_resume_point(state, energy_history, config, output_dir,
-                                                 step + 1, t, dt, key)
+                                                 step, t, float(loop.dt), loop.key)
             if verbose:
                 print(f"    ✓ Saved checkpoint: {checkpoint_file.name}")
 
-        # Pause at the wall-time budget; the same command with --resume continues
-        if (max_wall_hours is not None and step + 1 < n_steps
+        # Pause at the wall-time budget (checked between chunks); the same command
+        # with --resume continues
+        if (max_wall_hours is not None and step < n_steps
                 and time.time() - start_time >= 3600 * max_wall_hours):
             if not saved:
-                _save_resume_point(state, energy_history, config, output_dir, step + 1, t, dt, key)
-            print(f"paused at t = {t:.6f}, step {step + 1}, after {max_wall_hours:g} h of wall time; "
+                _save_resume_point(state, energy_history, config, output_dir, step, t,
+                                   float(loop.dt), loop.key)
+            print(f"paused at t = {t:.6f}, step {step}, after {max_wall_hours:g} h of wall time; "
                   "continue with --resume", flush=True)
-            raise SimulationPaused(t, step + 1)
+            raise SimulationPaused(t, step)
 
     elapsed = time.time() - start_time
 

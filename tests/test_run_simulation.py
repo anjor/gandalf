@@ -397,3 +397,24 @@ class TestPauseResume:
         monkeypatch.setattr(sys, "argv", argv)
         cli.main()  # resumes and finishes
         assert (out / "final_state.h5").exists()
+
+
+class TestAdaptiveTimestep:
+    """Without dt_fixed, dt is the CFL estimate re-evaluated after every step (Issue #188)."""
+
+    def test_forced_run_from_rest_shortens_dt(self, tmp_path):
+        from krmhd.config import ForcingConfig, InitialConditionConfig
+        from krmhd.io import load_checkpoint
+
+        config = decaying_turbulence_config(
+            grid=GridConfig(Nx=8, Ny=8, Nz=8),
+            initial_condition=InitialConditionConfig(type="zero", M=4),
+            time_integration=TimeIntegrationConfig(n_steps=6, save_interval=3, checkpoint_interval=3),
+            io=IOConfig(output_dir=str(tmp_path)),
+            forcing=ForcingConfig(enabled=True, amplitude=5.0, k_min=1.0, k_max=3.0, seed=0),
+        )
+        run_simulation(config, verbose=False)
+
+        dt_at_rest = config.time_integration.cfl_safety * (2 * np.pi / 8) / config.physics.v_A
+        dts = [load_checkpoint(str(tmp_path / f"checkpoint_step{n:06d}.h5"))[2]["dt"] for n in (3, 6)]
+        assert dts[1] < dts[0] < dt_at_rest

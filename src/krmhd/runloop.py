@@ -209,7 +209,7 @@ class RunState(NamedTuple):
     fields: KRMHDFields  # time is a device scalar here
     key: Optional[Array]  # PRNG key; None without forcing
     dt: Array  # step size of the next step
-    steps: Array  # steps taken since DeviceLoop was built (int32)
+    steps: Array  # steps taken in the run (int32)
 
 
 @dataclass(frozen=True)
@@ -355,6 +355,10 @@ class DeviceLoop:
         config: Scheme, physics, dt policy, forcing and accounting of the run.
         key: PRNG key of the forcing; required when config.forcing is enabled.
             The loop copies it, so the caller's key stays valid.
+        dt: Step size of the first step. Default: config.dt's (the fixed dt, or
+            the estimate on `state`). A resumed run passes the dt it saved.
+        steps: Steps already taken, for a resumed run: an adaptive policy then
+            re-evaluates dt on the same steps as an uninterrupted run.
 
     Raises:
         ValueError: As gandalf_step for the step parameters (checked once, with
@@ -362,7 +366,14 @@ class DeviceLoop:
             outside 0..M.
     """
 
-    def __init__(self, state: KRMHDState, config: RunConfig, key: Optional[Array] = None):
+    def __init__(
+        self,
+        state: KRMHDState,
+        config: RunConfig,
+        key: Optional[Array] = None,
+        dt: Optional[float] = None,
+        steps: int = 0,
+    ):
         step = config.step
         nu = state.nu if step.nu is None else step.nu
         forcing = config.forcing
@@ -390,7 +401,9 @@ class DeviceLoop:
             Lambda=state.Lambda, grid=state.grid,
         )
 
-        if isinstance(config.dt, FixedDt):
+        if dt is not None:
+            dt0 = dt
+        elif isinstance(config.dt, FixedDt):
             dt0 = config.dt.dt
         else:
             dt0 = config.dt.estimate(
@@ -418,7 +431,7 @@ class DeviceLoop:
             ),
             key=None if key is None else jnp.copy(key),  # the caller keeps its key
             dt=jnp.asarray(dt0, dtype=real),
-            steps=jnp.zeros((), dtype=jnp.int32),
+            steps=jnp.asarray(steps, dtype=jnp.int32),
         )
 
     def advance(self, n_steps: int) -> Any:
