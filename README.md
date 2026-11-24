@@ -1177,7 +1177,7 @@ The code includes validation against:
   - Multiple initialization functions (Alfvén waves, turbulent spectra)
   - Energy conservation: 0.0086% error (Issue #44 resolved!)
 - **Kinetic physics** (Issues #22-24, #49): Hermite moment hierarchy
-  - g0_rhs(), g1_rhs(), gm_rhs() implement full kinetic coupling
+  - g_rhs() implements full kinetic coupling for all moments
   - Lenard-Bernstein collision operator: C[gm] = -νmgm
   - Hermite moment closures (truncation, ready for advanced)
 - **Time integration** (Issues #8, #47): GANDALF integrating factor + RK2

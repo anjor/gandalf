@@ -98,7 +98,7 @@ def _hermite_advection(
 
     Built from poisson_bracket_3d and the matrix T, so it is defined for every
     M including M = 1, and is independent of the slice code. Dealiased, with
-    the k = 0 mode set to zero, like g0_rhs, g1_rhs and gm_rhs.
+    the k = 0 mode set to zero, like physics.g_rhs.
     """
     Nz, Ny, Nx = grid.Nz, grid.Ny, grid.Nx
     phi = (z_plus + z_minus) / 2.0
@@ -233,14 +233,15 @@ STEP = dict(dt=3e-3, eta=2.0, hyper_r=2, hyper_rz=2)
 
 
 @pytest.mark.parametrize("M,Lambda,closure", [
+    (1, 2.0, "zero"),
     (2, math.sqrt(5.0), "zero"),
     (3, 1.7, "symmetric"),
     (8, 1.0, "zero"),
     (11, 39.1, "symmetric"),
 ])
 def test_reference_advection_matches_gandalf_rhs(M, Lambda, closure):
-    """The reference's explicit term, built from T, equals GANDALF's moment-by-moment
-    Hermite RHS with k_z = 0 (g0_rhs, g1_rhs, gm_rhs) for M ≥ 2."""
+    """The reference's explicit term, built from T, equals GANDALF's Hermite RHS
+    (physics.g_rhs) with k_z = 0, including M = 1 (Issue #193)."""
     with enable_x64():
         grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=8)
         state = _random_state(grid, M, Lambda, 0.0, seed=20 + M)

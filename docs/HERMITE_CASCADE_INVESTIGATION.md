@@ -293,7 +293,7 @@ uv run python examples/benchmarks/hermite_cascade_benchmark.py \
 - Slope ~ -0.5
 
 ### 2. Compare Hermite RHS Implementation (Priority 2)
-Verify that our Hermite moment equations (g0_rhs, g1_rhs, gm_rhs) exactly match thesis Eqs. 3.26-3.28, including:
+Verify that our Hermite moment equations (g_rhs) exactly match thesis Eqs. 3.26-3.28, including:
 - Coupling coefficients (√(m+1)/2, √(m/2))
 - Kinetic parameter (1-1/Λ) = (1+α)
 - Parallel streaming ∂/∂z operators

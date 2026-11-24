@@ -301,46 +301,14 @@ class TestHermiteConvergence:
 class TestClosurePhysicsValidation:
     """Test that closures give consistent results with finite collisions."""
 
-    def test_gm_rhs_with_different_closures_no_collisions(self):
-        """Test gm_rhs with different closures gives different results when ν=0."""
-        from krmhd.physics import gm_rhs
+    def test_g_rhs_no_collision_term(self):
+        """The Hermite RHS has no collision damping.
 
-        grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
-        M = 10
-
-        # Create non-trivial moment field
-        key = jax.random.PRNGKey(42)
-        g = jax.random.normal(
-            key, (grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.float32
-        ).astype(jnp.complex64) * 0.01
-
-        z_plus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
-        z_minus = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1), dtype=jnp.complex64)
-
-        beta_i = 1.0
-        nu = 0.0  # No collisions
-
-        # Compute RHS for highest moment with implicit zero closure
-        rhs_M = gm_rhs(
-            g, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-            grid.dealias_mask, M, beta_i, grid.Nz, grid.Ny, grid.Nx
-        )
-
-        # With ν=0 and different closures (implicit in gm_rhs vs explicit),
-        # we expect coupling structure to differ
-        # This test documents current behavior: gm_rhs uses zero closure
-
-        # Just verify RHS is computed
-        assert rhs_M.shape == (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
-
-    def test_gm_rhs_no_collision_term(self):
-        """Test that gm_rhs does NOT include collision damping.
-
-        Collisions are now handled exclusively by the exponential step in the
-        timestepper (not in the RHS). This test verifies that with isolated
-        moments (gₘ = 1, all neighbors = 0, zero z±), gm_rhs returns zero.
+        Collisions are handled exclusively by the timestepper (not in the RHS).
+        With an isolated moment (gₘ = 1, all neighbours = 0, zero z±), its own
+        RHS is zero.
         """
-        from krmhd.physics import gm_rhs
+        from krmhd.physics import g_rhs
 
         grid = SpectralGrid3D.create(Nx=32, Ny=32, Nz=16)
         M = 10
@@ -350,18 +318,18 @@ class TestClosurePhysicsValidation:
 
         beta_i = 1.0
 
-        # Set only g[2] = 1, all neighbors zero → no streaming coupling
+        # Set only g[2] = 1, all neighbors zero → no streaming coupling into g_2
         g_m2 = jnp.zeros((grid.Nz, grid.Ny, grid.Nx // 2 + 1, M + 1), dtype=jnp.complex64)
         g_m2 = g_m2.at[4, 5, 6, 2].set(1.0 + 0.0j)
 
-        rhs_m2 = gm_rhs(
+        rhs_m2 = g_rhs(
             g_m2, z_plus, z_minus, grid.kx, grid.ky, grid.kz,
-            grid.dealias_mask, 2, beta_i, grid.Nz, grid.Ny, grid.Nx
-        )
+            grid.dealias_mask, beta_i, 1.5, grid.Nz, grid.Ny, grid.Nx
+        )[..., 2]
 
         # With no neighbors and no z±, RHS should be zero (no collision term)
         assert jnp.allclose(rhs_m2[4, 5, 6], 0.0, atol=1e-6), \
-            f"gm_rhs should be zero for isolated moment (no collision term), got {rhs_m2[4, 5, 6]}"
+            f"g_rhs should be zero for isolated moment (no collision term), got {rhs_m2[4, 5, 6]}"
 
 
 # ============================================================================
@@ -489,7 +457,7 @@ class TestClosureIntegration:
         g_evolved = g_init
 
         # Apply collision damping manually for moments m ≥ 2
-        # (in real timestepping this happens in gm_rhs)
+        # (in real timestepping the timestepper applies this)
         nu = 0.1  # Collision frequency
         dt = 0.01
 
@@ -557,9 +525,9 @@ class TestSelectableClosure:
         diff[M, M - 1] = 0.0
         assert np.all(diff == 0.0)
 
-    def test_gm_rhs_symmetric_matches_extended_hierarchy(self):
-        """gm_rhs(m=M, symmetric) == gm_rhs on an M+1 hierarchy with g_{M+1} := g_{M-1}."""
-        from krmhd.physics import gm_rhs, initialize_random_spectrum
+    def test_g_rhs_symmetric_matches_extended_hierarchy(self):
+        """g_rhs(symmetric) == g_rhs on an M+1 hierarchy with g_{M+1} := g_{M-1}, for every m <= M."""
+        from krmhd.physics import g_rhs, initialize_random_spectrum
 
         grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
         M = 5
@@ -569,15 +537,16 @@ class TestSelectableClosure:
              + 1j * jax.random.normal(key_im, state.g.shape)).astype(jnp.complex64)
         g = g * grid.dealias_mask[..., None]
         g_ext = jnp.concatenate([g, g[..., M - 1:M]], axis=-1)
-        args = (state.z_plus, state.z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask)
+        args = (state.z_plus, state.z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask, 1.0, 1.5,
+                grid.Nz, grid.Ny, grid.Nx)
 
-        rhs_sym = gm_rhs(g, *args, M, 1.0, grid.Nz, grid.Ny, grid.Nx, closure="symmetric")
-        rhs_ext = gm_rhs(g_ext, *args, M, 1.0, grid.Nz, grid.Ny, grid.Nx)
-        rhs_zero = gm_rhs(g, *args, M, 1.0, grid.Nz, grid.Ny, grid.Nx)
+        rhs_sym = g_rhs(g, *args, closure="symmetric")
+        rhs_ext = g_rhs(g_ext, *args)[..., : M + 1]
+        rhs_zero = g_rhs(g, *args)
 
-        scale = float(jnp.max(jnp.abs(rhs_ext)))
+        scale = float(jnp.max(jnp.abs(rhs_ext[..., M])))
         assert float(jnp.max(jnp.abs(rhs_sym - rhs_ext))) < 1e-5 * scale
-        assert float(jnp.max(jnp.abs(rhs_sym - rhs_zero))) > 1e-2 * scale
+        assert float(jnp.max(jnp.abs(rhs_sym[..., M] - rhs_zero[..., M]))) > 1e-2 * scale
 
     @pytest.mark.parametrize("closure", ["zero", "symmetric"])
     def test_lawson_pure_streaming_matches_expm(self, closure):

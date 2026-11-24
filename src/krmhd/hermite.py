@@ -33,7 +33,7 @@ moment truncation.
 
 Normalization: v = v∥/v_th with v_th = √(2T_i/m_i), so the Maxwellian weight is
 exp(-v∥²/v_th²) = exp(-v²). Each ψ_m carries half of it, exp(-v²/2). The
-streaming coefficients √((m+1)/2), √(m/2) in physics.gm_rhs follow from
+streaming coefficients √((m+1)/2), √(m/2) in physics.g_rhs follow from
 v·H_m = H_{m+1}/2 + m·H_{m-1} in this normalization. The least-damped
 eigenvalue of the hierarchy then converges to the root of Λ = 1 + ζZ(ζ).
 """
@@ -439,7 +439,7 @@ def closure_zero(g: Array, M: int) -> Array:
     (M+1)-th moment to zero. Valid when collision damping ensures gₘ is
     negligible (use check_hermite_convergence to verify).
 
-    This closure is what's currently hardcoded in gm_rhs() for the highest
+    This is the default closure of physics.g_rhs for the highest
     retained moment. With finite collisions ν > 0, high moments are damped,
     making this closure reasonable for sufficiently large M.
 
