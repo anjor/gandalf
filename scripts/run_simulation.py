@@ -16,6 +16,10 @@ Usage:
     # Run with custom output directory
     python scripts/run_simulation.py config.yaml --output-dir my_results
 
+    # Stop after 23 h of wall time (exit status 3), then continue from the latest
+    # checkpoint with the same command
+    python scripts/run_simulation.py config.yaml --resume --max-wall-hours 23
+
 Example:
     # Generate and customize config
     python scripts/run_simulation.py --template driven > my_config.yaml
@@ -24,11 +28,14 @@ Example:
 """
 
 import argparse
+import os
+import re
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 
@@ -60,11 +67,56 @@ from krmhd.diagnostics import (
     plot_energy_history,
     plot_energy_spectrum,
 )
-from krmhd.io import save_checkpoint, save_timeseries
+from krmhd.io import load_checkpoint, load_timeseries, save_checkpoint, save_timeseries
+
+# Exit status after --max-wall-hours: the state is checkpointed, continue with --resume
+PAUSED_EXIT = 3
+_CHECKPOINT_NAME = re.compile(r"checkpoint_step(\d+)\.h5")
+
+
+class SimulationPaused(Exception):
+    """run_simulation stopped at max_wall_hours; its state is in the latest checkpoint."""
+
+    def __init__(self, t: float, step: int):
+        super().__init__(f"paused at t = {t:.6f}, step {step}")
+        self.t = t
+        self.step = step
+
+
+def latest_checkpoint(output_dir: Path) -> Optional[Path]:
+    """The checkpoint_step<N>.h5 in `output_dir` with the largest N, if any."""
+    found = [(int(m.group(1)), p) for p in output_dir.glob("checkpoint_step*.h5")
+             if (m := _CHECKPOINT_NAME.fullmatch(p.name))]
+    return max(found)[1] if found else None
+
+
+def _save_resume_point(state: KRMHDState, history: EnergyHistory, config: SimulationConfig,
+                       output_dir: Path, step: int, t: float, dt: float, key: Any) -> Path:
+    """Write the checkpoint of `step`, and the energy history so far, for --resume.
+
+    Each file is written under a temporary name and renamed, so an interrupted write
+    never leaves a truncated checkpoint as the latest one.
+    """
+    path = output_dir / f"checkpoint_step{step:06d}.h5"
+    metadata = {'step': step, 'time': t, 'dt': dt, 'config_name': config.name,
+                'eta': config.physics.eta, 'nu': config.physics.nu}
+    if key is not None:
+        metadata['forcing_key'] = np.asarray(key)
+    tmp = output_dir / f".{path.name}.tmp"
+    save_checkpoint(state, str(tmp), metadata=metadata, overwrite=True)
+    os.replace(tmp, path)
+    if config.io.save_energy_history:
+        tmp = output_dir / ".energy_history.h5.tmp"
+        save_timeseries(history, str(tmp), metadata={'config_name': config.name}, overwrite=True)
+        os.replace(tmp, output_dir / "energy_history.h5")
+    return path
 
 
 def run_simulation(
-    config: SimulationConfig, verbose: bool = True
+    config: SimulationConfig,
+    verbose: bool = True,
+    resume: bool = False,
+    max_wall_hours: Optional[float] = None,
 ) -> tuple[KRMHDState, EnergyHistory, SpectralGrid3D]:
     """
     Run KRMHD simulation from configuration.
@@ -72,9 +124,17 @@ def run_simulation(
     Args:
         config: SimulationConfig instance
         verbose: Print progress information
+        resume: Continue from the latest checkpoint_step<N>.h5 in the output directory
+            (state, step, time, dt, forcing key and energy history); start a new run if
+            there is none. The output directory may then be non-empty.
+        max_wall_hours: Once this call has run this long, checkpoint the state and raise
+            SimulationPaused, so that the run can be continued with resume=True.
 
     Returns:
         tuple: (final_state, energy_history, grid)
+
+    Raises:
+        SimulationPaused: max_wall_hours ran out before the last step
     """
     if verbose:
         print(config.summary())
@@ -116,12 +176,42 @@ def run_simulation(
         print(f"✓ Initial energy: {E_init['total']:.6e}")
 
     # Prepare output directory
-    output_dir = config.get_output_dir()
+    if resume:
+        output_dir = Path(config.io.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        output_dir = config.get_output_dir()
     if verbose:
         print(f"✓ Output directory: {output_dir}")
 
     # Save initial configuration
     config.to_yaml(output_dir / "config.yaml")
+
+    # Continue from the latest checkpoint
+    step0, t, dt_resumed = 0, 0.0, None
+    checkpoint = latest_checkpoint(output_dir) if resume else None
+    if checkpoint is not None:
+        # The arrays as saved, so that the resumed run continues the same trajectory
+        loaded, _, meta = load_checkpoint(str(checkpoint), enforce_hermitian=False)
+        if (loaded.z_plus.shape, loaded.g.shape) != (state.z_plus.shape, state.g.shape):
+            raise ValueError(f"{checkpoint} does not match the config: z± {loaded.z_plus.shape}, "
+                             f"g {loaded.g.shape} vs {state.z_plus.shape}, {state.g.shape}")
+        state = loaded
+        step0, t, dt_resumed = int(meta['step']), float(meta['time']), meta.get('dt')
+        if key is not None and 'forcing_key' in meta:
+            key = jnp.asarray(meta['forcing_key'], dtype=jnp.uint32)
+        history_file = output_dir / "energy_history.h5"
+        if history_file.exists():
+            saved, _ = load_timeseries(str(history_file))
+            # history times are the states' own times, like that of the checkpoint
+            n = sum(1 for ti in saved.times if ti <= float(state.time))
+            energy_history = EnergyHistory(times=saved.times[:n], E_magnetic=saved.E_magnetic[:n],
+                                           E_kinetic=saved.E_kinetic[:n], E_total=saved.E_total[:n])
+        else:
+            energy_history = EnergyHistory()
+            energy_history.append(state)
+        if verbose:
+            print(f"✓ Resuming from {checkpoint.name}: step {step0}, t = {t:.4f}")
 
     # ==========================================================================
     # Time Evolution
@@ -173,12 +263,14 @@ def run_simulation(
         )
         if verbose:
             print(f"CFL timestep: dt = {dt:.6e}")
+    if dt_resumed is not None:
+        dt = float(dt_resumed)  # the run's own timestep, not the CFL step of the resumed state
 
     # Main loop
-    t = 0.0
     start_time = time.time()
+    n_steps = config.time_integration.n_steps
 
-    for step in range(config.time_integration.n_steps):
+    for step in range(step0, n_steps):
         # Apply forcing if enabled
         if config.forcing.enabled:
             # Convert physical wavenumbers to integer mode numbers (Issue #97)
@@ -232,29 +324,29 @@ def run_simulation(
                 )
 
         # Save checkpoint if enabled
-        if (config.time_integration.checkpoint_interval is not None and
-            (step + 1) % config.time_integration.checkpoint_interval == 0):
-            checkpoint_file = output_dir / f"checkpoint_step{step+1:06d}.h5"
-            save_checkpoint(
-                state,
-                str(checkpoint_file),
-                metadata={
-                    'step': step + 1,
-                    'time': t,
-                    'config_name': config.name,
-                    'eta': config.physics.eta,
-                    'nu': config.physics.nu,
-                }
-            )
+        saved = (config.time_integration.checkpoint_interval is not None and
+                 (step + 1) % config.time_integration.checkpoint_interval == 0)
+        if saved:
+            checkpoint_file = _save_resume_point(state, energy_history, config, output_dir,
+                                                 step + 1, t, dt, key)
             if verbose:
                 print(f"    ✓ Saved checkpoint: {checkpoint_file.name}")
+
+        # Pause at the wall-time budget; the same command with --resume continues
+        if (max_wall_hours is not None and step + 1 < n_steps
+                and time.time() - start_time >= 3600 * max_wall_hours):
+            if not saved:
+                _save_resume_point(state, energy_history, config, output_dir, step + 1, t, dt, key)
+            print(f"paused at t = {t:.6f}, step {step + 1}, after {max_wall_hours:g} h of wall time; "
+                  "continue with --resume", flush=True)
+            raise SimulationPaused(t, step + 1)
 
     elapsed = time.time() - start_time
 
     if verbose:
         print("-" * 70)
         print(f"✓ Evolution complete: {elapsed:.1f}s")
-        print(f"  Performance: {config.time_integration.n_steps / elapsed:.1f} steps/s")
+        print(f"  Performance: {(n_steps - step0) / elapsed:.1f} steps/s")
 
     # ==========================================================================
     # Final Diagnostics and Output
@@ -289,7 +381,8 @@ def run_simulation(
         if verbose:
             print(f"✓ Computed energy spectra")
 
-    # Save outputs
+    # Save outputs. overwrite=True: the folder was checked at the start (get_output_dir),
+    # or belongs to this run (resume), so existing files are this run's own checkpoints.
     if config.io.save_energy_history:
         # Use HDF5 format for energy history (Issue #13)
         save_timeseries(
@@ -300,7 +393,7 @@ def run_simulation(
                 'n_steps': config.time_integration.n_steps,
                 'save_interval': config.time_integration.save_interval,
             },
-            overwrite=config.io.overwrite
+            overwrite=True
         )
         if verbose:
             print(f"✓ Saved energy history (HDF5)")
@@ -324,7 +417,7 @@ def run_simulation(
                 'n_steps': config.time_integration.n_steps,
                 'total_time': state.time,
             },
-            overwrite=config.io.overwrite
+            overwrite=True
         )
         if verbose:
             print(f"✓ Saved final state (HDF5 checkpoint)")
@@ -447,6 +540,18 @@ Available templates:
         help='Suppress progress output'
     )
 
+    parser.add_argument(
+        '--resume',
+        action='store_true',
+        help='Continue from the latest checkpoint in the output directory (a new run if there is none)'
+    )
+
+    parser.add_argument(
+        '--max-wall-hours',
+        type=float,
+        help=f'Checkpoint and exit with status {PAUSED_EXIT} after this many hours; continue with --resume'
+    )
+
     args = parser.parse_args()
 
     # Template generation mode
@@ -481,7 +586,10 @@ Available templates:
 
     # Run simulation
     try:
-        run_simulation(config, verbose=not args.quiet)
+        run_simulation(config, verbose=not args.quiet, resume=args.resume,
+                       max_wall_hours=args.max_wall_hours)
+    except SimulationPaused:
+        sys.exit(PAUSED_EXIT)
     except Exception as e:
         print(f"Error running simulation: {e}", file=sys.stderr)
         import traceback

@@ -30,6 +30,8 @@ Usage:
     python scripts/modal_submit.py script --project-dir ../my-project \
         --include scripts,configs --script scripts/drive.py \
         --args "configs/run.yaml --out {output_dir}" --output-subdir my_run
+    # past the 24 h limit: a script that pauses (exit status 3) continues itself on Modal
+    python scripts/modal_submit.py script ... --max-segments 20
     # short tests, waiting for the result
     modal run modal_app.py::run_script --project-dir ../my-project --include scripts,configs \
         --script scripts/drive.py --args "configs/run.yaml --out {output_dir}"
@@ -81,6 +83,15 @@ SCRIPT_MEMORY_MB = int(os.environ.get("MODAL_SCRIPT_MEMORY_MB", 32768))
 # Volume name (can be overridden via environment variable)
 VOLUME_NAME = os.environ.get("MODAL_VOLUME_NAME", "gandalf-results")
 
+# Persistent JAX compilation cache, shared by all containers. JAX's defaults cache every
+# kernel that takes at least 1 s to compile, with no size limits, which covers the
+# large-M kernels that take minutes.
+JAX_CACHE_VOLUME_NAME = os.environ.get("MODAL_JAX_CACHE_VOLUME", "gandalf-jax-cache")
+JAX_CACHE_DIR = "/jax-cache"
+
+# modal.Dict that holds which call runs each segment of a server-side chain
+CHAIN_CLAIMS_NAME = os.environ.get("MODAL_CHAIN_CLAIMS", "gandalf-chain-claims")
+
 # JAX CUDA version (configurable for different Modal GPU types)
 # CUDA 12 is the default, but CUDA 11.8 may be needed for older GPUs
 JAX_CUDA_VERSION = os.environ.get("JAX_CUDA_VERSION", "cuda12")
@@ -102,6 +113,11 @@ volume = modal.Volume.from_name(
     VOLUME_NAME,
     create_if_missing=True
 )
+jax_cache_volume = modal.Volume.from_name(JAX_CACHE_VOLUME_NAME, create_if_missing=True)
+chain_claims = modal.Dict.from_name(CHAIN_CLAIMS_NAME, create_if_missing=True)
+
+# Volumes of every function that runs JAX
+JAX_VOLUMES = {"/results": volume, JAX_CACHE_DIR: jax_cache_volume}
 
 # Define the container image with all dependencies
 # JAX version: no upper pin. The test suite runs in CI against the versions
@@ -118,6 +134,7 @@ image = (
         "pyyaml>=6.0.0",
         "scipy>=1.10.0",
     )
+    .env({"JAX_COMPILATION_CACHE_DIR": JAX_CACHE_DIR})
     # Copy the GANDALF source code into the image (copy=True: needed by the
     # editable install below; Modal >= 1.0 removed copy_local_dir/copy_local_file)
     .add_local_dir("src", "/root/gandalf/src", copy=True)
@@ -141,6 +158,7 @@ gpu_image = (
         "pyyaml>=6.0.0",
         "scipy>=1.10.0",
     )
+    .env({"JAX_COMPILATION_CACHE_DIR": JAX_CACHE_DIR})
     .add_local_dir("src", "/root/gandalf/src", copy=True)
     .add_local_dir("scripts", "/root/gandalf/scripts", copy=True)
     .add_local_file("pyproject.toml", "/root/gandalf/pyproject.toml", copy=True)
@@ -652,7 +670,7 @@ def _run_simulation_impl(
 
 @app.function(
     image=image,
-    volumes={"/results": volume},
+    volumes=JAX_VOLUMES,
     timeout=TIMEOUT_SINGLE_SIMULATION,
     cpu=DEFAULT_CPU_CORES,
     memory=DEFAULT_CPU_MEMORY_MB,
@@ -681,7 +699,7 @@ def run_simulation_remote(
 
 @app.function(
     image=gpu_image,
-    volumes={"/results": volume},
+    volumes=JAX_VOLUMES,
     timeout=TIMEOUT_SINGLE_SIMULATION,
     gpu=DEFAULT_GPU_TYPE,
     cpu=DEFAULT_GPU_CORES,
@@ -929,6 +947,25 @@ def run_parameter_sweep(
 # External Driver Scripts
 # =============================================================================
 
+RESULTS_ROOT = Path("/results")
+PROJECT_ROOT = Path("/root/project")
+
+
+def _call_is_live(call_id: str) -> bool:
+    """Whether a call may still be pending or running.
+
+    Only a result, or an error the call ended with, counts as ended; an error in
+    reaching Modal says nothing about the call, so it counts as live.
+    """
+    try:
+        modal.FunctionCall.from_id(call_id).get(timeout=0)
+    except (TimeoutError, OSError, modal.exception.ConnectionError, modal.exception.ServiceError):
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def _run_script_impl(
     project_tar: bytes,
     script: str,
@@ -937,6 +974,8 @@ def _run_script_impl(
     commit_interval: float,
     backend: str,
     env_vars: Optional[dict[str, str]] = None,
+    max_segments: int = 1,
+    segment: Optional[int] = None,
 ) -> dict[str, Any]:
     """
     Run an external driver script with GANDALF installed (Modal-compatible).
@@ -948,6 +987,11 @@ def _run_script_impl(
     `commit_interval` seconds while the script runs and once at the end, so files the
     script writes (e.g. restart files) survive a timeout or a preemption; resuming from
     them is up to the script. `env_vars` are added to the script's environment.
+
+    With max_segments > 1 the call is one segment of a server-side chain: when the
+    script exits with status 3 (paused), the call spawns the same command as the next
+    segment, up to max_segments segments in all (docs/MODAL_GUIDE.md). `segment` is set
+    by the predecessor; a submission leaves it None.
     """
     import collections
     import subprocess
@@ -956,19 +1000,41 @@ def _run_script_impl(
 
     sys.path.insert(0, "/root/gandalf/scripts")
     from modal_support import (
+        PAUSED_EXIT,
         PeriodicCommitter,
+        claim_segment,
+        finish_segment,
+        read_segments,
         sanitize_output_subdir,
         substitute_output_dir,
         tail,
         unpack_project,
+        write_segment,
     )
 
     start = time.time()
     out_dir = None
+    record = None
     try:
-        out_dir = Path("/results") / sanitize_output_subdir(output_subdir)
+        subdir = sanitize_output_subdir(output_subdir)
+        out_dir = RESULTS_ROOT / subdir
+        if max_segments > 1:
+            volume.reload()
+            previous = read_segments(out_dir)
+            call_id = modal.current_function_call_id()
+            k, reason = claim_segment(previous, segment, call_id, max_segments, chain_claims,
+                                      f"{VOLUME_NAME}/{subdir}", _call_is_live)
+            if k is None:
+                print(f"[run_script] segment not run: {reason}", flush=True)
+                return {'status': 'skipped', 'reason': reason, 'output_dir': str(out_dir),
+                        'elapsed_time': time.time() - start, 'backend': backend}
+            record = {'segment': k, 'call_id': call_id, 'outcome': 'running',
+                      'started': time.strftime("%Y-%m-%d %H:%M:%S")}
+            write_segment(out_dir, record)
+            _commit_volume_with_retry(verbose=True)
+            print(f"[run_script] chain segment {k} of at most {max_segments}", flush=True)
         out_dir.mkdir(parents=True, exist_ok=True)
-        project = Path("/root/project")
+        project = PROJECT_ROOT
         names = unpack_project(project_tar, project)
         if script not in names:
             raise FileNotFoundError(f"script {script!r} is not in the packed project")
@@ -990,9 +1056,30 @@ def _run_script_impl(
                 log.flush()
                 last.append(line)
             returncode = proc.wait()
+        go_on = False
+        if record is not None:
+            go_on = finish_segment(record, returncode, "".join(last), previous, max_segments)
+            write_segment(out_dir, record)
+        # The segment's outcome is committed before a successor exists, so a restart of
+        # this call (preemption) finds the segment ended and does not run it again.
         committed, commit_error = _commit_volume_with_retry(verbose=True)
+        if go_on:
+            if not committed:
+                record['stop_reason'] = f"volume commit failed: {commit_error}"
+            else:
+                fn = run_script_gpu if backend == 'gpu' else run_script_cpu
+                try:
+                    record['next_call_id'] = fn.spawn(
+                        project_tar, script, args, output_subdir, commit_interval, env_vars,
+                        max_segments=max_segments, segment=record['segment'] + 1).object_id
+                except Exception as exc:
+                    record['stop_reason'] = f"spawn of segment {record['segment'] + 1} failed: {exc}"
+            write_segment(out_dir, record)
+            _commit_volume_with_retry(verbose=True)
+        if record is not None:
+            print(f"[run_script] chain: {record}", flush=True)
         return {
-            'status': 'success' if returncode == 0 else 'failed',
+            'status': {0: 'success', PAUSED_EXIT: 'paused'}.get(returncode, 'failed'),
             'returncode': returncode,
             'output_dir': str(out_dir),
             'elapsed_time': time.time() - start,
@@ -1000,8 +1087,15 @@ def _run_script_impl(
             'log_tail': tail("".join(last)),
             'volume_committed': committed,
             'volume_commit_error': commit_error,
+            'chain': record,
         }
     except Exception as e:
+        if record is not None and record['outcome'] == 'running':
+            record.update(outcome='failed', error=str(e))
+            try:
+                write_segment(out_dir, record)
+            except OSError:
+                pass
         committed, commit_error = _commit_volume_with_retry(verbose=False)
         return {
             'status': 'error',
@@ -1017,7 +1111,7 @@ def _run_script_impl(
 
 @app.function(
     image=gpu_image,
-    volumes={"/results": volume},
+    volumes=JAX_VOLUMES,
     timeout=TIMEOUT_SCRIPT,
     gpu=SCRIPT_GPU_TYPE,
     cpu=SCRIPT_CPU_CORES,
@@ -1030,15 +1124,17 @@ def run_script_gpu(
     output_subdir: str,
     commit_interval: float = 600.0,
     env_vars: Optional[dict[str, str]] = None,
+    max_segments: int = 1,
+    segment: Optional[int] = None,
 ) -> dict[str, Any]:
     """Run an external driver script on a GPU (type MODAL_SCRIPT_GPU, default A100)."""
     return _run_script_impl(project_tar, script, args, output_subdir, commit_interval, backend='gpu',
-                            env_vars=env_vars)
+                            env_vars=env_vars, max_segments=max_segments, segment=segment)
 
 
 @app.function(
     image=image,
-    volumes={"/results": volume},
+    volumes=JAX_VOLUMES,
     timeout=TIMEOUT_SCRIPT,
     cpu=SCRIPT_CPU_CORES,
     memory=SCRIPT_MEMORY_MB,
@@ -1050,10 +1146,12 @@ def run_script_cpu(
     output_subdir: str,
     commit_interval: float = 600.0,
     env_vars: Optional[dict[str, str]] = None,
+    max_segments: int = 1,
+    segment: Optional[int] = None,
 ) -> dict[str, Any]:
     """Run an external driver script on CPUs."""
     return _run_script_impl(project_tar, script, args, output_subdir, commit_interval, backend='cpu',
-                            env_vars=env_vars)
+                            env_vars=env_vars, max_segments=max_segments, segment=segment)
 
 
 # =============================================================================

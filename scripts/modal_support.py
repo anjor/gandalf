@@ -8,17 +8,21 @@ This module does not import Modal, so it can be tested without it. It covers:
 - substituting the output folder into the driver's arguments;
 - sanitising the output subdirectory name;
 - committing the results volume periodically from a background thread, so that
-  restart files written by a long run survive a timeout or a preemption.
+  restart files written by a long run survive a timeout or a preemption;
+- the bookkeeping of server-side chains (a paused run spawns its own successor).
 """
 
 from __future__ import annotations
 
 import io
+import json
+import os
 import re
 import tarfile
 import threading
+import time
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Protocol
 
 # Default upper limit on the packed project (bytes); Modal accepts larger inputs,
 # but a project tarball beyond this size usually means data was included by mistake.
@@ -200,3 +204,110 @@ def tail(text: str, n_lines: int = 40) -> str:
     """The last `n_lines` lines of `text`."""
     lines = text.splitlines()
     return "\n".join(lines[-n_lines:])
+
+
+# =============================================================================
+# Server-side chains (modal_app.run_script_*, max_segments > 1)
+# =============================================================================
+#
+# A chain is one run folder on the results volume and a sequence of calls, the
+# segments, that each run the same driver command. A driver that exits with
+# PAUSED_EXIT has saved its state and continues with the same command; the call
+# then spawns the next segment itself. Each segment k writes only its own record,
+# <run folder>/chain/segment_<k>.json, so no two containers write the same file.
+# Which call runs segment k is decided by an atomic claim in a modal.Dict.
+
+PAUSED_EXIT = 3
+CHAIN_DIR = "chain"
+_PAUSED_AT = re.compile(r"paused at t = ([-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?)")
+
+
+class Claims(Protocol):
+    """The part of modal.Dict that chains use; put(..., skip_if_exists=True) is atomic."""
+
+    def put(self, key: str, value: str, *, skip_if_exists: bool = False) -> bool: ...
+
+    def get(self, key: str) -> Any: ...
+
+
+def paused_time(log: str) -> Optional[float]:
+    """Simulation time of the last 'paused at t = <x>' line in a driver's output, if any."""
+    found = _PAUSED_AT.findall(log)
+    return float(found[-1]) if found else None
+
+
+def read_segments(run_dir: str | Path) -> list[dict]:
+    """The segment records of the chain in `run_dir`, in segment order."""
+    records = [json.loads(p.read_text()) for p in (Path(run_dir) / CHAIN_DIR).glob("segment_*.json")]
+    return sorted(records, key=lambda r: r["segment"])
+
+
+def write_segment(run_dir: str | Path, record: dict) -> None:
+    """Write a segment record atomically (temporary file, then rename)."""
+    folder = Path(run_dir) / CHAIN_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"segment_{record['segment']:04d}.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(record, indent=1))
+    os.replace(tmp, path)
+
+
+def claim_segment(segments: list[dict], requested: Optional[int], call_id: str, max_segments: int,
+                  claims: Claims, run_key: str, is_live: Callable[[str], bool]) -> tuple[Optional[int], str]:
+    """The segment this call runs, or (None, reason) when it must not run.
+
+    `segments` are the chain's records, `requested` the segment a predecessor spawned this
+    call for (None for a submission from outside), and `is_live(call_id)` tells whether a
+    call may still be pending or running. A call Modal restarts (preemption) has the same
+    call ID and runs its segment again unless that segment already ended. A finished run
+    never runs again, and no segment number reaches `max_segments`.
+    """
+    mine = [s for s in segments if s["call_id"] == call_id]
+    if mine:
+        if mine[-1]["outcome"] != "running":
+            return None, f"this call already ran segment {mine[-1]['segment']}"
+        k = mine[-1]["segment"]
+    elif any(s["outcome"] == "finished" for s in segments):
+        return None, "the run has finished"
+    elif requested is not None:
+        k = requested
+    else:
+        if segments:
+            last = segments[-1]
+            live = last["call_id"] if last["outcome"] == "running" else last.get("next_call_id")
+            if live and is_live(live):
+                return None, f"call {live} is still running this chain"
+        k = segments[-1]["segment"] + 1 if segments else 0
+    while k < max_segments:
+        key = f"{run_key}#{k}"
+        if claims.put(key, call_id, skip_if_exists=True):
+            return k, "claimed"
+        holder = claims.get(key)
+        if holder == call_id:
+            return k, "claimed"
+        if requested is not None or mine or (holder is not None and is_live(holder)):
+            return None, f"segment {k} is held by call {holder}"
+        k += 1  # a submission from outside skips a segment whose call died before recording it
+    return None, f"max_segments = {max_segments} reached"
+
+
+def finish_segment(record: dict, returncode: int, log: str, previous: list[dict],
+                   max_segments: int) -> bool:
+    """Fill in a segment's outcome; True if the chain continues with a new segment.
+
+    A paused segment continues the chain unless the next segment would reach
+    `max_segments` or its 'paused at t = ...' time did not advance past the previous
+    paused segment's. Any exit status other than 0 and PAUSED_EXIT stops the chain.
+    """
+    outcome = {0: "finished", PAUSED_EXIT: "paused"}.get(returncode, "failed")
+    t = paused_time(log) if outcome == "paused" else None
+    record.update(outcome=outcome, returncode=returncode, t=t, ended=time.strftime("%Y-%m-%d %H:%M:%S"))
+    if outcome != "paused":
+        return False
+    earlier = [s["t"] for s in previous
+               if s["segment"] < record["segment"] and s["outcome"] == "paused" and s.get("t") is not None]
+    if t is not None and earlier and t <= earlier[-1]:
+        record["stop_reason"] = f"no progress: paused at t = {t}, previous segment at t = {earlier[-1]}"
+    elif record["segment"] + 1 >= max_segments:
+        record["stop_reason"] = f"max_segments = {max_segments} reached"
+    return "stop_reason" not in record
