@@ -51,6 +51,7 @@ from typing import Any, Callable, NamedTuple, Optional, Protocol, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax import Array
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from krmhd.forcing import WhiteNoiseBand, _add_to_moments
 from krmhd.hermite import compute_streaming_eigensystem
@@ -65,13 +66,16 @@ from krmhd.timestepping import (
     _gandalf_step_lawson_rk4_jit,
     _validate_step_args,
     cfl_timestep_estimate,
+    place_on_mesh,
+    validate_mesh,
 )
 
 
 class StepParams(NamedTuple):
     """gandalf_step's keyword arguments, fixed for a run (see gandalf_step).
 
-    nu=None uses the state's nu, as in gandalf_step.
+    nu=None uses the state's nu, as in gandalf_step. mesh shards the
+    lawson_rk4 slices over its devices, as in gandalf_step (Issue #191).
     """
 
     eta: float
@@ -83,6 +87,7 @@ class StepParams(NamedTuple):
     eta_z: float = 0.0
     hyper_rz: int = 1
     closure: HermiteClosure = "zero"
+    mesh: Optional[Mesh] = None
 
 
 @dataclass(frozen=True)
@@ -265,27 +270,42 @@ def _scheme_step(
         return _gandalf_step_lawson_rk4_jit(
             *args, eta_z=p.eta_z, hyper_rz=p.hyper_rz,
             streaming_eigenvalues=eigenvalues, streaming_P_T=P_T,
-            streaming_P_inv_T=P_inv_T, closure=p.closure,
+            streaming_P_inv_T=P_inv_T, closure=p.closure, mesh=p.mesh,
         )
     kernel = _gandalf_step_imex343_jit if p.scheme == "imex_ars343" else _gandalf_step_imex222_jit
     return kernel(*args, eta_z=p.eta_z, hyper_rz=p.hyper_rz, closure=p.closure)
 
 
 def _force(
-    fields: KRMHDFields, dt: Array, key: Optional[Array], grid: SpectralGrid3D, forcing: Forcing
+    fields: KRMHDFields,
+    dt: Array,
+    key: Optional[Array],
+    grid: SpectralGrid3D,
+    forcing: Forcing,
+    mesh: Optional[Mesh] = None,
 ) -> Tuple[KRMHDFields, ForcingIncrement, Optional[Array]]:
-    """Draw this step's forcing and add it to the fields."""
+    """Draw this step's forcing and add it to the fields.
+
+    On a mesh the draws are pinned to every device. Otherwise XLA splits a draw
+    added to the split g and gathers it back for z±, a few collectives a step.
+    """
+
+    def whole(x: Array) -> Array:
+        if mesh is None:
+            return x
+        return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, PartitionSpec()))
+
     zeros = jnp.zeros_like(fields.z_plus)
     z_plus, z_minus, g = fields.z_plus, fields.z_minus, fields.g
     alfven = hermite = zeros
     if forcing.alfven is not None:
         alfven, key = forcing.alfven.draw(grid, dt, key)
-        alfven = alfven.astype(z_plus.dtype)
+        alfven = whole(alfven.astype(z_plus.dtype))
         z_plus = z_plus + alfven
         z_minus = z_minus + alfven
     if forcing.hermite is not None:
         hermite, key = forcing.hermite.draw(grid, dt, key)
-        hermite = hermite.astype(g.dtype)
+        hermite = whole(hermite.astype(g.dtype))
         g = _add_to_moments(g, hermite, forcing.moments)
     forced = KRMHDFields(z_plus=z_plus, z_minus=z_minus, g=g, time=fields.time)
     return forced, ForcingIncrement(alfven=alfven, hermite=hermite), key
@@ -313,7 +333,7 @@ def _one_step(
 ) -> Tuple[RunState, Any]:
     """One loop step: forcing, the scheme's step, the accounting hook, the dt update."""
     before, dt = state.fields, state.dt
-    forced, increment, key = _force(before, dt, state.key, grid, plan.forcing)
+    forced, increment, key = _force(before, dt, state.key, grid, plan.forcing, plan.step.mesh)
     after = _scheme_step(forced, dt, grid, consts, plan)
     if plan.update is not None:
         acc = plan.update(acc, before, after, increment, dt)
@@ -432,6 +452,7 @@ class DeviceLoop:
             state, float(dt0), step.eta, nu, step.hyper_r, step.hyper_n, step.scheme,
             step.eta_z, step.hyper_rz, step.closure,
         )
+        validate_mesh(step.mesh, step.scheme, state.M, state.grid.Nz)
         self._consts = _cast_floats(_scheme_constants(state, step), real)
 
         # A buffer may be donated only once: give z⁻ its own if it shares z⁺'s
@@ -461,6 +482,23 @@ class DeviceLoop:
         self._carry = jax.tree.map(
             lambda x, out: x if x.dtype == out.dtype else x.astype(out.dtype), carry, stepped
         )
+        if step.mesh is not None:
+            # g split along k_z over the mesh, everything else on every device.
+            # (tree.map: SpectralGrid3D cannot be rebuilt from device_put's
+            # placeholder leaves.)
+            whole = NamedSharding(step.mesh, PartitionSpec())
+
+            def replicate(tree: Any) -> Any:
+                return jax.tree.map(lambda x: jax.device_put(x, whole), tree)
+
+            c = self._carry
+            self._carry = RunState(
+                fields=place_on_mesh(c.fields, step.mesh)._replace(time=replicate(c.fields.time)),
+                key=replicate(c.key),
+                dt=replicate(c.dt),
+                steps=replicate(c.steps),
+            )
+            self._grid, self._consts = replicate((self._grid, self._consts))
 
     def advance(self, n_steps: int) -> Any:
         """Take n_steps steps on the device; return their accounting accumulator.
