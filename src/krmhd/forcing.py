@@ -40,8 +40,9 @@ Reference:
     - Elenbaas, Schukraft & Schubert (2008) MNRAS - Gaussian random forcing
 """
 
+from dataclasses import dataclass
 from functools import partial
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -182,8 +183,10 @@ def _gaussian_white_noise_fourier_jit(
     forcing_mask = (k_mag >= k_min) & (k_mag <= k_max)
 
     # Per-step increment (amplitude/√dt)·ξ: energy per step ∝ amplitude²/dt,
-    # so the injection rate dE/dt ∝ amplitude²/dt² (Issue #159)
-    scale = amplitude / jnp.sqrt(dt)
+    # so the injection rate dE/dt ∝ amplitude²/dt² (Issue #159). The scale is
+    # rounded to the noise precision whether dt is a Python float or a traced
+    # float64 (krmhd.runloop), so both give the same increment.
+    scale = (amplitude / jnp.sqrt(dt)).astype(real_part.dtype)
 
     # Generate complex noise field
     noise = (real_part + 1j * imag_part) * scale
@@ -381,13 +384,34 @@ def gaussian_white_noise_fourier_perp_lowkz(
     """
     if amplitude <= 0:
         raise ValueError(f"amplitude must be positive, got {amplitude}")
+    _check_perp_lowkz_band(n_min, n_max, max_nz)
+    if dt <= 0:
+        raise ValueError(f"dt must be positive, got {dt}")
+    return _perp_lowkz_noise(grid, amplitude, n_min, n_max, max_nz, include_nz0, dt, key)
+
+
+def _check_perp_lowkz_band(n_min: int, n_max: int, max_nz: int) -> None:
+    """Validate the mode numbers of a perp_lowkz band."""
     if n_min <= 0 or n_max < n_min:
         raise ValueError(f"Invalid band: n_min={n_min}, n_max={n_max}")
     if max_nz < 0:
         raise ValueError(f"max_nz must be ≥ 0, got {max_nz}")
-    if dt <= 0:
-        raise ValueError(f"dt must be positive, got {dt}")
 
+
+def _perp_lowkz_noise(
+    grid: SpectralGrid3D,
+    amplitude: float,
+    n_min: int,
+    n_max: int,
+    max_nz: int,
+    include_nz0: bool,
+    dt: float,
+    key: Array,
+) -> Tuple[Array, Array]:
+    """Array-level core of gaussian_white_noise_fourier_perp_lowkz, without validation.
+
+    Traceable in dt and key, so it also runs inside jit (krmhd.runloop).
+    """
     # Perpendicular band limits
     kperp_min = _mode_to_wavenumber(n_min, grid.Lx)
     kperp_max = _mode_to_wavenumber(n_max, grid.Lx)
@@ -412,7 +436,7 @@ def gaussian_white_noise_fourier_perp_lowkz(
         amplitude,
         float(kperp_min), float(kperp_max),
         kz_allowed,
-        float(dt),
+        dt,
         real_part, imag_part,
         grid.Nx,
     )
@@ -551,17 +575,36 @@ def gaussian_white_noise_fourier(
         - n=3: Third harmonic (λ = L/3), etc.
     """
     # Input validation
+    _check_shell_band(n_min, n_max)
+    if amplitude <= 0:
+        raise ValueError(f"amplitude must be positive, got {amplitude}")
+    if dt <= 0:
+        raise ValueError(f"dt must be positive, got {dt}")
+    return _shell_noise(grid, amplitude, n_min, n_max, dt, key)
+
+
+def _check_shell_band(n_min: int, n_max: int) -> None:
+    """Validate the mode numbers of an isotropic shell band."""
     if not isinstance(n_min, int) or not isinstance(n_max, int):
         raise TypeError(f"Mode numbers must be integers, got n_min={type(n_min).__name__}, n_max={type(n_max).__name__}")
     if n_min <= 0:
         raise ValueError(f"n_min must be positive, got n_min={n_min}")
     if n_min >= n_max:
         raise ValueError(f"n_min must be < n_max, got n_min={n_min}, n_max={n_max}")
-    if amplitude <= 0:
-        raise ValueError(f"amplitude must be positive, got {amplitude}")
-    if dt <= 0:
-        raise ValueError(f"dt must be positive, got {dt}")
 
+
+def _shell_noise(
+    grid: SpectralGrid3D,
+    amplitude: float,
+    n_min: int,
+    n_max: int,
+    dt: float,
+    key: Array,
+) -> Tuple[Array, Array]:
+    """Array-level core of gaussian_white_noise_fourier, without validation.
+
+    Traceable in dt and key, so it also runs inside jit (krmhd.runloop).
+    """
     # Convert mode numbers to physical wavenumbers
     # Use minimum domain size for consistency in anisotropic domains
     L_min = min(grid.Lx, grid.Ly, grid.Lz)
@@ -598,6 +641,66 @@ def gaussian_white_noise_fourier(
     )
 
     return noise_field.astype(jnp.complex64), key
+
+
+@dataclass(frozen=True)
+class WhiteNoiseBand:
+    """
+    A white-noise forcing band: the amplitude and band arguments of
+    force_alfven_modes and force_hermite_moments, validated once.
+
+    draw(grid, dt, key) returns one increment (amplitude/√dt)·ξ on the band and
+    the next key. "shell" draws as gaussian_white_noise_fourier and
+    "perp_lowkz" as gaussian_white_noise_fourier_perp_lowkz (max_nz defaults
+    to 1, include_nz0 to False), with the same key splits and the same values.
+    draw is traceable in dt and key, so the device run loop (krmhd.runloop)
+    calls it inside jit.
+    """
+
+    amplitude: float
+    n_min: int
+    n_max: int
+    band: Literal["shell", "perp_lowkz"] = "shell"
+    max_nz: Optional[int] = None
+    include_nz0: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        if self.amplitude <= 0:
+            raise ValueError(f"amplitude must be positive, got {self.amplitude}")
+        if self.band == "shell":
+            if self.max_nz is not None or self.include_nz0 is not None:
+                raise ValueError(
+                    "max_nz and include_nz0 apply only to band='perp_lowkz'; "
+                    "the isotropic shell always includes n_z = 0"
+                )
+            _check_shell_band(self.n_min, self.n_max)
+        elif self.band == "perp_lowkz":
+            _check_perp_lowkz_band(self.n_min, self.n_max, self._max_nz)
+        else:
+            raise ValueError(f"band must be 'shell' or 'perp_lowkz', got {self.band!r}")
+
+    @property
+    def _max_nz(self) -> int:
+        return 1 if self.max_nz is None else self.max_nz
+
+    def draw(self, grid: SpectralGrid3D, dt: float, key: Array) -> Tuple[Array, Array]:
+        """One forcing increment on the band and the next key."""
+        if self.band == "shell":
+            return _shell_noise(grid, self.amplitude, self.n_min, self.n_max, dt, key)
+        return _perp_lowkz_noise(
+            grid, self.amplitude, self.n_min, self.n_max, self._max_nz,
+            bool(self.include_nz0), dt, key,
+        )
+
+
+@partial(jax.jit, static_argnums=(2,))
+def _add_to_moments(g: Array, increment: Array, moments: Tuple[int, ...]) -> Array:
+    """g with increment [Nz, Ny, Nx//2+1] added to each moment m in moments.
+
+    One scatter-add, so the result is the only new g-sized array; inside a
+    jitted loop that donates g, XLA does it in place.
+    """
+    return g.at[..., jnp.asarray(moments)].add(increment[..., jnp.newaxis])
 
 
 def force_alfven_modes(
@@ -1227,10 +1330,7 @@ def force_hermite_moments(
 
     # Apply forcing to specified Hermite moments
     # g has shape [Nz, Ny, Nx//2+1, M+1], forcing has shape [Nz, Ny, Nx//2+1]
-    g_new = jnp.array(state.g)  # Create mutable copy
-
-    for m in forced_moments:
-        g_new = g_new.at[:, :, :, m].add(forcing)
+    g_new = _add_to_moments(state.g, forcing, tuple(forced_moments))
 
     # Create new state
     new_state = KRMHDState(
@@ -1385,9 +1485,7 @@ def force_hermite_moments_specific(
 
     # Apply forcing to specified Hermite moments
     # g has shape [Nz, Ny, Nx//2+1, M+1], forcing has shape [Nz, Ny, Nx//2+1]
-    g_new = jnp.array(state.g)  # Create mutable copy
-    for m in forced_moments:
-        g_new = g_new.at[:, :, :, m].add(forcing)
+    g_new = _add_to_moments(state.g, forcing, tuple(forced_moments))
 
     # Create new state
     new_state = KRMHDState(
