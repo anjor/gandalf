@@ -1839,11 +1839,17 @@ def _streaming_eigenvalue_extremes(
     return lam_lo, lam_hi, lam_complex
 
 
+# compute_cfl_timestep modes: the Courant estimate, or the exact slice-advection
+# radius for the RK4-type schemes (Issue #189).
+CFLMode = Literal["courant", "exact"]
+
+
 def compute_cfl_timestep(
     state: KRMHDState,
     v_A: float,
     cfl_safety: float = 0.3,
     closure: HermiteClosure = "zero",
+    mode: CFLMode = "courant",
 ) -> float:
     """
     Compute maximum stable timestep from CFL condition.
@@ -1865,12 +1871,25 @@ def compute_cfl_timestep(
     with λ_j the eigenvalues of the Hermite ladder matrix T
     (hermite.compute_streaming_matrix). See Physics below.
 
+    With mode="exact" (Issue #189, for the RK4-type schemes lawson_rk4 and
+    imex_ars343) the Hermite term v_g is replaced by the exact limit of the
+    explicit RK4 stages,
+
+        dt ≤ C * min(min(Δx, Δy, Δz) / max(v_A, max|∇⊥z±|), 2√2 / ρ),
+
+    where ρ = max(ρ(√β_i λ_min), ρ(√β_i λ_max)) is the spectral radius of the
+    slice advection operator a ↦ P{Φ + √β_i λ Ψ, a} (slice_advection_radius).
+
     Args:
         state: Current KRMHD state (used to compute max velocity)
         v_A: Alfvén velocity (parallel wave speed)
         cfl_safety: Safety factor C ∈ (0, 1), default 0.3
         closure: Hermite closure used by the time stepper, "zero" (default)
             or "symmetric". It changes the eigenvalues of T and hence v_g.
+        mode: "courant" (default) or "exact". The exact mode runs a Lanczos
+            iteration on the device, about 30-50 steps of 6 FFTs of two
+            fields each; Courant takes 8 FFTs of one field. It falls back to
+            the Courant term, with a warning, if Lanczos does not converge.
 
     Returns:
         Maximum safe timestep dt
@@ -1908,13 +1927,36 @@ def compute_cfl_timestep(
           advection rate of that mode. It stays bounded only when
           hyper-collisions and hyper-resistivity damp the mode faster. In
           pure advection without dissipation it grows even at dt_cfl.
-          scheme="imex_ars343" and "lawson_rk4" are stable for
-          |dt·ρ| ≤ 2√2 without dissipation.
+          scheme="lawson_rk4" is stable for |dt·ρ| ≤ 2√2 without
+          dissipation, and so is "imex_ars343" when there is no streaming
+          (see the exact mode below).
+        - Why 2√2 (mode="exact"): for real band-limited Φ and Ψ the slice
+          operator a ↦ P{Φ + cΨ, a} is skew-adjoint, so its eigenvalues
+          are ±iω with |ω| ≤ ρ. The explicit Hermite stages of lawson_rk4
+          are classical RK4 in the interaction picture, and the explicit
+          tableau of imex_ars343 has the same stability polynomial
+          R(z) = 1 + z + z²/2 + z³/6 + z⁴/24 (_ars343_explicit_a4). On the
+          imaginary axis |R(iy)|² = 1 - y⁶(8 - y²)/576, which is ≤ 1 exactly
+          for |y| ≤ 2√2. The bound is sharp: with frozen fields, lawson_rk4
+          at dt = 1.05·2√2/ρ grows the top mode by 1.39 per step.
+        - The Elsasser and v_A terms stay in the exact mode. lawson_rk4
+          advances z± with midpoint RK2, whose |R(iy)|² = 1 + y⁴/4 has no
+          stability interval, so z± at dt ≈ 2√2/ρ_z would grow fast without
+          dissipation.
+        - imex_ars343 meets the 2√2 bound only without streaming. With
+          streaming the implicit stages couple imaginary streaming and
+          imaginary advection, and the amplification exceeds 1 at every
+          dt > 0 (in a frozen shear flow, about 1.00001, 1.007 and 1.10
+          per step at dt·ρ = 0.7, 1.4 and 2.7). Like imex_rk222, it then
+          relies on hyper-collisions and hyper-resistivity, and the exact
+          mode's larger dt raises the per-step growth.
 
     Note:
         For typical KRMHD with strong guide field, v_A usually dominates
         over perpendicular velocities, so dt ~ Δz / v_A.
     """
+    if mode not in get_args(CFLMode):
+        raise ValueError(f"mode must be one of {get_args(CFLMode)}, got {mode!r}")
     grid = state.grid
 
     # Grid spacings
@@ -1946,7 +1988,11 @@ def compute_cfl_timestep(
 
     v_max = jnp.maximum(v_A, jnp.maximum(v_z_plus_max, v_z_minus_max))
 
-    if state.M > 0:
+    dt_slices = None
+    if state.M > 0 and mode == "exact":
+        dt_slices = _exact_slice_timestep(state, closure)
+
+    if state.M > 0 and dt_slices is None:
         # Hermite advection (Issue #157): each eigencombination of the ladder
         # matrix T moves with stream function Φ + √β_i λ_j Ψ. |∇⊥(Φ + cΨ)|²
         # is convex in c, so over real λ_j the max sits at λ_lo or λ_hi.
@@ -1978,6 +2024,8 @@ def compute_cfl_timestep(
 
     # CFL timestep
     dt_cfl = cfl_safety * min_spacing / v_max
+    if dt_slices is not None:
+        dt_cfl = jnp.minimum(dt_cfl, cfl_safety * dt_slices)
 
     # Note: No parallel Hermite streaming constraint needed for either scheme.
     # - Lawson path: the integrating factor handles oscillatory streaming
@@ -1986,3 +2034,219 @@ def compute_cfl_timestep(
     #   L and solved unconditionally stably each stage.
 
     return float(dt_cfl)
+
+
+# =============================================================================
+# Exact slice-advection radius (Issue #189)
+# =============================================================================
+
+# RK4 is stable on the imaginary axis for |dt·ρ| ≤ 2√2: with y = dt·ρ,
+# |R(iy)|² = 1 - y⁶(8 - y²)/576 for R(z) = 1 + z + z²/2 + z³/6 + z⁴/24.
+RK4_IMAGINARY_AXIS_LIMIT: float = 2.0 * math.sqrt(2.0)
+
+
+class SliceAdvectionRadius(NamedTuple):
+    """Result of slice_advection_radius, one entry per slice speed c."""
+
+    rho: Array  # [S] spectral radius of a ↦ P{Φ + cΨ, a}
+    iterations: Array  # Lanczos steps taken (int scalar, shared by all c)
+    converged: Array  # [S] bool: Ritz residual ≤ tol·ρ² was reached
+
+
+@partial(jax.jit, static_argnames=["Nz", "Ny", "Nx", "max_iter", "check_every"])
+def slice_advection_radius(
+    z_plus: Array,
+    z_minus: Array,
+    slice_speeds: Array,
+    kx: Array,
+    ky: Array,
+    dealias_mask: Array,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+    tol: float = 1e-3,
+    max_iter: int = 300,
+    check_every: int = 10,
+    seed: int = 0,
+) -> SliceAdvectionRadius:
+    """
+    Spectral radius ρ_c of the dealiased slice advection operator, on the device.
+
+    Slice j of the Hermite hierarchy is advected by the stream function
+    Φ + c_j Ψ with c_j = √β_i λ_j (see _slice_advection_rhs). The explicit
+    stages of lawson_rk4 and imex_ars343 apply
+        A_c: a ↦ P{Φ + cΨ, a},
+    with P the projection onto the 2/3 band without the k = 0 mode. This
+    function returns ρ_c for every c in slice_speeds, batched.
+
+    Why the norm: Φ and Ψ are first projected onto the band. For band-limited
+    f and a, every alias of the product ∂f·∂a lands outside the band, so
+    P{f, a} is the exact Galerkin truncation of the continuum bracket, and
+    ∫ b {f, a} = -∫ a {f, b} makes A_c skew-adjoint on the band. Its
+    eigenvalues are then ±iω, and ρ_c = ‖A_c‖ = √λ_max(-A_c²). The
+    projection matters only for z± content outside the band, which the
+    nonlinear terms never create (initial conditions or forcing can).
+
+    Method: Lanczos on the symmetric operator -A_c², all c at once, inside
+    lax.while_loop. Each step costs two calls to _slice_advection_rhs, the
+    stepper's own operator: 6 FFTs of the S slices. XLA hoists the gradient
+    FFTs of Φ and Ψ out of the loop. Vectors stay in the half spectrum, with
+    the real-space inner product (modes with 0 < kx index < Nx/2 count
+    twice). There is no reorthogonalization, so a long run grows ghost
+    copies of converged Ritz values, but none exceeds λ_max. Every
+    check_every steps the top Ritz pair (θ, s) of the tridiagonal matrix is
+    computed, and c is converged when β_k·|s_k| ≤ tol·θ, ARPACK's criterion
+    (scipy eigsh's tol). θ approaches ρ_c² from below, and the relative
+    error of ρ_c is at most tol/2.
+
+    Use it as dt ≤ RK4_IMAGINARY_AXIS_LIMIT / max_c ρ_c; see
+    compute_cfl_timestep(mode="exact").
+
+    Args:
+        z_plus, z_minus: Elsasser fields in Fourier space [Nz, Ny, Nx//2+1]
+        slice_speeds: Coefficients c of Ψ [S], real. ‖A_c‖ is convex in c,
+            so the two extremes √β_i λ_min and √β_i λ_max bound every slice.
+        kx, ky: Wavenumber arrays
+        dealias_mask: 2/3 dealiasing mask [Nz, Ny, Nx//2+1]
+        Nz, Ny, Nx: Grid dimensions (static)
+        tol: Relative tolerance on ρ_c² (traced)
+        max_iter: Iteration cap (static; rounded up to a multiple of
+            check_every). It sizes the stored tridiagonal matrix.
+        check_every: Lanczos steps between convergence checks (static)
+        seed: PRNG seed of the random start vector (traced)
+
+    Returns:
+        SliceAdvectionRadius(rho, iterations, converged). An entry with
+        converged False underestimates ρ_c.
+    """
+    real_dtype = jnp.real(z_plus).dtype
+    complex_dtype = z_plus.dtype
+    S = slice_speeds.shape[0]
+    K = -(-max_iter // check_every) * check_every
+
+    zp = z_plus * dealias_mask
+    zm = z_minus * dealias_mask
+    c = jnp.asarray(slice_speeds, real_dtype)
+    kx = jnp.asarray(kx, real_dtype)
+    ky = jnp.asarray(ky, real_dtype)
+    band = dealias_mask.at[0, 0, 0].set(False)
+
+    # Real-space inner product on the half spectrum: a mode with
+    # 0 < kx index < Nx/2 stands for itself and its conjugate partner.
+    weight = jnp.full(Nx // 2 + 1, 2.0, real_dtype).at[0].set(1.0).at[-1].set(1.0)
+
+    def dot(u: Array, v: Array) -> Array:
+        return jnp.sum(weight * (u.real * v.real + u.imag * v.imag), axis=(1, 2, 3))
+
+    def per_slice(x: Array) -> Array:
+        return x[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
+
+    def minus_A_squared(v: Array) -> Array:
+        # _slice_advection_rhs returns -A_c v; two applications give A_c².
+        a = _slice_advection_rhs(zp, zm, v, c, kx, ky, dealias_mask, Nz, Ny, Nx)
+        return -_slice_advection_rhs(zp, zm, a, c, kx, ky, dealias_mask, Nz, Ny, Nx)
+
+    noise = jax.random.normal(jax.random.PRNGKey(seed), (Nz, Ny, Nx), real_dtype)
+    v0 = (jnp.fft.rfftn(noise) * band).astype(complex_dtype)
+    v0 = jnp.broadcast_to(v0, (S,) + v0.shape)
+    v0 = v0 / per_slice(jnp.sqrt(dot(v0, v0)))
+
+    def lanczos_step(k: Array, carry: Tuple) -> Tuple:
+        v_prev, v, beta_prev, alphas, betas = carry
+        w = minus_A_squared(v)
+        alpha = dot(v, w)
+        w = w - per_slice(alpha) * v - per_slice(beta_prev) * v_prev
+        beta = jnp.sqrt(dot(w, w))
+        # beta = 0: the Krylov space is invariant (zero fields, tiny grids)
+        # and the Ritz values are exact; later steps then add zero rows.
+        v_next = w / per_slice(jnp.where(beta > 0, beta, 1.0))
+        return v, v_next, beta, alphas.at[:, k].set(alpha), betas.at[:, k].set(beta)
+
+    idx = jnp.arange(K)
+    upper = jnp.eye(K, k=1, dtype=real_dtype)
+
+    def top_ritz_pair(k: Array, alphas: Array, betas: Array) -> Tuple[Array, Array]:
+        """Top eigenvalue θ of T_k and the residual β_k·|s_k| of its Ritz vector.
+
+        T_k sits in the leading k×k block of a K×K matrix that is zero
+        elsewhere, which adds only zero eigenvalues below θ.
+        """
+        off = jnp.where(idx < k - 1, betas, 0.0)
+        T = (
+            alphas[:, :, jnp.newaxis] * jnp.eye(K, dtype=real_dtype)
+            + off[:, :, jnp.newaxis] * upper
+            + off[:, jnp.newaxis, :] * upper.T
+        )
+        evals, evecs = jnp.linalg.eigh(T)
+        return evals[:, -1], betas[:, k - 1] * jnp.abs(evecs[:, k - 1, -1])
+
+    def not_done(state: Tuple) -> Array:
+        k, *_, converged = state
+        return (k < K) & ~jnp.all(converged)
+
+    def check_block(state: Tuple) -> Tuple:
+        k, carry, _, converged = state
+        carry = jax.lax.fori_loop(
+            0, check_every, lambda i, cr: lanczos_step(k + i, cr), carry
+        )
+        k = k + check_every
+        theta, residual = top_ritz_pair(k, carry[3], carry[4])
+        return k, carry, theta, converged | (residual <= tol * theta)
+
+    zeros = jnp.zeros(S, real_dtype)
+    carry0 = (
+        jnp.zeros_like(v0),
+        v0,
+        zeros,
+        jnp.zeros((S, K), real_dtype),
+        jnp.zeros((S, K), real_dtype),
+    )
+    k, _, theta, converged = jax.lax.while_loop(
+        not_done, check_block, (jnp.asarray(0), carry0, zeros, jnp.zeros(S, bool))
+    )
+    return SliceAdvectionRadius(
+        rho=jnp.sqrt(jnp.maximum(theta, 0.0)), iterations=k, converged=converged
+    )
+
+
+def _exact_slice_timestep(state: KRMHDState, closure: str) -> float | None:
+    """2√2/ρ for the slice advection of state (compute_cfl_timestep, mode="exact").
+
+    ρ is the larger radius of the two extreme slices, c = √β_i λ_min and
+    √β_i λ_max; the norm is convex in c, so they bound every slice. Returns
+    None, with a warning, when Lanczos does not converge, and the caller
+    falls back to the Courant estimate.
+    """
+    validate_closure(closure, state.M)
+    lam_lo, lam_hi, lam_complex = _streaming_eigenvalue_extremes(
+        state.M, float(state.Lambda), closure
+    )
+    if lam_complex > 0.0:
+        raise ValueError(
+            "mode='exact' needs real eigenvalues of the streaming matrix T, "
+            f"but T has complex ones for Lambda = {state.Lambda} (Lambda < 1). "
+            "Use mode='courant'."
+        )
+    grid = state.grid
+    sqrt_beta = math.sqrt(state.beta_i)
+    radius = slice_advection_radius(
+        state.z_plus,
+        state.z_minus,
+        jnp.array([sqrt_beta * lam_lo, sqrt_beta * lam_hi]),
+        grid.kx,
+        grid.ky,
+        grid.dealias_mask,
+        grid.Nz,
+        grid.Ny,
+        grid.Nx,
+    )
+    if not bool(jnp.all(radius.converged)):
+        warnings.warn(
+            f"slice_advection_radius did not converge in {int(radius.iterations)} "
+            "Lanczos steps; using the Courant estimate for the Hermite term.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return None
+    rho = float(jnp.max(radius.rho))
+    return RK4_IMAGINARY_AXIS_LIMIT / rho if rho > 0.0 else math.inf
