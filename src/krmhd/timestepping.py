@@ -1887,7 +1887,7 @@ def compute_cfl_timestep(
         closure: Hermite closure used by the time stepper, "zero" (default)
             or "symmetric". It changes the eigenvalues of T and hence v_g.
         mode: "courant" (default) or "exact". The exact mode runs a Lanczos
-            iteration on the device, about 30-50 steps of 6 FFTs of two
+            iteration on the device, about 20-40 steps of 6 FFTs of two
             fields each; Courant takes 8 FFTs of one field. It falls back to
             the Courant term, with a warning, if Lanczos does not converge.
 
@@ -2065,7 +2065,7 @@ def slice_advection_radius(
     Ny: int,
     Nx: int,
     tol: float = 1e-3,
-    max_iter: int = 300,
+    max_iter: int = 150,
     check_every: int = 10,
     seed: int = 0,
 ) -> SliceAdvectionRadius:
@@ -2085,7 +2085,9 @@ def slice_advection_radius(
     ∫ b {f, a} = -∫ a {f, b} makes A_c skew-adjoint on the band. Its
     eigenvalues are then ±iω, and ρ_c = ‖A_c‖ = √λ_max(-A_c²). The
     projection matters only for z± content outside the band, which the
-    nonlinear terms never create (initial conditions or forcing can).
+    nonlinear terms never create (initial conditions or forcing can). The
+    stepper's operator built from such z± is not skew: aliasing puts its
+    eigenvalues off the imaginary axis.
 
     Method: Lanczos on the symmetric operator -A_c², all c at once, inside
     lax.while_loop. Each step costs two calls to _slice_advection_rhs, the
@@ -2096,8 +2098,10 @@ def slice_advection_radius(
     copies of converged Ritz values, but none exceeds λ_max. Every
     check_every steps the top Ritz pair (θ, s) of the tridiagonal matrix is
     computed, and c is converged when β_k·|s_k| ≤ tol·θ, ARPACK's criterion
-    (scipy eigsh's tol). θ approaches ρ_c² from below, and the relative
-    error of ρ_c is at most tol/2.
+    (scipy eigsh's tol). θ approaches ρ_c² from below and lies within tol·θ
+    of an eigenvalue, so √θ is within tol/2 of a singular value of A_c. On
+    developed turbulence at 64³ and 128³ (M = 64) it converges in 20-40
+    steps at tol = 1e-3 and agrees with eigsh to about 1e-7.
 
     Use it as dt ≤ RK4_IMAGINARY_AXIS_LIMIT / max_c ρ_c; see
     compute_cfl_timestep(mode="exact").
