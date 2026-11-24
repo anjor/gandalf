@@ -51,6 +51,7 @@ from typing import Callable, Literal, Tuple, NamedTuple, get_args
 import jax
 import jax.numpy as jnp
 from jax import Array
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from krmhd.physics import (
     KRMHDState,
@@ -109,6 +110,45 @@ def _fields_from_state(state: KRMHDState) -> KRMHDFields:
         g=state.g,
         time=state.time,
     )
+
+
+# shard_map is jax.shard_map from JAX 0.6 and jax.experimental.shard_map before.
+# Both take mesh, in_specs and out_specs as keywords.
+_shard_map = getattr(jax, "shard_map", None)
+if _shard_map is None:
+    from jax.experimental.shard_map import shard_map as _shard_map
+
+
+def _mesh_specs(mesh: Mesh) -> KRMHDFields:
+    """How the fields lie on a mesh (Issue #191): g split along k_z, z± and time whole."""
+    whole = PartitionSpec()
+    return KRMHDFields(
+        z_plus=whole, z_minus=whole, g=PartitionSpec(mesh.axis_names[0]), time=whole
+    )
+
+
+def place_on_mesh(fields: KRMHDFields, mesh: Mesh) -> KRMHDFields:
+    """fields with z± replicated on every device of mesh and g split along k_z."""
+    specs = _mesh_specs(mesh)
+    return fields._replace(
+        z_plus=jax.device_put(fields.z_plus, NamedSharding(mesh, specs.z_plus)),
+        z_minus=jax.device_put(fields.z_minus, NamedSharding(mesh, specs.z_minus)),
+        g=jax.device_put(fields.g, NamedSharding(mesh, specs.g)),
+    )
+
+
+def validate_mesh(mesh: Mesh | None, scheme: str, M: int, Nz: int) -> None:
+    """Raise ValueError unless a step can shard its Hermite slices over mesh."""
+    if mesh is None:
+        return
+    if scheme != "lawson_rk4":
+        raise ValueError(f"mesh needs scheme='lawson_rk4' (got {scheme!r})")
+    if len(mesh.axis_names) != 1:
+        raise ValueError(f"mesh must have one axis (got {mesh.axis_names})")
+    if M < 1:
+        raise ValueError(f"mesh shards the M + 1 Hermite slices, so it needs M >= 1 (got M={M})")
+    if Nz % mesh.size:
+        raise ValueError(f"mesh needs Nz divisible by its {mesh.size} devices (got Nz={Nz})")
 
 
 def _state_from_fields(fields: KRMHDFields, state_template: KRMHDState) -> KRMHDState:
@@ -422,7 +462,8 @@ def _slice_advection_rhs(
 @partial(
     jax.jit,
     static_argnames=[
-        "Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n", "hyper_rz", "closure", "hermite_chunk"
+        "Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n", "hyper_rz", "closure", "hermite_chunk",
+        "mesh",
     ],
 )
 def _gandalf_step_lawson_rk4_jit(
@@ -450,6 +491,7 @@ def _gandalf_step_lawson_rk4_jit(
     streaming_P_inv_T: Array = None,
     closure: str = "zero",
     hermite_chunk: int | None = None,
+    mesh: Mesh | None = None,
 ) -> KRMHDFields:
     """
     JIT-compiled mixed integrating-factor timestepper (scheme="lawson_rk4").
@@ -548,7 +590,13 @@ def _gandalf_step_lawson_rk4_jit(
         hermite_chunk: Slices advanced together in place (static). None
             (default): one slice at a time when g has more than
             hermite.HERMITE_IN_PLACE_ENTRIES entries, all at once otherwise.
+            With a mesh, both apply to each device's share of g and slices.
             Results do not depend on it beyond round-off.
+        mesh: One-axis jax.sharding.Mesh to shard the slices over (static;
+            Issue #191). None (default): one device. With a mesh, g is
+            sharded along k_z and z± are replicated, in and out; see
+            _lawson_rk4_step. Needs M >= 1 and Nz divisible by the mesh size
+            (validate_mesh).
 
     Returns:
         Updated KRMHDFields after full timestep
@@ -558,6 +606,61 @@ def _gandalf_step_lawson_rk4_jit(
         Hermite stages in the slice basis, each stage one batched advection
         per group of slices. For M = 0 (pure fluid) the Hermite sector is only
         damped and dealiased, as before.
+    """
+    step = partial(
+        _lawson_rk4_step, M=M, Nz=Nz, Ny=Ny, Nx=Nx, hyper_r=hyper_r, hyper_n=hyper_n,
+        hyper_rz=hyper_rz, hermite_chunk=hermite_chunk, mesh=mesh,
+    )
+    args = (
+        fields, dt, kx, ky, kz, dealias_mask, eta, beta_i, nu, eta_z,
+        streaming_eigenvalues, streaming_P_T, streaming_P_inv_T,
+    )
+    if mesh is None:
+        return step(*args)
+    specs = _mesh_specs(mesh)
+    return _shard_map(
+        step, mesh=mesh, in_specs=(specs,) + (PartitionSpec(),) * (len(args) - 1), out_specs=specs
+    )(*args)
+
+
+def _lawson_rk4_step(
+    fields: KRMHDFields,
+    dt: float,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    eta: float,
+    beta_i: float,
+    nu: float,
+    eta_z: float,
+    streaming_eigenvalues: Array,
+    streaming_P_T: Array,
+    streaming_P_inv_T: Array,
+    *,
+    M: int,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+    hyper_r: int,
+    hyper_n: int,
+    hyper_rz: int,
+    hermite_chunk: int | None,
+    mesh: Mesh | None,
+) -> KRMHDFields:
+    """
+    The step of _gandalf_step_lawson_rk4_jit (see there), on one device or on
+    one device of a mesh.
+
+    With a mesh (Issue #191) it runs inside shard_map. fields.g is then this
+    device's k_z planes, [Nz/D, Ny, Nx//2+1, M+1] for D devices, and every
+    other input is whole. The device computes the Elsasser update and the
+    gradients of Φ and Ψ itself, since every slice needs them whole. It
+    projects its planes onto all the slices, then one all-to-all gives it all
+    k_z planes of its own ⌈(M+1)/D⌉ slices (zero slices pad M + 1 to a
+    multiple of D). It advances those slices, and a second all-to-all and the
+    back-projection return its k_z planes of g^(n+1). These two all-to-alls are
+    the step's only communication.
     """
     # Build 3D arrays
     kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
@@ -753,22 +856,48 @@ def _gandalf_step_lawson_rk4_jit(
             )  # Shape: [M+1]
             P = P * collision_factors[:, jnp.newaxis]
 
+        # The slices this device advances: all M + 1 on one device. On a mesh
+        # of D devices (Issue #191), zero slices pad M + 1 to D·n_own and stay
+        # zero, and device d advances slices d·n_own to (d + 1)·n_own - 1.
+        g = fields.g
+        n_own, lam_own, pad = M + 1, lam, 0
+        if mesh is not None:
+            n_own = -(-(M + 1) // mesh.size)
+            pad = n_own * mesh.size - (M + 1)
+            if pad:
+                P_inv = jnp.pad(P_inv, ((0, pad), (0, pad)))
+                P = jnp.pad(P, ((0, pad), (0, pad)))
+                g = jnp.pad(g, ((0, 0), (0, 0), (0, 0), (0, pad)))
+            lam_own = jax.lax.dynamic_slice_in_dim(
+                jnp.pad(lam, (0, pad)), jax.lax.axis_index(mesh.axis_names[0]) * n_own, n_own
+            )
+
+        def exchange(h: Array, split_axis: int, concat_axis: int) -> Array:
+            """On a mesh, the all-to-all that splits h's slice axis (split_axis)
+            over the devices and gathers its k_z axis (concat_axis), or the
+            reverse; the identity on one device."""
+            if mesh is None:
+                return h
+            return jax.lax.all_to_all(h, mesh.axis_names[0], split_axis, concat_axis, tiled=True)
+
         if hermite_chunk is None:
             in_place = advance_in_place(fields.g)
             chunk = 1
         else:
-            chunk = min(hermite_chunk, M + 1)
-            in_place = chunk < M + 1
+            chunk = min(hermite_chunk, n_own)
+            in_place = chunk < n_own
         if not in_place:
-            g_new = _from_slices(rk4(_to_slices(fields.g, P_inv), lam), P)
+            h = exchange(_to_slices(g, P_inv), 0, 1)
+            g_new = _from_slices(exchange(rk4(h, lam_own), 1, 0), P)
         else:
             # One g-sized buffer holds g, then the slices, then g^(n+1)
-            # (Issue #186). The slices are independent, so each group runs
-            # all four stages and goes back to the moment slots it came from.
+            # (Issue #186); on a mesh each all-to-all needs a second one. The
+            # slices are independent, so each group runs all four stages and
+            # goes back to the moment slots it came from.
 
             def advance(g: Array, j0: Array | int, size: int) -> Array:
                 h = jnp.moveaxis(jax.lax.dynamic_slice_in_dim(g, j0, size, axis=3), 3, 0)
-                acc = rk4(h, jax.lax.dynamic_slice_in_dim(lam, j0, size))
+                acc = rk4(h, jax.lax.dynamic_slice_in_dim(lam_own, j0, size))
                 return jax.lax.dynamic_update_slice_in_dim(
                     g, jnp.moveaxis(acc, 0, 3), j0, axis=3
                 )
@@ -776,12 +905,14 @@ def _gandalf_step_lawson_rk4_jit(
             # The dtype the all-at-once path would give: g promoted with the
             # eigensystem, the Elsasser fields and the wavenumbers.
             dtype = jnp.result_type(fields.g, P, fields.z_plus, fields.z_minus, kx, ky, kz)
-            g = _apply_moment_matrix(fields.g.astype(dtype), P_inv)
-            n_full, rem = divmod(M + 1, chunk)
+            g = exchange(_apply_moment_matrix(g.astype(dtype), P_inv), 3, 0)
+            n_full, rem = divmod(n_own, chunk)
             g = jax.lax.fori_loop(0, n_full, lambda i, g: advance(g, i * chunk, chunk), g)
             if rem:
                 g = advance(g, n_full * chunk, rem)
-            g_new = _apply_moment_matrix(g, P)
+            g_new = _apply_moment_matrix(exchange(g, 0, 3), P)
+        if pad:
+            g_new = g_new[..., : M + 1]
 
     # =========================================================================
     # Step 5: Damp the Elsasser fields (after the Hermite stages, which sample
@@ -1553,6 +1684,7 @@ def gandalf_step(
     hyper_rz: int = 1,
     closure: HermiteClosure = "zero",
     hermite_chunk: int | None = None,
+    mesh: Mesh | None = None,
 ) -> KRMHDState:
     """
     Advance KRMHD state using the mixed GANDALF integrating-factor method.
@@ -1666,6 +1798,16 @@ def gandalf_step(
             slice at a time when g has more than
             hermite.HERMITE_IN_PLACE_ENTRIES (2^26) entries and all of them
             at once otherwise. Results do not depend on it beyond round-off.
+        mesh: One-axis jax.sharding.Mesh over which scheme="lawson_rk4"
+            shards its Hermite slices (Issue #191), e.g.
+            Mesh(jax.devices(), ("slices",)). Default None: one device. The
+            returned state has g split along k_z over the mesh and z±
+            replicated; a state on one device is placed so first. Each step
+            then makes two all-to-alls of g's size over the devices, and
+            results match one device to round-off. hermite_chunk and the
+            in-place threshold apply to each device's share. Needs M >= 1 and
+            Nz divisible by the number of devices. See
+            docs/multi_gpu_slices.md for the tradeoff.
 
     Returns:
         New KRMHDState at time t + dt
@@ -1676,6 +1818,8 @@ def gandalf_step(
         ValueError: If closure is unknown, or "symmetric" with M < 2
         ValueError: If hyper_rz not in [1, 2, 4, 8]
         ValueError: If scheme not in {"imex_rk222", "imex_ars343", "lawson_rk4"}
+        ValueError: If mesh is given with another scheme, more than one axis,
+            M = 0, or Nz not divisible by its size
         ValueError: If hyper-collision overflow risk detected (nu·dt >= 50, normalized;
             Lawson path only — the IMEX solve is unconditionally stable)
         ValueError: If hyper-resistivity overflow risk detected (eta·dt >= 50, normalized)
@@ -1770,9 +1914,12 @@ def gandalf_step(
     _validate_step_args(
         state, dt, eta, nu_effective, hyper_r, hyper_n, scheme, eta_z, hyper_rz, closure
     )
+    validate_mesh(mesh, scheme, state.M, state.grid.Nz)
 
     grid = state.grid
     fields = _fields_from_state(state)
+    if mesh is not None:
+        fields = place_on_mesh(fields, mesh)
 
     if scheme == "lawson_rk4":
         # Precompute Hermite streaming eigensystem for integrating factor (cached)
@@ -1813,6 +1960,7 @@ def gandalf_step(
             streaming_P_inv_T=P_inv.T,
             closure=closure,
             hermite_chunk=hermite_chunk,
+            mesh=mesh,
         )
     elif scheme == "imex_ars343":
         new_fields = _gandalf_step_imex343_jit(
