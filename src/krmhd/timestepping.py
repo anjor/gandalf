@@ -66,7 +66,7 @@ from krmhd.hermite import (
     imex_solve,
     validate_closure,
 )
-from krmhd.spectral import derivative_x, derivative_y, rfftn_inverse
+from krmhd.spectral import SpectralGrid3D, derivative_x, derivative_y, rfftn_inverse
 
 
 # =============================================================================
@@ -1316,6 +1316,134 @@ def _gandalf_step_imex343_jit(
     )
 
 
+def _validate_step_args(
+    state: KRMHDState,
+    dt: float,
+    eta: float,
+    nu_effective: float,
+    hyper_r: int,
+    hyper_n: int,
+    scheme: str,
+    eta_z: float,
+    hyper_rz: int,
+    closure: str,
+) -> None:
+    """Check gandalf_step's arguments; raises or warns as its docstring lists.
+
+    Shared with the multi-step loop (krmhd.runloop), which checks once per run.
+    """
+    # Input validation for hyper parameters
+    if hyper_r not in (1, 2, 4, 8):
+        raise ValueError(f"hyper_r must be 1, 2, 4, or 8 (got {hyper_r})")
+
+    if hyper_n not in (1, 2, 3, 4, 6):
+        raise ValueError(f"hyper_n must be 1, 2, 3, 4, or 6 (got {hyper_n})")
+
+    if hyper_rz not in (1, 2, 4, 8):
+        raise ValueError(f"hyper_rz must be 1, 2, 4, or 8 (got {hyper_rz})")
+
+    if scheme not in SUPPORTED_SCHEMES:
+        raise ValueError(
+            f"scheme must be one of {sorted(SUPPORTED_SCHEMES)} (got {scheme!r})"
+        )
+
+    validate_closure(closure, state.M)
+
+    # Validate M for collision operator (prevents division by zero)
+    # Collision damping rate = ν·(m/M)^n requires M >= 2 for well-defined rates
+    # M=0 (and M=1) are allowed for pure fluid RMHD runs when collisions are disabled (nu=0)
+    # Strict > 0 check is intentional: even tiny nu (e.g. 1e-15) requires M>=2
+    if state.M < 2 and nu_effective > 0:
+        raise ValueError(
+            f"M must be >= 2 when collisions are enabled (got M={state.M}, nu={nu_effective}). "
+            "Collision damping uses (m/M)^n, requiring M >= 2 for meaningful rates. "
+            "For pure fluid RMHD, set nu=0."
+        )
+
+    # Safety check for hyper-collision overflow with NORMALIZED dissipation.
+    # Only the Lawson path applies damping via exp(-ν·(m/M)^n·dt), which can
+    # underflow for large nu·dt. The IMEX path folds damping into an implicit
+    # solve (unconditionally stable) and needs no such guard.
+    max_collision_rate = nu_effective * dt
+
+    if scheme == "lawson_rk4":
+        if max_collision_rate >= MAX_DAMPING_RATE_THRESHOLD:
+            safe_nu = MAX_DAMPING_RATE_THRESHOLD / dt
+            raise ValueError(
+                f"Hyper-collision overflow risk detected!\n"
+                f"  Parameter: nu·dt = {nu_effective}·{dt} = {max_collision_rate:.2e}\n"
+                f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
+                f"  Solution: Reduce nu to < {safe_nu:.2e} or reduce dt\n"
+                f"  Note: With normalized dissipation, constraint is nu·dt < {MAX_DAMPING_RATE_THRESHOLD} (independent of M or n!)"
+            )
+
+        # Warning for moderate risk (20-50)
+        if max_collision_rate >= DAMPING_RATE_WARNING_THRESHOLD:
+            warnings.warn(
+                f"Hyper-collision damping rate is high: nu·dt = {max_collision_rate:.2e}. "
+                f"Consider reducing nu or dt to improve numerical stability.",
+                RuntimeWarning
+            )
+
+    # Safety check for hyper-resistivity overflow with NORMALIZED dissipation
+    # With normalization: exp(-η·(k⊥²/k⊥²_max)^r·dt), maximum rate at k⊥=k⊥_max is simply η·dt
+    # This is RESOLUTION-INDEPENDENT in k-space (matches original GANDALF damping_kernel.cu:50)
+    max_resistivity_rate = eta * dt
+
+    if max_resistivity_rate >= MAX_DAMPING_RATE_THRESHOLD:
+        safe_eta = MAX_DAMPING_RATE_THRESHOLD / dt
+        raise ValueError(
+            f"Hyper-resistivity overflow risk detected!\n"
+            f"  Parameter: eta·dt = {eta}·{dt} = {max_resistivity_rate:.2e}\n"
+            f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
+            f"  Solution: Reduce eta to < {safe_eta:.2e} or reduce dt\n"
+            f"  Note: With normalized dissipation, constraint is eta·dt < {MAX_DAMPING_RATE_THRESHOLD} (independent of resolution or r!)"
+        )
+
+    # Warning for moderate risk (20-50)
+    if max_resistivity_rate >= DAMPING_RATE_WARNING_THRESHOLD:
+        warnings.warn(
+            f"Hyper-resistivity damping rate is high: eta·dt = {max_resistivity_rate:.2e}. "
+            f"Consider reducing eta or dt to improve numerical stability.",
+            RuntimeWarning
+        )
+
+    # Safety check for parallel (kz) hyper-resistivity overflow, mirroring eta.
+    # NORMALIZED formulation exp(-η_z·(kz²/kz²_max)^rz·dt): maximum rate at
+    # kz=kz_max is simply η_z·dt (matches original GANDALF damping_kernel.cu:4-33)
+    max_kz_resistivity_rate = eta_z * dt
+
+    if max_kz_resistivity_rate >= MAX_DAMPING_RATE_THRESHOLD:
+        safe_eta_z = MAX_DAMPING_RATE_THRESHOLD / dt
+        raise ValueError(
+            f"Parallel hyper-resistivity overflow risk detected!\n"
+            f"  Parameter: eta_z·dt = {eta_z}·{dt} = {max_kz_resistivity_rate:.2e}\n"
+            f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
+            f"  Solution: Reduce eta_z to < {safe_eta_z:.2e} or reduce dt\n"
+            f"  Note: With normalized dissipation, constraint is eta_z·dt < {MAX_DAMPING_RATE_THRESHOLD} (independent of resolution or rz!)"
+        )
+
+    # Warning for moderate risk (20-50)
+    if max_kz_resistivity_rate >= DAMPING_RATE_WARNING_THRESHOLD:
+        warnings.warn(
+            f"Parallel hyper-resistivity damping rate is high: eta_z·dt = {max_kz_resistivity_rate:.2e}. "
+            f"Consider reducing eta_z or dt to improve numerical stability.",
+            RuntimeWarning
+        )
+
+    # Normalized kz damping needs at least one nonzero kz mode inside the 2/3
+    # dealias boundary: idz_max = (Nz-1)//3 >= 1. For tiny Nz (e.g. Nz=2,
+    # the 2D-style grids) kz[idz_max] = 0 and the normalization is undefined.
+    # The original GANDALF guarded dampz with `if (Nz > 1)`; the JIT kernels
+    # skip the kz damping block entirely (static branch) in that case.
+    if eta_z > 0 and (state.grid.Nz - 1) // 3 < 1:
+        raise ValueError(
+            f"eta_z > 0 requires a grid with (Nz-1)//3 >= 1 (got Nz={state.grid.Nz}). "
+            f"Normalized parallel dissipation exp(-eta_z·(kz²/kz²_max)^rz·dt) needs "
+            f"a nonzero kz_max at the 2/3 dealias boundary; use Nz >= 4 or set eta_z=0."
+        )
+
+
 def gandalf_step(
     state: KRMHDState,
     dt: float,
@@ -1536,116 +1664,9 @@ def gandalf_step(
     # Use provided nu or fall back to state.nu
     nu_effective = nu if nu is not None else state.nu
 
-    # Input validation for hyper parameters
-    if hyper_r not in (1, 2, 4, 8):
-        raise ValueError(f"hyper_r must be 1, 2, 4, or 8 (got {hyper_r})")
-
-    if hyper_n not in (1, 2, 3, 4, 6):
-        raise ValueError(f"hyper_n must be 1, 2, 3, 4, or 6 (got {hyper_n})")
-
-    if hyper_rz not in (1, 2, 4, 8):
-        raise ValueError(f"hyper_rz must be 1, 2, 4, or 8 (got {hyper_rz})")
-
-    if scheme not in SUPPORTED_SCHEMES:
-        raise ValueError(
-            f"scheme must be one of {sorted(SUPPORTED_SCHEMES)} (got {scheme!r})"
-        )
-
-    validate_closure(closure, state.M)
-
-    # Validate M for collision operator (prevents division by zero)
-    # Collision damping rate = ν·(m/M)^n requires M >= 2 for well-defined rates
-    # M=0 (and M=1) are allowed for pure fluid RMHD runs when collisions are disabled (nu=0)
-    # Strict > 0 check is intentional: even tiny nu (e.g. 1e-15) requires M>=2
-    if state.M < 2 and nu_effective > 0:
-        raise ValueError(
-            f"M must be >= 2 when collisions are enabled (got M={state.M}, nu={nu_effective}). "
-            "Collision damping uses (m/M)^n, requiring M >= 2 for meaningful rates. "
-            "For pure fluid RMHD, set nu=0."
-        )
-
-    # Safety check for hyper-collision overflow with NORMALIZED dissipation.
-    # Only the Lawson path applies damping via exp(-ν·(m/M)^n·dt), which can
-    # underflow for large nu·dt. The IMEX path folds damping into an implicit
-    # solve (unconditionally stable) and needs no such guard.
-    max_collision_rate = nu_effective * dt
-
-    if scheme == "lawson_rk4":
-        if max_collision_rate >= MAX_DAMPING_RATE_THRESHOLD:
-            safe_nu = MAX_DAMPING_RATE_THRESHOLD / dt
-            raise ValueError(
-                f"Hyper-collision overflow risk detected!\n"
-                f"  Parameter: nu·dt = {nu_effective}·{dt} = {max_collision_rate:.2e}\n"
-                f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
-                f"  Solution: Reduce nu to < {safe_nu:.2e} or reduce dt\n"
-                f"  Note: With normalized dissipation, constraint is nu·dt < {MAX_DAMPING_RATE_THRESHOLD} (independent of M or n!)"
-            )
-
-        # Warning for moderate risk (20-50)
-        if max_collision_rate >= DAMPING_RATE_WARNING_THRESHOLD:
-            warnings.warn(
-                f"Hyper-collision damping rate is high: nu·dt = {max_collision_rate:.2e}. "
-                f"Consider reducing nu or dt to improve numerical stability.",
-                RuntimeWarning
-            )
-
-    # Safety check for hyper-resistivity overflow with NORMALIZED dissipation
-    # With normalization: exp(-η·(k⊥²/k⊥²_max)^r·dt), maximum rate at k⊥=k⊥_max is simply η·dt
-    # This is RESOLUTION-INDEPENDENT in k-space (matches original GANDALF damping_kernel.cu:50)
-    max_resistivity_rate = eta * dt
-
-    if max_resistivity_rate >= MAX_DAMPING_RATE_THRESHOLD:
-        safe_eta = MAX_DAMPING_RATE_THRESHOLD / dt
-        raise ValueError(
-            f"Hyper-resistivity overflow risk detected!\n"
-            f"  Parameter: eta·dt = {eta}·{dt} = {max_resistivity_rate:.2e}\n"
-            f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
-            f"  Solution: Reduce eta to < {safe_eta:.2e} or reduce dt\n"
-            f"  Note: With normalized dissipation, constraint is eta·dt < {MAX_DAMPING_RATE_THRESHOLD} (independent of resolution or r!)"
-        )
-
-    # Warning for moderate risk (20-50)
-    if max_resistivity_rate >= DAMPING_RATE_WARNING_THRESHOLD:
-        warnings.warn(
-            f"Hyper-resistivity damping rate is high: eta·dt = {max_resistivity_rate:.2e}. "
-            f"Consider reducing eta or dt to improve numerical stability.",
-            RuntimeWarning
-        )
-
-    # Safety check for parallel (kz) hyper-resistivity overflow, mirroring eta.
-    # NORMALIZED formulation exp(-η_z·(kz²/kz²_max)^rz·dt): maximum rate at
-    # kz=kz_max is simply η_z·dt (matches original GANDALF damping_kernel.cu:4-33)
-    max_kz_resistivity_rate = eta_z * dt
-
-    if max_kz_resistivity_rate >= MAX_DAMPING_RATE_THRESHOLD:
-        safe_eta_z = MAX_DAMPING_RATE_THRESHOLD / dt
-        raise ValueError(
-            f"Parallel hyper-resistivity overflow risk detected!\n"
-            f"  Parameter: eta_z·dt = {eta_z}·{dt} = {max_kz_resistivity_rate:.2e}\n"
-            f"  Threshold: Must be < {MAX_DAMPING_RATE_THRESHOLD} to avoid exp() underflow\n"
-            f"  Solution: Reduce eta_z to < {safe_eta_z:.2e} or reduce dt\n"
-            f"  Note: With normalized dissipation, constraint is eta_z·dt < {MAX_DAMPING_RATE_THRESHOLD} (independent of resolution or rz!)"
-        )
-
-    # Warning for moderate risk (20-50)
-    if max_kz_resistivity_rate >= DAMPING_RATE_WARNING_THRESHOLD:
-        warnings.warn(
-            f"Parallel hyper-resistivity damping rate is high: eta_z·dt = {max_kz_resistivity_rate:.2e}. "
-            f"Consider reducing eta_z or dt to improve numerical stability.",
-            RuntimeWarning
-        )
-
-    # Normalized kz damping needs at least one nonzero kz mode inside the 2/3
-    # dealias boundary: idz_max = (Nz-1)//3 >= 1. For tiny Nz (e.g. Nz=2,
-    # the 2D-style grids) kz[idz_max] = 0 and the normalization is undefined.
-    # The original GANDALF guarded dampz with `if (Nz > 1)`; the JIT kernels
-    # skip the kz damping block entirely (static branch) in that case.
-    if eta_z > 0 and (state.grid.Nz - 1) // 3 < 1:
-        raise ValueError(
-            f"eta_z > 0 requires a grid with (Nz-1)//3 >= 1 (got Nz={state.grid.Nz}). "
-            f"Normalized parallel dissipation exp(-eta_z·(kz²/kz²_max)^rz·dt) needs "
-            f"a nonzero kz_max at the 2/3 dealias boundary; use Nz >= 4 or set eta_z=0."
-        )
+    _validate_step_args(
+        state, dt, eta, nu_effective, hyper_r, hyper_n, scheme, eta_z, hyper_rz, closure
+    )
 
     grid = state.grid
     fields = _fields_from_state(state)
@@ -1881,8 +1902,41 @@ def compute_cfl_timestep(
     """
     if mode not in get_args(CFLMode):
         raise ValueError(f"mode must be one of {get_args(CFLMode)}, got {mode!r}")
-    grid = state.grid
+    dt_slices = None
+    if state.M > 0 and mode == "exact":
+        dt_slices = _exact_slice_timestep(state, closure)
 
+    dt_cfl = cfl_timestep_estimate(
+        state.z_plus, state.z_minus, state.grid, state.M, state.beta_i, state.Lambda,
+        v_A, cfl_safety, closure, hermite=dt_slices is None,
+    )
+    if dt_slices is not None:
+        dt_cfl = jnp.minimum(dt_cfl, cfl_safety * dt_slices)
+    return float(dt_cfl)
+
+
+def cfl_timestep_estimate(
+    z_plus: Array,
+    z_minus: Array,
+    grid: SpectralGrid3D,
+    M: int,
+    beta_i: float,
+    Lambda: float,
+    v_A: float,
+    cfl_safety: float = 0.3,
+    closure: HermiteClosure = "zero",
+    hermite: bool = True,
+) -> Array:
+    """compute_cfl_timestep's Courant estimate as a device scalar, traceable under jit.
+
+    Same arithmetic as compute_cfl_timestep(mode="courant"), which calls it
+    and converts the result to a Python float. z_plus and z_minus may be
+    tracers; grid, M, beta_i, Lambda, v_A, cfl_safety and closure are
+    trace-time constants (the grid may also be a traced pytree: only its
+    arrays are read as data). hermite=False leaves out the Hermite advection
+    term, which mode="exact" replaces. The device run loop (krmhd.runloop)
+    evaluates it inside its step loop.
+    """
     # Grid spacings
     dx = grid.Lx / grid.Nx
     dy = grid.Ly / grid.Ny
@@ -1907,26 +1961,22 @@ def compute_cfl_timestep(
     # |∇⊥z⁺| and |∇⊥z⁻| bound the perpendicular dynamics. This dominates
     # the |∇⊥φ| estimate (φ is the average of z±, so its gradient never
     # exceeds the larger of the two).
-    v_z_plus_max = max_perp_gradient(state.z_plus)
-    v_z_minus_max = max_perp_gradient(state.z_minus)
+    v_z_plus_max = max_perp_gradient(z_plus)
+    v_z_minus_max = max_perp_gradient(z_minus)
 
     v_max = jnp.maximum(v_A, jnp.maximum(v_z_plus_max, v_z_minus_max))
 
-    dt_slices = None
-    if state.M > 0 and mode == "exact":
-        dt_slices = _exact_slice_timestep(state, closure)
-
-    if state.M > 0 and dt_slices is None:
+    if M > 0 and hermite:
         # Hermite advection (Issue #157): each eigencombination of the ladder
         # matrix T moves with stream function Φ + √β_i λ_j Ψ. |∇⊥(Φ + cΨ)|²
         # is convex in c, so over real λ_j the max sits at λ_lo or λ_hi.
-        validate_closure(closure, state.M)
+        validate_closure(closure, M)
         lam_lo, lam_hi, lam_complex = _streaming_eigenvalue_extremes(
-            state.M, float(state.Lambda), closure
+            M, float(Lambda), closure
         )
-        sqrt_beta = math.sqrt(state.beta_i)
-        Phi = (state.z_plus + state.z_minus) / 2.0
-        Psi = (state.z_plus - state.z_minus) / 2.0
+        sqrt_beta = math.sqrt(beta_i)
+        Phi = (z_plus + z_minus) / 2.0
+        Psi = (z_plus - z_minus) / 2.0
         dPhi_dx, dPhi_dy = perp_gradient(Phi)
         dPsi_dx, dPsi_dy = perp_gradient(Psi)
 
@@ -1948,8 +1998,6 @@ def compute_cfl_timestep(
 
     # CFL timestep
     dt_cfl = cfl_safety * min_spacing / v_max
-    if dt_slices is not None:
-        dt_cfl = jnp.minimum(dt_cfl, cfl_safety * dt_slices)
 
     # Note: No parallel Hermite streaming constraint needed for either scheme.
     # - Lawson path: the integrating factor handles oscillatory streaming
@@ -1957,7 +2005,7 @@ def compute_cfl_timestep(
     # - IMEX path (Issue #137): streaming is part of the implicit operator
     #   L and solved unconditionally stably each stage.
 
-    return float(dt_cfl)
+    return dt_cfl
 
 
 # =============================================================================

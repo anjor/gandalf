@@ -344,14 +344,22 @@ class TestPauseResume:
 
     @staticmethod
     def _config(output_dir, checkpoint_interval=None):
-        from krmhd.config import ForcingConfig
+        """A run forced from rest hard enough that the CFL dt changes every step."""
+        from krmhd.config import ForcingConfig, InitialConditionConfig
         return decaying_turbulence_config(
             grid=GridConfig(Nx=8, Ny=8, Nz=8),
+            initial_condition=InitialConditionConfig(type="zero", M=4),
             time_integration=TimeIntegrationConfig(n_steps=5, save_interval=1,
                                                    checkpoint_interval=checkpoint_interval),
             io=IOConfig(output_dir=str(output_dir)),
-            forcing=ForcingConfig(enabled=True, amplitude=0.1, k_min=1.0, k_max=3.0, seed=7),
+            forcing=ForcingConfig(enabled=True, amplitude=5.0, k_min=1.0, k_max=3.0, seed=7),
         )
+
+    @staticmethod
+    def _meta(config, step):
+        from krmhd.io import load_checkpoint
+        path = Path(config.io.output_dir) / f"checkpoint_step{step:06d}.h5"
+        return load_checkpoint(str(path), enforce_hermitian=False)[2]
 
     def test_paused_and_resumed_run_matches_uninterrupted_run(self, tmp_path):
         ref_state, ref_history, _ = run_simulation(self._config(tmp_path / "ref"), verbose=False)
@@ -365,6 +373,10 @@ class TestPauseResume:
             except SimulationPaused as pause:
                 steps.append(pause.step)
         assert steps == [1, 2, 3, 4]  # a pause after every step; the last step finishes the run
+        # each resumed call keeps the forcing reference dt of the first, while dt adapts
+        metas = [self._meta(config, n) for n in steps]
+        assert len({m['forcing_dt_ref'] for m in metas}) == 1
+        assert len({m['dt'] for m in metas}) == len(metas)
         np.testing.assert_array_equal(np.asarray(state.z_plus), np.asarray(ref_state.z_plus))
         np.testing.assert_array_equal(np.asarray(state.g), np.asarray(ref_state.g))
         assert history.times == pytest.approx(ref_history.times)
@@ -378,6 +390,29 @@ class TestPauseResume:
         state, history, _ = run_simulation(self._config(out, checkpoint_interval=2), verbose=False, resume=True)
         np.testing.assert_array_equal(np.asarray(state.z_plus), np.asarray(ref_state.z_plus))
         assert history.times == pytest.approx(ref_history.times)
+
+    def test_forcing_reference_dt_is_the_initial_dt(self, tmp_path):
+        from krmhd import compute_cfl_timestep
+        config = self._config(tmp_path, checkpoint_interval=2)
+        run_simulation(config, verbose=False)
+        dt0 = compute_cfl_timestep(config.create_initial_state(config.create_grid()), v_A=config.physics.v_A,
+                                   cfl_safety=config.time_integration.cfl_safety, closure=config.physics.closure)
+        meta = self._meta(config, 4)
+        assert meta['forcing_dt_ref'] == dt0
+        assert meta['dt'] != dt0  # dt adapted; the forcing keeps the injection rate of dt0
+
+    def test_resume_without_reference_dt_uses_the_resumed_dt(self, tmp_path, capsys):
+        import h5py
+        config = self._config(tmp_path, checkpoint_interval=2)
+        run_simulation(config, verbose=False)
+        (tmp_path / "checkpoint_step000004.h5").unlink()
+        with h5py.File(tmp_path / "checkpoint_step000002.h5", "a") as f:  # as written before #188
+            del f['metadata'].attrs['forcing_dt_ref']
+        capsys.readouterr()
+
+        run_simulation(config, verbose=False, resume=True)
+        assert "has no forcing_dt_ref" in capsys.readouterr().out
+        assert self._meta(config, 4)['forcing_dt_ref'] == self._meta(config, 2)['dt']
 
     def test_cli_exit_status_and_resume_in_a_non_empty_folder(self, tmp_path, monkeypatch):
         import run_simulation as cli
@@ -397,3 +432,24 @@ class TestPauseResume:
         monkeypatch.setattr(sys, "argv", argv)
         cli.main()  # resumes and finishes
         assert (out / "final_state.h5").exists()
+
+
+class TestAdaptiveTimestep:
+    """Without dt_fixed, dt is the CFL estimate re-evaluated after every step (Issue #188)."""
+
+    def test_forced_run_from_rest_shortens_dt(self, tmp_path):
+        from krmhd.config import ForcingConfig, InitialConditionConfig
+        from krmhd.io import load_checkpoint
+
+        config = decaying_turbulence_config(
+            grid=GridConfig(Nx=8, Ny=8, Nz=8),
+            initial_condition=InitialConditionConfig(type="zero", M=4),
+            time_integration=TimeIntegrationConfig(n_steps=6, save_interval=3, checkpoint_interval=3),
+            io=IOConfig(output_dir=str(tmp_path)),
+            forcing=ForcingConfig(enabled=True, amplitude=5.0, k_min=1.0, k_max=3.0, seed=0),
+        )
+        run_simulation(config, verbose=False)
+
+        dt_at_rest = config.time_integration.cfl_safety * (2 * np.pi / 8) / config.physics.v_A
+        dts = [load_checkpoint(str(tmp_path / f"checkpoint_step{n:06d}.h5"))[2]["dt"] for n in (3, 6)]
+        assert dts[1] < dts[0] < dt_at_rest

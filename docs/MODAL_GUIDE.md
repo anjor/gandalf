@@ -547,8 +547,8 @@ This will create checkpoints at:
 ### Resuming from Checkpoint
 
 `scripts/run_simulation.py --resume` continues from the latest `checkpoint_step<N>.h5` in
-the output folder: state, step, time, timestep, forcing key and energy history, so the
-continued run matches an uninterrupted one. Without a checkpoint it starts a new run.
+the output folder: state, step, time, timestep, forcing key, forcing reference dt and energy
+history, so the continued run matches an uninterrupted one. Without a checkpoint it starts a new run.
 `--max-wall-hours H` checkpoints and exits with status 3 once the call has run for H hours.
 Together they make a run that Modal continues past 24 h by itself; see
 [Runs longer than 24 hours](#runs-longer-than-24-hours). The `submit` command does not
