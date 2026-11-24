@@ -22,6 +22,7 @@ from krmhd.physics import KRMHDState, poisson_bracket_3d
 from krmhd.spectral import SpectralGrid3D
 from krmhd.timestepping import (
     RK4_IMAGINARY_AXIS_LIMIT,
+    _perp_gradients,
     _slice_advection_rhs,
     _streaming_eigenvalue_extremes,
     compute_cfl_timestep,
@@ -201,12 +202,13 @@ class TestSharpStabilityLimit:
             rad = _radius(grid, z_plus, z_minus, speeds, tol=1e-10)
             noise = np.random.default_rng(0).standard_normal((Nz, Ny, Nx))
             a0 = (jnp.fft.rfftn(noise) * grid.dealias_mask)[jnp.newaxis]
+            grads = _perp_gradients(z_plus, z_minus, grid.kx, grid.ky, Nz, Ny, Nx)
             for j, c in enumerate(speeds):
                 c_j = jnp.array([c])
 
                 def advect(a, c_j=c_j):
                     return _slice_advection_rhs(
-                        z_plus, z_minus, a, c_j, grid.kx, grid.ky, grid.dealias_mask, Nz, Ny, Nx
+                        grads, a, c_j, grid.kx, grid.ky, grid.dealias_mask, Nz, Ny, Nx
                     )
 
                 dt_limit = RK4_IMAGINARY_AXIS_LIMIT / float(rad.rho[j])

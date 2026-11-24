@@ -22,6 +22,7 @@ import pytest
 from jax.experimental import enable_x64
 from scipy.linalg import expm
 
+from krmhd import hermite
 from krmhd.hermite import compute_streaming_matrix, free_energy_weights
 from krmhd.physics import (
     KRMHDState,
@@ -33,6 +34,7 @@ from krmhd.physics import (
 from krmhd.spectral import SpectralGrid3D
 from krmhd.timestepping import (
     KRMHDFields,
+    _apply_moment_matrix,
     _fields_from_state,
     _gandalf_step_lawson_rk4_jit,
     _krmhd_rhs_jit,
@@ -200,7 +202,8 @@ def _eigensystem(M: int, Lambda: float, closure: str):
     return jnp.asarray(evals.real), jnp.asarray(P.real), jnp.asarray(np.linalg.inv(P).real)
 
 
-def _kernel_step(state, dt, eta, nu, hyper_r, hyper_n, eta_z, hyper_rz, closure, eigensystem):
+def _kernel_step(state, dt, eta, nu, hyper_r, hyper_n, eta_z, hyper_rz, closure, eigensystem,
+                 hermite_chunk=None):
     grid = state.grid
     evals, P, P_inv = eigensystem
     return _gandalf_step_lawson_rk4_jit(
@@ -208,7 +211,7 @@ def _kernel_step(state, dt, eta, nu, hyper_r, hyper_n, eta_z, hyper_rz, closure,
         eta, 1.0, state.beta_i, nu, state.Lambda, state.M, grid.Nz, grid.Ny, grid.Nx,
         hyper_r, hyper_n, eta_z=eta_z, hyper_rz=hyper_rz,
         streaming_eigenvalues=evals, streaming_P_T=P.T, streaming_P_inv_T=P_inv.T,
-        closure=closure,
+        closure=closure, hermite_chunk=hermite_chunk,
     )
 
 
@@ -299,6 +302,43 @@ def test_slice_step_projects_out_of_band_input():
         assert _rel_diff(new.g, ref.g) < 1e-12
 
 
+@pytest.mark.parametrize("M,Lambda,closure,nu,hyper_n,eta_z", [CASES[1], CASES[3], CASES[4], CASES[6]])
+@pytest.mark.parametrize("hermite_chunk,in_place", [
+    (None, False), (1, False), (2, False), (5, False), (64, False), (None, True), (3, True),
+])
+def test_slice_step_does_not_depend_on_hermite_chunk(M, Lambda, closure, nu, hyper_n, eta_z,
+                                                     hermite_chunk, in_place, monkeypatch):
+    """The slices advance in place in groups of hermite_chunk (Issue #186). Every group
+    size, with or without a remainder group and larger than M + 1 (all at once), gives
+    the Hermite-basis reference to round-off. in_place lowers the threshold
+    HERMITE_IN_PLACE_ENTRIES to 0, so the default on this small grid also takes the path
+    of large g: one slice at a time. It uses its own grid shape, so jit cannot reuse a
+    step traced with the default threshold."""
+    if in_place:
+        monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
+    with enable_x64():
+        grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=6 if in_place else 8)
+        state = _random_state(grid, M, Lambda, nu, seed=30 + M)
+        kw = dict(STEP, nu=nu, hyper_n=hyper_n, eta_z=eta_z, closure=closure)
+        new = _kernel_step(state, eigensystem=_eigensystem(M, Lambda, closure),
+                           hermite_chunk=hermite_chunk, **kw)
+        ref = _reference_lawson_rk4(state, **kw)
+        assert _rel_diff(new.z_plus, ref.z_plus) < 1e-13
+        assert _rel_diff(new.g, ref.g) < 1e-12, f"g differs by {_rel_diff(new.g, ref.g):.2e}"
+
+
+def test_moment_matrix_in_place_matches_einsum():
+    """For large g the projections overwrite g one k_z plane at a time (Issue #186). That
+    gives the single matmul g_m → Σ_n A[m, n] g_n to round-off."""
+    with enable_x64():
+        rng = np.random.default_rng(4)
+        shape = (12, 10, 7, 6)
+        g = jnp.asarray(rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+        A = jnp.asarray(rng.standard_normal((6, 6)))
+        out = _apply_moment_matrix(g, A)
+        assert _rel_diff(out, jnp.einsum("zyxn,mn->zyxm", g, A)) < 1e-14
+
+
 def test_slice_step_conserves_free_energy_without_dissipation():
     """Ideal step (η = ν = 0): streaming and advection conserve the free energy
     W = Σ_m p_m Σ_k w_k |g_m,k|² (w_k the rfft half-space weights). The streaming factor is
@@ -352,11 +392,12 @@ def _count_primitive(jaxpr, name: str) -> int:
 
 
 def test_traced_graph_does_not_grow_with_M():
-    """The Hermite stages are batched over slices, so the number of FFT calls in the traced
-    step is the same at every M (the moment-by-moment form grew linearly with M)."""
+    """The Hermite stages are batched over groups of slices, so the number of FFT calls in
+    the traced step is the same at every M (the moment-by-moment form grew linearly with M).
+    M = 12 and M = 44 both leave a remainder group of 5 after groups of 8."""
     grid = SpectralGrid3D.create(Nx=8, Ny=8, Nz=8)
     counts = {}
-    for M in (4, 12):
+    for M in (12, 44):
         state = _random_state(grid, M, math.sqrt(5.0), 1.0, seed=M)
         evals, P, P_inv = _eigensystem(M, math.sqrt(5.0), "zero")
 
@@ -366,9 +407,42 @@ def test_traced_graph_does_not_grow_with_M():
                 1.0, 1.0, state.beta_i, 1.0, state.Lambda, M, grid.Nz, grid.Ny, grid.Nx,
                 2, 6, eta_z=0.0, hyper_rz=1, streaming_eigenvalues=evals,
                 streaming_P_T=P.T, streaming_P_inv_T=P_inv.T, closure="zero",
+                hermite_chunk=8,
             )
 
         jaxpr = jax.make_jaxpr(step)(_fields_from_state(state))
         counts[M] = _count_primitive(jaxpr.jaxpr, "fft")
-    assert counts[4] == counts[12], counts
-    assert counts[4] > 0
+    assert counts[12] == counts[44], counts
+    assert counts[12] > 0
+
+
+def test_step_memory_does_not_scale_with_M():
+    """Issue #186: one g-sized buffer holds g, the slices and g^(n+1) in turn, and the
+    stage arrays scale with the slice group instead of M + 1. At 256³ the default group
+    is one slice. XLA's memory analysis of the compiled step (arguments + outputs +
+    temporaries; the CPU compiler here, nothing is allocated) stays below 3.5 copies of
+    g. Advancing all slices at once needed about 8 (input, output and six g-sized
+    temporaries)."""
+    Nx = Ny = Nz = 256
+    M = 31
+    real = jnp.zeros(()).dtype
+    cplx = (jnp.zeros(()) * 1j).dtype
+    S = jax.ShapeDtypeStruct
+    fields = KRMHDFields(
+        z_plus=S((Nz, Ny, Nx // 2 + 1), cplx),
+        z_minus=S((Nz, Ny, Nx // 2 + 1), cplx),
+        g=S((Nz, Ny, Nx // 2 + 1, M + 1), cplx),
+        time=S((), real),
+    )
+    compiled = _gandalf_step_lawson_rk4_jit.lower(
+        fields, 1e-3, S((Nx // 2 + 1,), real), S((Ny,), real), S((Nz,), real),
+        S((Nz, Ny, Nx // 2 + 1), jnp.bool_), 1.0, 1.0, 1.0, 1.0, math.sqrt(5.0),
+        M, Nz, Ny, Nx, 2, 6, eta_z=0.0, hyper_rz=1,
+        streaming_eigenvalues=S((M + 1,), real), streaming_P_T=S((M + 1, M + 1), real),
+        streaming_P_inv_T=S((M + 1, M + 1), real), closure="zero",
+    ).compile()
+    stats = compiled.memory_analysis()
+    peak = (stats.argument_size_in_bytes + stats.output_size_in_bytes
+            + stats.temp_size_in_bytes - stats.alias_size_in_bytes)
+    g_bytes = Nz * Ny * (Nx // 2 + 1) * (M + 1) * cplx.itemsize
+    assert peak < 3.5 * g_bytes, f"peak = {peak / g_bytes:.2f} × g"

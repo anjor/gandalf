@@ -59,6 +59,7 @@ from krmhd.physics import (
     g_rhs,
 )
 from krmhd.hermite import (
+    advance_in_place,
     compute_streaming_matrix,
     compute_streaming_eigensystem,
     apply_implicit_operator,
@@ -317,9 +318,46 @@ def _from_slices(h: Array, P: Array) -> Array:
     )
 
 
+def _apply_moment_matrix(g: Array, A: Array) -> Array:
+    """
+    Replace g_m by Σ_n A[m, n]·g_n at every Fourier point, one k_z plane at a time.
+
+    The in-place form of _to_slices / _from_slices for large g (Issue #186):
+    g keeps the state layout [Nz, Ny, Nx//2+1, M+1] and each plane is
+    overwritten in place, so the matmul needs one plane of workspace instead
+    of a second g-sized array. A = P⁻¹ projects onto the slices and A = P
+    projects back; A must be real.
+    """
+    hi = jax.lax.Precision.HIGHEST
+
+    def plane(iz: Array, g: Array) -> Array:
+        p = jax.lax.dynamic_index_in_dim(g, iz, axis=0, keepdims=False)
+        p = jax.lax.complex(
+            jnp.einsum("yxn,mn->yxm", jnp.real(p), A, precision=hi),
+            jnp.einsum("yxn,mn->yxm", jnp.imag(p), A, precision=hi),
+        )
+        return jax.lax.dynamic_update_index_in_dim(g, p, iz, axis=0)
+
+    return jax.lax.fori_loop(0, g.shape[0], plane, g)
+
+
+def _perp_gradients(
+    z_plus: Array, z_minus: Array, kx: Array, ky: Array, Nz: int, Ny: int, Nx: int
+) -> Tuple[Array, Array, Array, Array]:
+    """Real-space ∂xΦ, ∂yΦ, ∂xΨ, ∂yΨ, with Φ = (ξ⁺ + ξ⁻)/2 and Ψ = (ξ⁺ - ξ⁻)/2."""
+    phi = (z_plus + z_minus) / 2.0
+    psi = (z_plus - z_minus) / 2.0
+    kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
+    ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
+    return tuple(
+        jnp.fft.irfftn(1j * k_3d * f, s=(Nz, Ny, Nx), axes=(-3, -2, -1))
+        for f in (phi, psi)
+        for k_3d in (kx_3d, ky_3d)
+    )
+
+
 def _slice_advection_rhs(
-    z_plus: Array,
-    z_minus: Array,
+    grads: Tuple[Array, Array, Array, Array],
     h: Array,
     slice_speeds: Array,
     kx: Array,
@@ -330,7 +368,7 @@ def _slice_advection_rhs(
     Nx: int,
 ) -> Array:
     """
-    Explicit Hermite right-hand side in the slice basis, for all slices at once.
+    Explicit Hermite right-hand side in the slice basis, for a group of slices.
 
     Physics: the Hermite hierarchy (physics.g_rhs) reads
         ∂g/∂t = -{Φ, g} - √β_i (∂z + {Ψ, ·})(T g),
@@ -343,17 +381,17 @@ def _slice_advection_rhs(
     The streaming part -i√β_i k_z λ_j h_j is diagonal too and is integrated
     exactly by the Lawson integrating factor in _gandalf_step_lawson_rk4_jit.
 
-    Cost: the gradients of Φ and Ψ (4 inverse FFTs) are shared by all slices;
-    each slice then needs ∂x h_j and ∂y h_j (2 inverse FFTs) and one forward
-    FFT of its bracket. All slices go through one batched FFT call. The
+    Cost: the gradients of Φ and Ψ (4 inverse FFTs, _perp_gradients) are
+    shared by all slices; each slice then needs ∂x h_j and ∂y h_j (2 inverse
+    FFTs) and one forward FFT of its bracket, batched over the group. The
     Hermite-basis RHS needs 6 FFTs per moment instead (two brackets per
-    moment), and its Python loop over m unrolls the graph M+1 times.
+    moment).
 
     Args:
-        z_plus, z_minus: Elsasser fields in Fourier space [Nz, Ny, Nx//2+1]
-        h: Slices in Fourier space, moment-major [M+1, Nz, Ny, Nx//2+1]
+        grads: Real-space (∂xΦ, ∂yΦ, ∂xΨ, ∂yΨ) from _perp_gradients
+        h: Slices in Fourier space, moment-major [C, Nz, Ny, Nx//2+1]
         slice_speeds: √β_i λ_j, the coefficient of Ψ in slice j's stream
-            function [M+1] (real)
+            function [C] (real)
         kx, ky: Wavenumber arrays
         dealias_mask: 2/3 dealiasing mask [Nz, Ny, Nx//2+1]
         Nz, Ny, Nx: Grid dimensions (static)
@@ -362,8 +400,7 @@ def _slice_advection_rhs(
         ∂h/∂t from perpendicular advection, dealiased, with the k = 0 mode of
         every slice set to zero (as in physics.g_rhs).
     """
-    phi = (z_plus + z_minus) / 2.0
-    psi = (z_plus - z_minus) / 2.0
+    dphi_dx, dphi_dy, dpsi_dx, dpsi_dy = grads
     kx_3d = kx[jnp.newaxis, jnp.newaxis, :]
     ky_3d = ky[jnp.newaxis, :, jnp.newaxis]
 
@@ -371,10 +408,6 @@ def _slice_advection_rhs(
         """Inverse rfft over the last three axes (any leading batch axis)."""
         return jnp.fft.irfftn(field_fourier, s=(Nz, Ny, Nx), axes=(-3, -2, -1))
 
-    dphi_dx = to_real(1j * kx_3d * phi)
-    dphi_dy = to_real(1j * ky_3d * phi)
-    dpsi_dx = to_real(1j * kx_3d * psi)
-    dpsi_dy = to_real(1j * ky_3d * psi)
     dh_dx = to_real(1j * kx_3d * h)
     dh_dy = to_real(1j * ky_3d * h)
 
@@ -388,7 +421,9 @@ def _slice_advection_rhs(
 
 @partial(
     jax.jit,
-    static_argnames=["Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n", "hyper_rz", "closure"],
+    static_argnames=[
+        "Nz", "Ny", "Nx", "M", "hyper_r", "hyper_n", "hyper_rz", "closure", "hermite_chunk"
+    ],
 )
 def _gandalf_step_lawson_rk4_jit(
     fields: KRMHDFields,
@@ -414,6 +449,7 @@ def _gandalf_step_lawson_rk4_jit(
     streaming_P_T: Array = None,
     streaming_P_inv_T: Array = None,
     closure: str = "zero",
+    hermite_chunk: int | None = None,
 ) -> KRMHDFields:
     """
     JIT-compiled mixed integrating-factor timestepper (scheme="lawson_rk4").
@@ -444,6 +480,17 @@ def _gandalf_step_lawson_rk4_jit(
     makes 2 matmuls and 3 FFTs per slice per stage, batched over slices, and
     adds each RK4 stage into the result as soon as it is computed. It is the
     same scheme: the two forms agree to round-off.
+
+    Memory (Issue #186): small g goes through all at once, and the step then
+    holds about six g-sized temporaries. When g has more than
+    hermite.HERMITE_IN_PLACE_ENTRIES entries, or hermite_chunk is smaller
+    than M+1, the step runs in place instead: the projections go one k_z
+    plane at a time, and because the slices are independent, each group of
+    hermite_chunk slices (default one) runs all four stages and is written
+    back to the moment slots it was read from. One g-sized array then holds
+    g, the slices and g^(n+1) in turn, and the other temporaries do not grow
+    with M: about twenty real-space fields, the gradients of Φ and Ψ at the
+    three stage times and the stage arrays of one group.
 
     Conditions on the eigensystem:
     - It must be real. Each slice is then the transform of a real field, which
@@ -498,6 +545,10 @@ def _gandalf_step_lawson_rk4_jit(
         streaming_P_inv_T: Transposed inverse eigenvector matrix P_inv.T.
         closure: Hermite closure (static). It enters only through the
             eigensystem of T passed in, which gandalf_step builds for it.
+        hermite_chunk: Slices advanced together in place (static). None
+            (default): one slice at a time when g has more than
+            hermite.HERMITE_IN_PLACE_ENTRIES entries, all at once otherwise.
+            Results do not depend on it beyond round-off.
 
     Returns:
         Updated KRMHDFields after full timestep
@@ -505,7 +556,7 @@ def _gandalf_step_lawson_rk4_jit(
     Note:
         Per step: two Elsasser RHS evaluations (real kz, η = 0) and four
         Hermite stages in the slice basis, each stage one batched advection
-        of all M+1 slices. For M = 0 (pure fluid) the Hermite sector is only
+        per group of slices. For M = 0 (pure fluid) the Hermite sector is only
         damped and dealiased, as before.
     """
     # Build 3D arrays
@@ -575,60 +626,7 @@ def _gandalf_step_lawson_rk4_jit(
     z_minus_new = phase_minus_full * fields.z_minus + phase_minus_half * dt * nl_minus_half
 
     # =========================================================================
-    # Step 3: Hermite Lawson-RK4 in the slice basis
-    # =========================================================================
-
-    if M > 0:
-        # Static branch: M is in static_argnames. For M = 0 (pure fluid RMHD)
-        # the Hermite RHS is identically zero and g is only damped below.
-        P = streaming_P_T.T
-        P_inv = streaming_P_inv_T.T
-        if any(
-            jnp.iscomplexobj(a) for a in (streaming_eigenvalues, P, P_inv)
-        ):
-            # Dtypes are static, so this check runs at trace time.
-            raise ValueError(
-                "scheme='lawson_rk4' needs a real eigensystem of the streaming "
-                "matrix T, but it is complex (T has complex eigenvalues for "
-                "Lambda < 1). Use scheme='imex_rk222' or 'imex_ars343'."
-            )
-        lam = streaming_eigenvalues  # real, checked above
-        sqrt_beta = jnp.sqrt(beta_i)
-        slice_speeds = sqrt_beta * lam
-
-        # Streaming integrating factor over half a step, diagonal in the slices:
-        # exp(-i·√β_i·kz·λ_j·dt/2), shape [M+1, Nz, 1, 1].
-        lam_4d = lam[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
-        kz_4d = kz[jnp.newaxis, :, jnp.newaxis, jnp.newaxis]
-        E_half = jnp.exp(-1j * sqrt_beta * kz_4d * lam_4d * dt / 2.0)
-
-        def advect(z_plus: Array, z_minus: Array, h_stage: Array) -> Array:
-            return _slice_advection_rhs(
-                z_plus, z_minus, h_stage, slice_speeds, kx, ky, dealias_mask, Nz, Ny, Nx
-            )
-
-        # Lawson-form RK4 in the interaction picture, with E = E_half:
-        #   k1 = N(h, z^n)
-        #   k2 = N(E·(h + dt/2·k1),     z^(n+1/2))
-        #   k3 = N(E·h + dt/2·k2,       z^(n+1/2))
-        #   k4 = N(E·(E·h + dt·k3),     z^(n+1))
-        #   h^(n+1) = E²·h + dt/6·(E²·k1 + 2E·k2 + 2E·k3 + k4)
-        # Stages 2 and 3 share the Elsasser midpoint state because the Hermite
-        # hierarchy is passive: g samples Φ and Ψ but does not feed back on
-        # the Alfvénic sector. Each stage is added into `acc` as soon as it is
-        # computed, so only h, acc, the current stage and its input are alive.
-        h = _to_slices(fields.g, P_inv)
-        k = advect(fields.z_plus, fields.z_minus, h)
-        acc = E_half * E_half * (h + (dt / 6.0) * k)
-        k = advect(z_plus_half, z_minus_half, E_half * (h + (dt / 2.0) * k))
-        acc = acc + (dt / 3.0) * E_half * k
-        k = advect(z_plus_half, z_minus_half, E_half * h + (dt / 2.0) * k)
-        acc = acc + (dt / 3.0) * E_half * k
-        k = advect(z_plus_new, z_minus_new, E_half * (E_half * h + dt * k))
-        acc = acc + (dt / 6.0) * k
-
-    # =========================================================================
-    # Step 4: Apply dissipation using exponential factors (thesis Eq. 2.23-2.25)
+    # Step 3: Dissipation factors (thesis Eq. 2.23-2.25)
     # =========================================================================
 
     # Elsasser dissipation uses NORMALIZED k_perp^(2r) (perpendicular only, thesis Eq. 2.23)
@@ -639,8 +637,6 @@ def _gandalf_step_lawson_rk4_jit(
     # Note: Overflow validation is performed in gandalf_step() wrapper before JIT compilation
     k_perp_2r_normalized = (k_perp_squared / k_perp_max_squared) ** hyper_r
     perp_dissipation_factor = jnp.exp(-eta * k_perp_2r_normalized * dt)
-    z_plus_new = z_plus_new * perp_dissipation_factor
-    z_minus_new = z_minus_new * perp_dissipation_factor
 
     # Factors that are the same for every Hermite moment commute with P, so
     # they are applied to the slices before the back-projection:
@@ -668,16 +664,72 @@ def _gandalf_step_lawson_rk4_jit(
         kz_max_squared = kz[idz_max] ** 2
         kz_2rz_normalized = (kz_3d**2 / kz_max_squared) ** hyper_rz
         z_dissipation_factor = jnp.exp(-eta_z * kz_2rz_normalized * dt)
-        z_plus_new = z_plus_new * z_dissipation_factor
-        z_minus_new = z_minus_new * z_dissipation_factor
         uniform_damping = uniform_damping * z_dissipation_factor
 
     uniform_damping = uniform_damping * dealias_mask  # Shape: [Nz, Ny, Nx//2+1]
 
+    # =========================================================================
+    # Step 4: Hermite Lawson-RK4 in the slice basis
+    # =========================================================================
+
     if M == 0:
+        # Static branch: M is in static_argnames. For M = 0 (pure fluid RMHD)
+        # the Hermite RHS is identically zero and g is only damped.
         g_new = fields.g * uniform_damping[:, :, :, jnp.newaxis]
     else:
-        acc = acc * uniform_damping[jnp.newaxis, :, :, :]
+        P = streaming_P_T.T
+        P_inv = streaming_P_inv_T.T
+        if any(
+            jnp.iscomplexobj(a) for a in (streaming_eigenvalues, P, P_inv)
+        ):
+            # Dtypes are static, so this check runs at trace time.
+            raise ValueError(
+                "scheme='lawson_rk4' needs a real eigensystem of the streaming "
+                "matrix T, but it is complex (T has complex eigenvalues for "
+                "Lambda < 1). Use scheme='imex_rk222' or 'imex_ars343'."
+            )
+        lam = streaming_eigenvalues  # real, checked above
+        sqrt_beta = jnp.sqrt(beta_i)
+        kz_4d = kz[jnp.newaxis, :, jnp.newaxis, jnp.newaxis]
+
+        # Φ and Ψ gradients at the three Elsasser stage times, shared by all slices.
+        grads_n = _perp_gradients(fields.z_plus, fields.z_minus, kx, ky, Nz, Ny, Nx)
+        grads_half = _perp_gradients(z_plus_half, z_minus_half, kx, ky, Nz, Ny, Nx)
+        grads_new = _perp_gradients(z_plus_new, z_minus_new, kx, ky, Nz, Ny, Nx)
+
+        def rk4(h: Array, lam_c: Array) -> Array:
+            """One Lawson-RK4 step of the slices h [C, Nz, Ny, Nx//2+1] with
+            eigenvalues lam_c [C]; returns h^(n+1) with the uniform damping."""
+            slice_speeds = sqrt_beta * lam_c
+            # Streaming integrating factor over half a step, diagonal in the
+            # slices: exp(-i·√β_i·kz·λ_j·dt/2), shape [C, Nz, 1, 1].
+            lam_4d = lam_c[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
+            E_half = jnp.exp(-1j * sqrt_beta * kz_4d * lam_4d * dt / 2.0)
+
+            def advect(grads: Tuple[Array, ...], h_stage: Array) -> Array:
+                return _slice_advection_rhs(
+                    grads, h_stage, slice_speeds, kx, ky, dealias_mask, Nz, Ny, Nx
+                )
+
+            # Lawson-form RK4 in the interaction picture, with E = E_half:
+            #   k1 = N(h, z^n)
+            #   k2 = N(E·(h + dt/2·k1),     z^(n+1/2))
+            #   k3 = N(E·h + dt/2·k2,       z^(n+1/2))
+            #   k4 = N(E·(E·h + dt·k3),     z^(n+1))
+            #   h^(n+1) = E²·h + dt/6·(E²·k1 + 2E·k2 + 2E·k3 + k4)
+            # Stages 2 and 3 share the Elsasser midpoint state because the
+            # Hermite hierarchy is passive: g samples Φ and Ψ but does not feed
+            # back on the Alfvénic sector. Each stage is added into `acc` as
+            # soon as it is computed.
+            k = advect(grads_n, h)
+            acc = E_half * E_half * (h + (dt / 6.0) * k)
+            k = advect(grads_half, E_half * (h + (dt / 2.0) * k))
+            acc = acc + (dt / 3.0) * E_half * k
+            k = advect(grads_half, E_half * h + (dt / 2.0) * k)
+            acc = acc + (dt / 3.0) * E_half * k
+            k = advect(grads_new, E_half * (E_half * h + dt * k))
+            acc = acc + (dt / 6.0) * k
+            return acc * uniform_damping[jnp.newaxis, :, :, :]
 
         # Collisional damping (thesis Eq. 2.24-2.25), diagonal in m, applied in
         # the back-projection g_m = c_m Σ_j P[m, j] h_j.
@@ -700,7 +752,47 @@ def _gandalf_step_lawson_rk4_jit(
                 1.0,  # m=0,1: no collision (conserves particles and momentum)
             )  # Shape: [M+1]
             P = P * collision_factors[:, jnp.newaxis]
-        g_new = _from_slices(acc, P)
+
+        if hermite_chunk is None:
+            in_place = advance_in_place(fields.g)
+            chunk = 1
+        else:
+            chunk = min(hermite_chunk, M + 1)
+            in_place = chunk < M + 1
+        if not in_place:
+            g_new = _from_slices(rk4(_to_slices(fields.g, P_inv), lam), P)
+        else:
+            # One g-sized buffer holds g, then the slices, then g^(n+1)
+            # (Issue #186). The slices are independent, so each group runs
+            # all four stages and goes back to the moment slots it came from.
+
+            def advance(g: Array, j0: Array | int, size: int) -> Array:
+                h = jnp.moveaxis(jax.lax.dynamic_slice_in_dim(g, j0, size, axis=3), 3, 0)
+                acc = rk4(h, jax.lax.dynamic_slice_in_dim(lam, j0, size))
+                return jax.lax.dynamic_update_slice_in_dim(
+                    g, jnp.moveaxis(acc, 0, 3), j0, axis=3
+                )
+
+            # The dtype the all-at-once path would give: g promoted with the
+            # eigensystem, the Elsasser fields and the wavenumbers.
+            dtype = jnp.result_type(fields.g, P, fields.z_plus, fields.z_minus, kx, ky, kz)
+            g = _apply_moment_matrix(fields.g.astype(dtype), P_inv)
+            n_full, rem = divmod(M + 1, chunk)
+            g = jax.lax.fori_loop(0, n_full, lambda i, g: advance(g, i * chunk, chunk), g)
+            if rem:
+                g = advance(g, n_full * chunk, rem)
+            g_new = _apply_moment_matrix(g, P)
+
+    # =========================================================================
+    # Step 5: Damp the Elsasser fields (after the Hermite stages, which sample
+    # the undamped z^(n+1))
+    # =========================================================================
+
+    z_plus_new = z_plus_new * perp_dissipation_factor
+    z_minus_new = z_minus_new * perp_dissipation_factor
+    if idz_max >= 1:
+        z_plus_new = z_plus_new * z_dissipation_factor
+        z_minus_new = z_minus_new * z_dissipation_factor
 
     return KRMHDFields(
         z_plus=z_plus_new,
@@ -824,6 +916,12 @@ def _gandalf_step_imex222_jit(
         interaction. For eta*dt*|k_perp|^(2r) << 1 (the typical turbulence
         regime), the extra splitting error is negligible.
 
+    Memory (Issue #186): for g above hermite.HERMITE_IN_PLACE_ENTRIES
+    entries, g_rhs goes through the moments in groups of eight and
+    imex_solve one k_z plane at a time, each in place, and the stage-B
+    right-hand side absorbs N_1 before N_2 is computed. The step then holds
+    about four and a half copies of g instead of seven.
+
     z+/- coupling time (Issue #158):
         Stage B evaluates N(g^(1), z+/-^(γ)) with z+/- sampled at t+γ·dt,
         the same time as g^(1). z+/-^(γ) comes from an interaction-picture
@@ -916,6 +1014,9 @@ def _gandalf_step_imex222_jit(
     # the diagonal gamma, so one factorization serves both solves.
     factor = imex_factor(kz, dt, _IMEX_GAMMA, beta_i, nu, Lambda, M, hyper_n, closure)
     rhs_1 = fields.g + (dt * _IMEX_GAMMA) * N_1
+    # The g^n and N_1 terms of the stage-B right-hand side, formed now so
+    # that N_1 is dead before N_2 exists (Issue #186).
+    rhs_2 = fields.g + (dt * _IMEX_DELTA) * N_1
     g_1 = imex_solve(factor, rhs_1)
 
     # Elsasser midpoint RHS (needed for the z+/- full-step update only)
@@ -959,12 +1060,7 @@ def _gandalf_step_imex222_jit(
     # Explicit L*g^(1): a three-point stencil in m
     L_g1 = apply_implicit_operator(g_1, kz, beta_i, nu, Lambda, M, hyper_n, closure)
 
-    rhs_2 = (
-        fields.g
-        + (dt * (1.0 - _IMEX_GAMMA)) * L_g1
-        + (dt * _IMEX_DELTA) * N_1
-        + (dt * (1.0 - _IMEX_DELTA)) * N_2
-    )
+    rhs_2 = rhs_2 + (dt * (1.0 - _IMEX_GAMMA)) * L_g1 + (dt * (1.0 - _IMEX_DELTA)) * N_2
     g_new = imex_solve(factor, rhs_2)
 
     # -------------------------------------------------------------------------
@@ -1456,6 +1552,7 @@ def gandalf_step(
     eta_z: float = 0.0,
     hyper_rz: int = 1,
     closure: HermiteClosure = "zero",
+    hermite_chunk: int | None = None,
 ) -> KRMHDState:
     """
     Advance KRMHD state using the mixed GANDALF integrating-factor method.
@@ -1563,6 +1660,12 @@ def gandalf_step(
             {Ψ, ·} field-line term at m = M), the Lawson streaming
             eigensystem, and the IMEX implicit operator. Like `scheme`, this
             is a per-call argument and is NOT stored on the state.
+        hermite_chunk: Number of Hermite slices that scheme="lawson_rk4"
+            advances at once, in place (Issue #186). The step's temporaries
+            then scale with it, not with M. The default (None) advances one
+            slice at a time when g has more than
+            hermite.HERMITE_IN_PLACE_ENTRIES (2^26) entries and all of them
+            at once otherwise. Results do not depend on it beyond round-off.
 
     Returns:
         New KRMHDState at time t + dt
@@ -1709,6 +1812,7 @@ def gandalf_step(
             streaming_P_T=P.T,
             streaming_P_inv_T=P_inv.T,
             closure=closure,
+            hermite_chunk=hermite_chunk,
         )
     elif scheme == "imex_ars343":
         new_fields = _gandalf_step_imex343_jit(
@@ -2063,8 +2167,8 @@ def slice_advection_radius(
 
     Method: Lanczos on the symmetric operator -A_c², all c at once, inside
     lax.while_loop. Each step costs two calls to _slice_advection_rhs, the
-    stepper's own operator: 6 FFTs of the S slices. XLA hoists the gradient
-    FFTs of Φ and Ψ out of the loop. Vectors stay in the half spectrum, with
+    stepper's own operator: 6 FFTs of the S slices. The gradients of Φ and Ψ
+    are computed once, outside the loop. Vectors stay in the half spectrum, with
     the real-space inner product (modes with 0 < kx index < Nx/2 count
     twice). There is no reorthogonalization, so a long run grows ghost
     copies of converged Ritz values, but none exceeds λ_max. Every
@@ -2117,10 +2221,12 @@ def slice_advection_radius(
     def per_slice(x: Array) -> Array:
         return x[:, jnp.newaxis, jnp.newaxis, jnp.newaxis]
 
+    grads = _perp_gradients(zp, zm, kx, ky, Nz, Ny, Nx)
+
     def minus_A_squared(v: Array) -> Array:
         # _slice_advection_rhs returns -A_c v; two applications give A_c².
-        a = _slice_advection_rhs(zp, zm, v, c, kx, ky, dealias_mask, Nz, Ny, Nx)
-        return -_slice_advection_rhs(zp, zm, a, c, kx, ky, dealias_mask, Nz, Ny, Nx)
+        a = _slice_advection_rhs(grads, v, c, kx, ky, dealias_mask, Nz, Ny, Nx)
+        return -_slice_advection_rhs(grads, a, c, kx, ky, dealias_mask, Nz, Ny, Nx)
 
     noise = jax.random.normal(jax.random.PRNGKey(seed), (Nz, Ny, Nx), real_dtype)
     v0 = (jnp.fft.rfftn(noise) * band).astype(complex_dtype)

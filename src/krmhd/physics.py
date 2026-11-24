@@ -37,7 +37,7 @@ from krmhd.spectral import (
     enforce_hermitian,
     _rfft_paired_planes,
 )
-from krmhd.hermite import compute_streaming_matrix
+from krmhd.hermite import advance_in_place, compute_streaming_matrix
 
 
 class KRMHDState(BaseModel):
@@ -967,6 +967,13 @@ def g_rhs(
     one forward FFT. That is 3 FFTs per moment plus 4 for the gradients of Φ
     and Ψ, and each transform covers all moments in one batched FFT call.
 
+    Memory (Issue #186): when g has more than hermite.HERMITE_IN_PLACE_ENTRIES
+    entries, the moments go one at a time instead, in groups of eight that are
+    read and written together, into the output in place. The gradients of
+    gₘ₋₁ and gₘ are carried to the next moment, so the cost stays 3 FFTs per
+    moment, and the temporaries are two groups of moments and about ten
+    real-space fields rather than several copies of g.
+
     Args:
         g: Hermite moments in Fourier space [Nz, Ny, Nx//2+1, M+1]
         z_plus, z_minus: Elsasser fields in Fourier space [Nz, Ny, Nx//2+1]
@@ -1017,13 +1024,62 @@ def g_rhs(
     dphi_dy = to_real(1j * ky_3d * phi)
     dpsi_dx = to_real(1j * kx_3d * psi)
     dpsi_dy = to_real(1j * ky_3d * psi)
+    sqrt_beta = jnp.sqrt(beta_i)
+
+    if advance_in_place(g):
+        t_up, t_dn = t_up[:, 0, 0, 0], t_dn[:, 0, 0, 0]
+
+        def gradient(g_m: Array) -> tuple[Array, Array]:
+            return to_real(1j * kx_3d * g_m), to_real(1j * ky_3d * g_m)
+
+        def one_moment(m: Array, g_dn: Array, g_up: Array, grads: tuple) -> tuple[Array, tuple]:
+            """∂gₘ/∂t from gₘ₋₁, gₘ₊₁ and the carried gradients of gₘ₋₁ and gₘ."""
+            (dx_dn, dy_dn), (dx_m, dy_m) = grads
+            dx_up, dy_up = gradient(g_up)
+            T_dx = t_up[m] * dx_up + t_dn[m] * dx_dn
+            T_dy = t_up[m] * dy_up + t_dn[m] * dy_dn
+            bracket = dphi_dx * dy_m - dphi_dy * dx_m + sqrt_beta * (
+                dpsi_dx * T_dy - dpsi_dy * T_dx
+            )
+            T_g = t_up[m] * g_up + t_dn[m] * g_dn
+            rhs_m = -(jnp.fft.rfftn(bracket) + sqrt_beta * (1j * kz_3d) * T_g) * dealias_mask
+            return rhs_m.at[0, 0, 0].set(0.0), ((dx_m, dy_m), (dx_up, dy_up))
+
+        # Moments go through in groups: a group's neighbourhood gⱼ₀₋₁ .. gⱼ₀₊ₛ is
+        # read once into a moment-major block and its results are written back
+        # together. One moment at a time would be a strided access that touches
+        # every cache line of g.
+        def group(j0: Array | int, size: int, carry: tuple) -> tuple:
+            rhs, grads = carry
+            # Indices out of range are clamped: T[0, -1] = T[M, M+1] = 0 ignore them.
+            near = jnp.take(g, jnp.clip(j0 - 1 + jnp.arange(size + 2), 0, M), axis=-1)
+            near = jnp.moveaxis(near, -1, 0)
+
+            def fill(i: Array, c: tuple) -> tuple:
+                buf, grads = c
+                rhs_m, grads = one_moment(j0 + i, near[i], near[i + 2], grads)
+                return jax.lax.dynamic_update_index_in_dim(buf, rhs_m, i, axis=0), grads
+
+            buf = jnp.zeros((size,) + g.shape[:-1], rhs.dtype)
+            buf, grads = jax.lax.fori_loop(0, size, fill, (buf, grads))
+            rhs = jax.lax.dynamic_update_slice_in_dim(rhs, jnp.moveaxis(buf, 0, -1), j0, axis=-1)
+            return rhs, grads
+
+        zero = jnp.zeros_like(dphi_dx)  # gradient of g₋₁
+        dtype = jnp.result_type(g, z_plus, z_minus, kx, ky, kz)  # as the batched path
+        carry = (jnp.zeros(g.shape, dtype), ((zero, zero), gradient(g[..., 0])))
+        size = min(8, M + 1)
+        n_full, rem = divmod(M + 1, size)
+        carry = jax.lax.fori_loop(0, n_full, lambda i, c: group(i * size, size, c), carry)
+        if rem:
+            carry = group(n_full * size, rem, carry)
+        return carry[0]
 
     # Moment-major [M+1, Nz, Ny, Nx//2+1]: each moment is a contiguous 3D field.
     g_mm = jnp.moveaxis(g, -1, 0)
     dg_dx = to_real(1j * kx_3d * g_mm)
     dg_dy = to_real(1j * ky_3d * g_mm)
 
-    sqrt_beta = jnp.sqrt(beta_i)
     # {Φ, gₘ} + √βᵢ·{Ψ, (T g)ₘ}, with {f, h} = ∂x f·∂y h - ∂y f·∂x h
     brackets = (
         dphi_dx * dg_dy

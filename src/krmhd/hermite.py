@@ -651,6 +651,18 @@ def check_hermite_convergence(
 
 HERMITE_CLOSURES: tuple[str, ...] = ("zero", "symmetric")
 
+# Hermite arrays g with more entries than this are advanced in place (Issue
+# #186): the lawson_rk4 slice step, physics.g_rhs and imex_solve then work on
+# one slice, moment or k_z plane at a time, so their temporaries do not grow
+# with M. Smaller g (2^26 entries is 1 GiB in complex128) goes through all at
+# once, which is faster on small grids.
+HERMITE_IN_PLACE_ENTRIES = 2**26
+
+
+def advance_in_place(g: Array) -> bool:
+    """Whether g is large enough to be advanced in place (HERMITE_IN_PLACE_ENTRIES)."""
+    return g.size > HERMITE_IN_PLACE_ENTRIES
+
 
 def validate_closure(closure: str, M: int) -> None:
     """Raise ValueError unless `closure` is a supported closure valid for this M."""
@@ -1014,10 +1026,27 @@ def imex_solve(factor: ImexFactor, rhs: Array) -> Array:
     on the moment-major transpose, so each step reads one contiguous
     (Nz, Ny, Nx//2+1) slab, and update that one buffer in place: the solve
     needs one g-sized temporary beyond rhs. Cost is O(M) per Fourier point.
+    When rhs has more than HERMITE_IN_PLACE_ENTRIES entries (Issue #186), the
+    solve runs one k_z plane at a time and overwrites rhs in place, so the
+    temporary is one plane instead.
 
     Returns:
         x with the shape and dtype of rhs.
     """
+    if advance_in_place(rhs):
+
+        def plane(iz: Array, b: Array) -> Array:
+            f = ImexFactor(*(jax.lax.dynamic_slice_in_dim(a, iz, 1, axis=1) for a in factor))
+            x = _imex_solve_all(f, jax.lax.dynamic_slice_in_dim(b, iz, 1, axis=0))
+            return jax.lax.dynamic_update_slice_in_dim(b, x, iz, axis=0)
+
+        rhs = rhs.astype(jnp.result_type(rhs, *factor))  # as the all-at-once solve
+        return jax.lax.fori_loop(0, rhs.shape[0], plane, rhs)
+    return _imex_solve_all(factor, rhs)
+
+
+def _imex_solve_all(factor: ImexFactor, rhs: Array) -> Array:
+    """imex_solve for all of rhs at once (factor fields (M+1, Nz) match rhs's Nz)."""
     x = jnp.moveaxis(rhs, -1, 0)
     M = x.shape[0] - 1
 

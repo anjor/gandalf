@@ -2657,3 +2657,78 @@ class TestIMEXARS343:
         save_checkpoint(state, str(filename), scheme="imex_ars343")
         _, _, metadata = load_checkpoint(str(filename), expected_scheme="imex_ars343")
         assert metadata.get("scheme") == "imex_ars343"
+
+
+def test_imex222_step_memory():
+    """Issue #186: at 256³ the Hermite RHS goes through the moments in groups of eight
+    and the implicit solves one k_z plane at a time, in place, and the stage-B
+    right-hand side absorbs N_1 before N_2 exists. XLA's memory analysis of the
+    compiled step (arguments + outputs + temporaries; the CPU compiler here, nothing is
+    allocated) stays below 5.5 copies of g at M = 63 (4.6 measured). Before, it needed
+    7.1."""
+    import math
+
+    from krmhd.timestepping import KRMHDFields, _gandalf_step_imex222_jit
+
+    Nx = Ny = Nz = 256
+    M = 63
+    real = jnp.zeros(()).dtype
+    cplx = (jnp.zeros(()) * 1j).dtype
+    S = jax.ShapeDtypeStruct
+    fields = KRMHDFields(
+        z_plus=S((Nz, Ny, Nx // 2 + 1), cplx),
+        z_minus=S((Nz, Ny, Nx // 2 + 1), cplx),
+        g=S((Nz, Ny, Nx // 2 + 1, M + 1), cplx),
+        time=S((), real),
+    )
+    compiled = _gandalf_step_imex222_jit.lower(
+        fields, 1e-3, S((Nx // 2 + 1,), real), S((Ny,), real), S((Nz,), real),
+        S((Nz, Ny, Nx // 2 + 1), jnp.bool_), 1.0, 1.0, 1.0, 1.0, math.sqrt(5.0),
+        M, Nz, Ny, Nx, 2, 3, eta_z=0.0, hyper_rz=1, closure="zero",
+    ).compile()
+    stats = compiled.memory_analysis()
+    peak = (stats.argument_size_in_bytes + stats.output_size_in_bytes
+            + stats.temp_size_in_bytes - stats.alias_size_in_bytes)
+    g_bytes = Nz * Ny * (Nx // 2 + 1) * (M + 1) * cplx.itemsize
+    assert peak < 5.5 * g_bytes, f"peak = {peak / g_bytes:.2f} × g"
+
+
+@pytest.mark.parametrize("scheme", ["lawson_rk4", "imex_rk222", "imex_ars343"])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_in_place_step_keeps_dtypes(scheme, mixed, monkeypatch):
+    """Issue #186: the in-place path for large g gives the dtypes and values of the
+    all-at-once path, also for a complex64 state under float64 and for complex64 g next
+    to complex128 z±. HERMITE_IN_PLACE_ENTRIES = 0 forces it on this small grid."""
+    from jax.experimental import enable_x64
+
+    from krmhd import hermite
+    from krmhd.physics import KRMHDState, enforce_hermitian_state
+
+    def step(state):
+        return gandalf_step(state, dt=2e-3, eta=0.4, v_A=1.0, nu=0.7, hyper_r=2,
+                            hyper_n=3, scheme=scheme, eta_z=0.3, hyper_rz=2)
+
+    with enable_x64():
+        grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=6 if mixed else 8)
+        rng = np.random.default_rng(1)
+        shape = (grid.Nz, grid.Ny, grid.Nx // 2 + 1)
+        mask = np.asarray(grid.dealias_mask)
+
+        def draw(*s):
+            a = rng.standard_normal(s) + 1j * rng.standard_normal(s)
+            return jnp.asarray(a * mask.reshape(shape + (1,) * (len(s) - 3)))
+
+        z_dtype = jnp.complex128 if mixed else jnp.complex64
+        state = enforce_hermitian_state(KRMHDState(
+            z_plus=draw(*shape).astype(z_dtype), z_minus=draw(*shape).astype(z_dtype),
+            g=draw(*shape, 6).astype(jnp.complex64), M=5, beta_i=0.7, v_th=1.0, nu=0.7,
+            Lambda=5.0**0.5, time=0.0, grid=grid,
+        ))
+        ref = step(state)
+        monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
+        jax.clear_caches()
+        new = step(state)
+        for name in ("z_plus", "z_minus", "g"):
+            a, b = getattr(new, name), getattr(ref, name)
+            assert a.dtype == b.dtype, (name, a.dtype, b.dtype)
+            assert float(jnp.max(jnp.abs(a - b))) <= 1e-5 * float(jnp.max(jnp.abs(b)))
