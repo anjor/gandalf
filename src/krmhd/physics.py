@@ -1028,34 +1028,35 @@ def g_rhs(
     if advance_in_place(g):
         t_up, t_dn = t_up[:, 0, 0, 0], t_dn[:, 0, 0, 0]
 
-        def moment(m: Array) -> Array:
-            return jax.lax.dynamic_index_in_dim(g, m, axis=-1, keepdims=False)
-
-        def gradient(m: Array) -> tuple[Array, Array]:
-            g_m = moment(m)
+        def gradient(g_m: Array) -> tuple[Array, Array]:
             return to_real(1j * kx_3d * g_m), to_real(1j * ky_3d * g_m)
 
-        def one_moment(m: Array, grads: tuple) -> tuple[Array, tuple]:
+        def one_moment(m: Array, g_dn: Array, g_up: Array, grads: tuple) -> tuple[Array, tuple]:
+            """∂gₘ/∂t from gₘ₋₁, gₘ₊₁ and the carried gradients of gₘ₋₁ and gₘ."""
             (dx_dn, dy_dn), (dx_m, dy_m) = grads
-            up = jnp.minimum(m + 1, M)  # T[M, M+1] = 0, so any finite g at M + 1 will do
-            dx_up, dy_up = gradient(up)
+            dx_up, dy_up = gradient(g_up)
             T_dx = t_up[m] * dx_up + t_dn[m] * dx_dn
             T_dy = t_up[m] * dy_up + t_dn[m] * dy_dn
             bracket = dphi_dx * dy_m - dphi_dy * dx_m + sqrt_beta * (
                 dpsi_dx * T_dy - dpsi_dy * T_dx
             )
-            T_g = t_up[m] * moment(up) + t_dn[m] * moment(jnp.maximum(m - 1, 0))
+            T_g = t_up[m] * g_up + t_dn[m] * g_dn
             rhs_m = -(jnp.fft.rfftn(bracket) + sqrt_beta * (1j * kz_3d) * T_g) * dealias_mask
             return rhs_m.at[0, 0, 0].set(0.0), ((dx_m, dy_m), (dx_up, dy_up))
 
-        # The moments are written to the output in groups: one moment alone is
-        # a strided write that touches every cache line of the output.
+        # Moments go through in groups: a group's neighbourhood gⱼ₀₋₁ .. gⱼ₀₊ₛ is
+        # read once into a moment-major block and its results are written back
+        # together. One moment at a time would be a strided access that touches
+        # every cache line of g.
         def group(j0: Array | int, size: int, carry: tuple) -> tuple:
             rhs, grads = carry
+            # Indices out of range are clamped: T[0, -1] = T[M, M+1] = 0 ignore them.
+            near = jnp.take(g, jnp.clip(j0 - 1 + jnp.arange(size + 2), 0, M), axis=-1)
+            near = jnp.moveaxis(near, -1, 0)
 
             def fill(i: Array, c: tuple) -> tuple:
                 buf, grads = c
-                rhs_m, grads = one_moment(j0 + i, grads)
+                rhs_m, grads = one_moment(j0 + i, near[i], near[i + 2], grads)
                 return jax.lax.dynamic_update_index_in_dim(buf, rhs_m, i, axis=0), grads
 
             buf = jnp.zeros((size,) + g.shape[:-1], g.dtype)
@@ -1063,8 +1064,8 @@ def g_rhs(
             rhs = jax.lax.dynamic_update_slice_in_dim(rhs, jnp.moveaxis(buf, 0, -1), j0, axis=-1)
             return rhs, grads
 
-        zero = jnp.zeros_like(dphi_dx)  # gradient of g₋₁, which T[0, -1] = 0 ignores
-        carry = (jnp.zeros_like(g), ((zero, zero), gradient(0)))
+        zero = jnp.zeros_like(dphi_dx)  # gradient of g₋₁
+        carry = (jnp.zeros_like(g), ((zero, zero), gradient(g[..., 0])))
         size = min(8, M + 1)
         n_full, rem = divmod(M + 1, size)
         carry = jax.lax.fori_loop(0, n_full, lambda i, c: group(i * size, size, c), carry)
