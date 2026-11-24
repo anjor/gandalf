@@ -39,8 +39,9 @@ state read from loop.state is valid until the next advance().
 
 Precision: the step runs in the precision of the state's z±. Under
 jax_enable_x64 a complex64 state therefore steps in float32 while the
-accounting hook upcasts the fields and sums in float64: the float32 state with
-float64 budgets of Issue #191 (docs/precision_float32_study.md).
+accounting hook can upcast the fields and sum in float64.
+docs/precision_float32_study.md measures what the float32 rounding does to
+energy budgets (Issue #191).
 """
 
 import warnings
