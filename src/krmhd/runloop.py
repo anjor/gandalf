@@ -338,7 +338,24 @@ def _advance_impl(
 
 
 # The carry (argument 0) is donated: XLA writes the new fields into its buffers.
-_advance = jax.jit(_advance_impl, static_argnames=("plan",), donate_argnums=(0,))
+#
+# XLA's while-loop invariant code motion hoists each copy of a repeated
+# loop-invariant subexpression (the 1j·kx, 1j·ky derivative factors of the
+# separately inlined z_plus_rhs and z_minus_rhs, for example) into its own loop
+# operand before CSE merges the copies. CSE then cannot merge the FFTs that
+# consume them: at 16³, M = 2 the Lawson-RK4 loop body ran 72 inverse FFTs to
+# the standalone step's 36. With the pass off, the body compiles to the
+# standalone step's FFT count and recomputes the small invariants each step,
+# as gandalf_step does.
+_JIT = dict(static_argnames=("plan",), donate_argnums=(0,))
+try:
+    _advance = jax.jit(
+        _advance_impl,
+        compiler_options={"xla_disable_hlo_passes": "while-loop-invariant-code-motion"},
+        **_JIT,
+    )
+except TypeError:  # jax.jit without compiler_options (JAX < 0.4.36): correct, slower loop
+    _advance = jax.jit(_advance_impl, **_JIT)
 
 # JAX warns when a backend cannot donate (e.g. jax-metal). The loop is still
 # correct there; it only keeps the extra copy that donation avoids.
