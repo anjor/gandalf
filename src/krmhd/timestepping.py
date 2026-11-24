@@ -623,6 +623,98 @@ def _gandalf_step_lawson_rk4_jit(
     )(*args)
 
 
+def _collision_factors(M: int, nu: float, hyper_n: int, dt: float, dtype) -> Array:
+    """Hyper-collision factors exp(-ν·(m/M)^n·dt) for m ≥ 2 and 1 for m = 0, 1, [M+1].
+
+    The Lawson steps fold them into the back-projection from the slices
+    (see the collision comments in _lawson_rk4_step). M ≥ 2.
+    """
+    moment_indices = jnp.arange(M + 1, dtype=dtype)  # [0, 1, 2, ..., M]
+    collision_damping_rate = nu * ((moment_indices / M) ** hyper_n)
+    return jnp.where(
+        moment_indices >= 2,
+        jnp.exp(-collision_damping_rate * dt),  # m≥2: hyper-collision damping
+        1.0,  # m=0,1: no collision (conserves particles and momentum)
+    )
+
+
+def _elsasser_midpoint(
+    z_plus: Array,
+    z_minus: Array,
+    dt: float,
+    kx: Array,
+    ky: Array,
+    kz: Array,
+    dealias_mask: Array,
+    Nz: int,
+    Ny: int,
+    Nx: int,
+) -> Tuple[Array, Array, Array, Array]:
+    """
+    The Elsasser part of the Lawson steps: midpoint RK2 in the interaction picture.
+
+    Returns z± at t + dt/2 (the Euler predictor) and at t + dt, both undamped.
+    The Hermite stages of lawson_rk4 sample Φ and Ψ at t, at the predictor and
+    at t + dt; lawson_rk4_multirate interpolates between the same three states.
+    """
+    kz_3d = kz[:, jnp.newaxis, jnp.newaxis]
+
+    # Integrating factors (thesis Eq. 2.13-2.14)
+    # For ∂ξ⁺/∂t - ikz·ξ⁺ = [NL]: multiply by e^(+ikz*t)
+    # For ∂ξ⁻/∂t + ikz·ξ⁻ = [NL]: multiply by e^(-ikz*t)
+    # Note: v_A is absent by convention — KRMHD uses thesis normalization with
+    # τ_A = L_z/v_A = 1, so v_A enters only through the nonlinear Poisson
+    # bracket (via {ψ, …}) and the CFL timestep, not the linear Alfven phase.
+    phase_plus_half = jnp.exp(+1j * kz_3d * dt / 2.0)
+    phase_minus_half = jnp.exp(-1j * kz_3d * dt / 2.0)
+    phase_plus_full = jnp.exp(+1j * kz_3d * dt)
+    phase_minus_full = jnp.exp(-1j * kz_3d * dt)
+
+    def elsasser_nl(z_plus: Array, z_minus: Array) -> Tuple[Array, Array]:
+        """Elsasser nonlinear terms: the RHS with η = 0 minus the linear ±ikz·ξ± terms.
+
+        Same formula as the Elsasser part of _krmhd_rhs_jit, which the IMEX
+        kernels use, so the z± trajectory is unchanged.
+        """
+        rhs_plus = z_plus_rhs(z_plus, z_minus, kx, ky, kz, dealias_mask, 0.0, Nz, Ny, Nx)
+        rhs_minus = z_minus_rhs(z_plus, z_minus, kx, ky, kz, dealias_mask, 0.0, Nz, Ny, Nx)
+        return rhs_plus - 1j * kz_3d * z_plus, rhs_minus + 1j * kz_3d * z_minus
+
+    # =========================================================================
+    # Step 1: Elsasser half-step (integrating-factor predictor, cf. thesis §2.4)
+    # =========================================================================
+
+    # Half-step update in the interaction picture (Lawson form): define
+    # w(s) = e^(∓ikz·s)·ξ±(s), so that dw/ds = e^(∓ikz·s)·NL(ξ±(s)).
+    # Forward-Euler predictor over [0, Δt/2] in w, mapped back to ξ±:
+    #   ξ±,n+1/2 = e^(±ikz·Δt/2) · [ξ±,n + Δt/2 · NL^n]
+    # The phase multiplies the whole bracket exactly ONCE. (An earlier version
+    # applied the phase a second time to the nonlinear increment, citing
+    # thesis Eq. 2.14; the original CUDA GANDALF (timestep.cu, alf_adv)
+    # applies linstep to the NL term exactly once, matching this form.)
+    nl_plus_0, nl_minus_0 = elsasser_nl(z_plus, z_minus)
+    z_plus_half = phase_plus_half * (z_plus + (dt / 2.0) * nl_plus_0)
+    z_minus_half = phase_minus_half * (z_minus + (dt / 2.0) * nl_minus_0)
+
+    # =========================================================================
+    # Step 2: Elsasser midpoint RHS and full step
+    # =========================================================================
+
+    # Midpoint rule in the interaction picture:
+    #   w^(n+1) = w^n + Δt · e^(∓ikz·Δt/2) · NL^(n+1/2)
+    #   =>  ξ±,n+1 = e^(±ikz·Δt) · ξ±,n + e^(±ikz·Δt/2) · Δt · NL^(n+1/2)
+    # The half phase on the increment propagates the midpoint nonlinear
+    # transfer over the remaining half interval [Δt/2, Δt]. Note: the original
+    # CUDA GANDALF applied the full phase e^(±ikz·Δt) (once) to the corrector
+    # increment; the consistent Lawson midpoint uses e^(±ikz·Δt/2). The
+    # difference is an O(kz·Δt²) local term, so both are formally 2nd order.
+    nl_plus_half, nl_minus_half = elsasser_nl(z_plus_half, z_minus_half)
+    z_plus_new = phase_plus_full * z_plus + phase_plus_half * dt * nl_plus_half
+    z_minus_new = phase_minus_full * z_minus + phase_minus_half * dt * nl_minus_half
+
+    return z_plus_half, z_minus_half, z_plus_new, z_minus_new
+
+
 def _lawson_rk4_step(
     fields: KRMHDFields,
     dt: float,
@@ -675,58 +767,10 @@ def _lawson_rk4_step(
     idy_max = (Ny - 1) // 3
     k_perp_max_squared = kx[idx_max]**2 + ky[idy_max]**2
 
-    # Integrating factors (thesis Eq. 2.13-2.14)
-    # For ∂ξ⁺/∂t - ikz·ξ⁺ = [NL]: multiply by e^(+ikz*t)
-    # For ∂ξ⁻/∂t + ikz·ξ⁻ = [NL]: multiply by e^(-ikz*t)
-    # Note: v_A is absent by convention — KRMHD uses thesis normalization with
-    # τ_A = L_z/v_A = 1, so v_A enters only through the nonlinear Poisson
-    # bracket (via {ψ, …}) and the CFL timestep, not the linear Alfven phase.
-    phase_plus_half = jnp.exp(+1j * kz_3d * dt / 2.0)
-    phase_minus_half = jnp.exp(-1j * kz_3d * dt / 2.0)
-    phase_plus_full = jnp.exp(+1j * kz_3d * dt)
-    phase_minus_full = jnp.exp(-1j * kz_3d * dt)
-
-    def elsasser_nl(z_plus: Array, z_minus: Array) -> Tuple[Array, Array]:
-        """Elsasser nonlinear terms: the RHS with η = 0 minus the linear ±ikz·ξ± terms.
-
-        Same formula as the Elsasser part of _krmhd_rhs_jit, which the IMEX
-        kernels use, so the z± trajectory is unchanged.
-        """
-        rhs_plus = z_plus_rhs(z_plus, z_minus, kx, ky, kz, dealias_mask, 0.0, Nz, Ny, Nx)
-        rhs_minus = z_minus_rhs(z_plus, z_minus, kx, ky, kz, dealias_mask, 0.0, Nz, Ny, Nx)
-        return rhs_plus - 1j * kz_3d * z_plus, rhs_minus + 1j * kz_3d * z_minus
-
-    # =========================================================================
-    # Step 1: Elsasser half-step (integrating-factor predictor, cf. thesis §2.4)
-    # =========================================================================
-
-    # Half-step update in the interaction picture (Lawson form): define
-    # w(s) = e^(∓ikz·s)·ξ±(s), so that dw/ds = e^(∓ikz·s)·NL(ξ±(s)).
-    # Forward-Euler predictor over [0, Δt/2] in w, mapped back to ξ±:
-    #   ξ±,n+1/2 = e^(±ikz·Δt/2) · [ξ±,n + Δt/2 · NL^n]
-    # The phase multiplies the whole bracket exactly ONCE. (An earlier version
-    # applied the phase a second time to the nonlinear increment, citing
-    # thesis Eq. 2.14; the original CUDA GANDALF (timestep.cu, alf_adv)
-    # applies linstep to the NL term exactly once, matching this form.)
-    nl_plus_0, nl_minus_0 = elsasser_nl(fields.z_plus, fields.z_minus)
-    z_plus_half = phase_plus_half * (fields.z_plus + (dt / 2.0) * nl_plus_0)
-    z_minus_half = phase_minus_half * (fields.z_minus + (dt / 2.0) * nl_minus_0)
-
-    # =========================================================================
-    # Step 2: Elsasser midpoint RHS and full step
-    # =========================================================================
-
-    # Midpoint rule in the interaction picture:
-    #   w^(n+1) = w^n + Δt · e^(∓ikz·Δt/2) · NL^(n+1/2)
-    #   =>  ξ±,n+1 = e^(±ikz·Δt) · ξ±,n + e^(±ikz·Δt/2) · Δt · NL^(n+1/2)
-    # The half phase on the increment propagates the midpoint nonlinear
-    # transfer over the remaining half interval [Δt/2, Δt]. Note: the original
-    # CUDA GANDALF applied the full phase e^(±ikz·Δt) (once) to the corrector
-    # increment; the consistent Lawson midpoint uses e^(±ikz·Δt/2). The
-    # difference is an O(kz·Δt²) local term, so both are formally 2nd order.
-    nl_plus_half, nl_minus_half = elsasser_nl(z_plus_half, z_minus_half)
-    z_plus_new = phase_plus_full * fields.z_plus + phase_plus_half * dt * nl_plus_half
-    z_minus_new = phase_minus_full * fields.z_minus + phase_minus_half * dt * nl_minus_half
+    # Steps 1-2: Elsasser Lawson midpoint RK2 (_elsasser_midpoint)
+    z_plus_half, z_minus_half, z_plus_new, z_minus_new = _elsasser_midpoint(
+        fields.z_plus, fields.z_minus, dt, kx, ky, kz, dealias_mask, Nz, Ny, Nx
+    )
 
     # =========================================================================
     # Step 3: Dissipation factors (thesis Eq. 2.23-2.25)
@@ -847,14 +891,7 @@ def _lawson_rk4_step(
         # Note: gandalf_step() wrapper enforces M>=2 only when nu>0.
         if M >= 2:
             # Static branch: collision damping requires M>=2 to avoid division by zero in (m/M)^n
-            moment_indices = jnp.arange(M + 1, dtype=P.dtype)  # [0, 1, 2, ..., M]
-            collision_damping_rate = nu * ((moment_indices / M) ** hyper_n)
-            collision_factors = jnp.where(
-                moment_indices >= 2,
-                jnp.exp(-collision_damping_rate * dt),  # m≥2: hyper-collision damping
-                1.0,  # m=0,1: no collision (conserves particles and momentum)
-            )  # Shape: [M+1]
-            P = P * collision_factors[:, jnp.newaxis]
+            P = P * _collision_factors(M, nu, hyper_n, dt, P.dtype)[:, jnp.newaxis]
 
         # The slices this device advances: all M + 1 on one device. On a mesh
         # of D devices (Issue #191), zero slices pad M + 1 to D·n_own and stay
@@ -941,7 +978,7 @@ def _lawson_rk4_step(
 # `Scheme` is the single source of truth; `SUPPORTED_SCHEMES` is the
 # runtime-introspectable frozenset derived from it so adding a new
 # integrator is a one-line edit.
-Scheme = Literal["imex_rk222", "imex_ars343", "lawson_rk4"]
+Scheme = Literal["imex_rk222", "imex_ars343", "lawson_rk4", "lawson_rk4_multirate"]
 SUPPORTED_SCHEMES: frozenset[str] = frozenset(get_args(Scheme))
 
 # ARS(2,2,2) implicit-stage coefficient and stage-2 explicit scaling (Python floats).
@@ -1554,6 +1591,7 @@ def _validate_step_args(
     eta_z: float,
     hyper_rz: int,
     closure: str,
+    substep_cfl: float | Tuple[float, ...] | Array = 0.3,
 ) -> None:
     """Check gandalf_step's arguments; raises or warns as its docstring lists.
 
@@ -1576,6 +1614,14 @@ def _validate_step_args(
 
     validate_closure(closure, state.M)
 
+    if scheme == "lawson_rk4_multirate":
+        c = jnp.asarray(substep_cfl, dtype=float)
+        if c.shape not in ((), (state.M + 1,)) or not bool(jnp.all(c > 0)):
+            raise ValueError(
+                f"substep_cfl must be positive, a scalar or one value per slice "
+                f"(M + 1 = {state.M + 1}), got {substep_cfl}"
+            )
+
     # Validate M for collision operator (prevents division by zero)
     # Collision damping rate = ν·(m/M)^n requires M >= 2 for well-defined rates
     # M=0 (and M=1) are allowed for pure fluid RMHD runs when collisions are disabled (nu=0)
@@ -1593,7 +1639,7 @@ def _validate_step_args(
     # solve (unconditionally stable) and needs no such guard.
     max_collision_rate = nu_effective * dt
 
-    if scheme == "lawson_rk4":
+    if scheme in ("lawson_rk4", "lawson_rk4_multirate"):
         if max_collision_rate >= MAX_DAMPING_RATE_THRESHOLD:
             safe_nu = MAX_DAMPING_RATE_THRESHOLD / dt
             raise ValueError(
@@ -1685,6 +1731,7 @@ def gandalf_step(
     closure: HermiteClosure = "zero",
     hermite_chunk: int | None = None,
     mesh: Mesh | None = None,
+    substep_cfl: float | Tuple[float, ...] | Array = 0.3,
 ) -> KRMHDState:
     """
     Advance KRMHD state using the mixed GANDALF integrating-factor method.
@@ -1740,6 +1787,13 @@ def gandalf_step(
             - "lawson_rk4": legacy mixed integrating-factor + Lawson-RK4 path,
               retained for comparison and rollback. Known to be unstable at
               high M·k_z (see Issue #137).
+            - "lawson_rk4_multirate": lawson_rk4 with a step per slice
+              (Issue #191, krmhd.multirate). z± take the step dt; slice j
+              takes ceil(dt·v_j / (substep_cfl·Δ)) Lawson-RK4 substeps, with
+              Φ and Ψ interpolated in time. Take dt from
+              compute_cfl_timestep(mode="multirate"). With one substep per
+              slice it is lawson_rk4. docs/multirate_slices_study.md has its
+              stability, order and cost.
 
             NOTE: scheme is a per-call argument and is NOT stored on
             KRMHDState. Callers looping over time must pass it explicitly
@@ -1798,6 +1852,7 @@ def gandalf_step(
             slice at a time when g has more than
             hermite.HERMITE_IN_PLACE_ENTRIES (2^26) entries and all of them
             at once otherwise. Results do not depend on it beyond round-off.
+            For "lawson_rk4_multirate" the default is one slice at a time.
         mesh: One-axis jax.sharding.Mesh over which scheme="lawson_rk4"
             shards its Hermite slices (Issue #191), e.g.
             Mesh(jax.devices(), ("slices",)). Default None: one device. The
@@ -1808,6 +1863,15 @@ def gandalf_step(
             in-place threshold apply to each device's share. Needs M >= 1 and
             Nz divisible by the number of devices. See
             docs/multi_gpu_slices.md for the tradeoff.
+        substep_cfl: Courant number C of the slice substeps of
+            "lawson_rk4_multirate" (default 0.3, ignored by the other
+            schemes). Slice j takes the smallest number of substeps h_j with
+            h_j·max|∇⊥(Φ + √β_i λ_j Ψ)| ≤ C·min(Δx, Δy, Δz), the Courant rule
+            of compute_cfl_timestep. C ≤ 0.95 keeps every substep within the
+            RK4 stability limit for a frozen flow. One value per slice, in
+            the order of compute_streaming_eigensystem's eigenvalues, sets
+            C_j per slice: multirate.exact_substep_cfl calibrates them to
+            the exact radius of each slice.
 
     Returns:
         New KRMHDState at time t + dt
@@ -1817,7 +1881,8 @@ def gandalf_step(
         ValueError: If hyper_n not in [1, 2, 3, 4, 6]
         ValueError: If closure is unknown, or "symmetric" with M < 2
         ValueError: If hyper_rz not in [1, 2, 4, 8]
-        ValueError: If scheme not in {"imex_rk222", "imex_ars343", "lawson_rk4"}
+        ValueError: If scheme not in {"imex_rk222", "imex_ars343", "lawson_rk4",
+            "lawson_rk4_multirate"}
         ValueError: If mesh is given with another scheme, more than one axis,
             M = 0, or Nz not divisible by its size
         ValueError: If hyper-collision overflow risk detected (nu·dt >= 50, normalized;
@@ -1912,7 +1977,8 @@ def gandalf_step(
     nu_effective = nu if nu is not None else state.nu
 
     _validate_step_args(
-        state, dt, eta, nu_effective, hyper_r, hyper_n, scheme, eta_z, hyper_rz, closure
+        state, dt, eta, nu_effective, hyper_r, hyper_n, scheme, eta_z, hyper_rz, closure,
+        substep_cfl,
     )
     validate_mesh(mesh, scheme, state.M, state.grid.Nz)
 
@@ -1985,6 +2051,50 @@ def gandalf_step(
             hyper_rz=hyper_rz,
             closure=closure,
         )
+    elif scheme == "lawson_rk4_multirate":
+        # Imported here: krmhd.multirate builds on this module's helpers.
+        from krmhd.multirate import _gandalf_step_lawson_rk4_multirate_jit
+
+        if hermite_chunk is not None and hermite_chunk < 1:
+            raise ValueError(f"hermite_chunk must be >= 1 (got {hermite_chunk})")
+        _, eigenvalues, P, P_inv = compute_streaming_eigensystem(
+            state.M, state.Lambda, closure
+        )
+        if any(jnp.iscomplexobj(a) for a in (eigenvalues, P, P_inv)):
+            raise ValueError(
+                f"scheme='lawson_rk4_multirate' needs a real eigensystem of the "
+                f"streaming matrix T, but it is complex at Lambda = {state.Lambda} "
+                f"(T has complex eigenvalues for Lambda < 1). Use "
+                f"scheme='imex_rk222' or 'imex_ars343'."
+            )
+        min_spacing = min(grid.Lx / grid.Nx, grid.Ly / grid.Ny, grid.Lz / grid.Nz)
+        new_fields = _gandalf_step_lawson_rk4_multirate_jit(
+            fields,
+            dt,
+            grid.kx,
+            grid.ky,
+            grid.kz,
+            grid.dealias_mask,
+            eta,
+            v_A,
+            state.beta_i,
+            nu_effective,
+            state.Lambda,
+            state.M,
+            grid.Nz,
+            grid.Ny,
+            grid.Nx,
+            hyper_r,
+            hyper_n,
+            eta_z=eta_z,
+            hyper_rz=hyper_rz,
+            streaming_eigenvalues=eigenvalues,
+            streaming_P_T=P.T,
+            streaming_P_inv_T=P_inv.T,
+            closure=closure,
+            substep_courant=jnp.asarray(substep_cfl, dtype=float) * min_spacing,
+            hermite_chunk=1 if hermite_chunk is None else hermite_chunk,
+        )
     else:  # scheme == "imex_rk222"
         new_fields = _gandalf_step_imex222_jit(
             fields,
@@ -2036,9 +2146,10 @@ def _streaming_eigenvalue_extremes(
     return lam_lo, lam_hi, lam_complex
 
 
-# compute_cfl_timestep modes: the Courant estimate, or the exact slice-advection
-# radius for the RK4-type schemes (Issue #189).
-CFLMode = Literal["courant", "exact"]
+# compute_cfl_timestep modes: the Courant estimate, the exact slice-advection
+# radius for the RK4-type schemes (Issue #189), or the macro step of the
+# multirate scheme, which steps each slice to its own limit (Issue #191).
+CFLMode = Literal["courant", "exact", "multirate"]
 
 
 def compute_cfl_timestep(
@@ -2077,13 +2188,17 @@ def compute_cfl_timestep(
     where ρ = max(ρ(√β_i λ_min), ρ(√β_i λ_max)) is the spectral radius of the
     slice advection operator a ↦ P{Φ + √β_i λ Ψ, a} (slice_advection_radius).
 
+    With mode="multirate" (for scheme="lawson_rk4_multirate", Issue #191) the
+    Hermite term is left out: dt is the macro step of z±, and the step itself
+    gives each slice the substeps its own Courant limit needs.
+
     Args:
         state: Current KRMHD state (used to compute max velocity)
         v_A: Alfvén velocity (parallel wave speed)
         cfl_safety: Safety factor C ∈ (0, 1), default 0.3
         closure: Hermite closure used by the time stepper, "zero" (default)
             or "symmetric". It changes the eigenvalues of T and hence v_g.
-        mode: "courant" (default) or "exact". The exact mode runs a Lanczos
+        mode: "courant" (default), "exact" or "multirate". The exact mode runs a Lanczos
             iteration on the device, about 20-40 steps of 6 FFTs of two
             fields each; Courant takes 8 FFTs of one field. It falls back to
             the Courant term, with a warning, if Lanczos does not converge.
@@ -2160,7 +2275,7 @@ def compute_cfl_timestep(
 
     dt_cfl = cfl_timestep_estimate(
         state.z_plus, state.z_minus, state.grid, state.M, state.beta_i, state.Lambda,
-        v_A, cfl_safety, closure, hermite=dt_slices is None,
+        v_A, cfl_safety, closure, hermite=dt_slices is None and mode != "multirate",
     )
     if dt_slices is not None:
         dt_cfl = jnp.minimum(dt_cfl, cfl_safety * dt_slices)
