@@ -935,7 +935,7 @@ def imex_factor(
     Factor A = I - γ·dt·L, L = -i·√β_i·k_z·T + ν·D, for each k_z.
 
     A is tridiagonal along m for both closures and every Λ, because T is
-    tridiagonal and D diagonal, so the factorisation costs O(M) per k_z.
+    tridiagonal and D diagonal, so the factorization costs O(M) per k_z.
     It runs on the device: M, hyper_n and closure must be static under jit,
     and kz, dt, beta_i, nu and Lambda may be traced (dt can change every
     step).
@@ -957,15 +957,17 @@ def imex_factor(
     mode is on (JAX_ENABLE_X64=1 in the environment, or
     jax.config.update("jax_enable_x64", True) before any array is
     created). x64 mode makes the whole run float64; there is no separate
-    switch for the solve. In complex64 the forward error of imex_solve
-    at M = 128 stays at the level of a dense LU solve (Issue #140).
+    switch for the solve. In complex64 at M = 128 the forward error of
+    imex_solve is below 2e-7 (relative) for √β_i·k_z·dt ≤ 1 and below 7e-7
+    up to √β_i·k_z·dt = 30, for both closures and Λ ∈ {1, ±√5, 0.5}. The
+    batched dense LU it replaced reached 2.2e-6 there (Issue #140).
 
     Args:
         kz: (Nz,) parallel wavenumbers.
         dt: Timestep (may be traced).
         gamma: Diagonal coefficient of the implicit tableau.
         beta_i: Ion plasma beta.
-        nu: Collision frequency (the rates in D are normalised to 1 at m = M).
+        nu: Collision frequency (the rates in D are normalized to 1 at m = M).
         Lambda: Kinetic parameter Λ (enters T[1, 0]).
         M: Maximum Hermite moment index.
         hyper_n: Hyper-collision exponent.
