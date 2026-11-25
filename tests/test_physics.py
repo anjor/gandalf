@@ -17,7 +17,6 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import enable_x64
 
-from krmhd import hermite
 from krmhd.hermite import compute_streaming_matrix
 from krmhd.spectral import (
     SpectralGrid2D,
@@ -1994,14 +1993,11 @@ class TestHermiteRHS:
         (8, -1.0, "zero"),
         (16, math.sqrt(5.0), "zero"),
     ])
-    @pytest.mark.parametrize("in_place", [False, True])
-    def test_matches_moment_by_moment_reference(self, M, Lambda, closure, in_place, monkeypatch):
+    @pytest.mark.parametrize("hermite_in_place", [False, True], indirect=True)
+    def test_matches_moment_by_moment_reference(self, M, Lambda, closure, hermite_in_place):
         """Equals the hierarchy built moment by moment from poisson_bracket_3d and
-        T = compute_streaming_matrix(M, Λ, closure), in float64, on a non-cubic grid.
-        in_place lowers HERMITE_IN_PLACE_ENTRIES to 0, so g_rhs goes one moment at a
-        time, as it does for large g (Issue #186)."""
-        if in_place:
-            monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
+        T = compute_streaming_matrix(M, Λ, closure), in float64, on a non-cubic grid,
+        all at once and one moment at a time, as for large g (Issue #186)."""
         with enable_x64():
             grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=8)
             g, z_plus, z_minus = _random_hermite_inputs(grid, M, seed=M)
@@ -2014,14 +2010,11 @@ class TestHermiteRHS:
             assert _rel_diff(rhs, ref) < 1e-13, f"differs by {_rel_diff(rhs, ref):.2e}"
 
     @pytest.mark.parametrize("M", [0, 3, 17])
-    @pytest.mark.parametrize("in_place", [False, True])
-    def test_adds_into_acc(self, M, in_place, monkeypatch):
+    @pytest.mark.parametrize("hermite_in_place", [False, True], indirect=True)
+    def test_adds_into_acc(self, M, hermite_in_place):
         """With acc and scale, g_rhs returns acc + scale·∂g/∂t, also in place, where each
         group of moments is added into acc as it is made (Issue #186). M = 17 has two
         groups of eight and a remainder."""
-        if in_place:
-            monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
-        jax.clear_caches()  # the rule is read at trace time
         with enable_x64():
             grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=8)
             g, z_plus, z_minus = _random_hermite_inputs(grid, M, seed=M + 1)

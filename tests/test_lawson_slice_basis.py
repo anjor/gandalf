@@ -22,7 +22,6 @@ import pytest
 from jax.experimental import enable_x64
 from scipy.linalg import expm
 
-from krmhd import hermite
 from krmhd.hermite import compute_streaming_matrix, free_energy_weights
 from krmhd.physics import (
     KRMHDState,
@@ -304,21 +303,17 @@ def test_slice_step_projects_out_of_band_input():
 
 
 @pytest.mark.parametrize("M,Lambda,closure,nu,hyper_n,eta_z", [CASES[1], CASES[3], CASES[4], CASES[6]])
-@pytest.mark.parametrize("hermite_chunk,in_place", [
+@pytest.mark.parametrize("hermite_chunk,hermite_in_place", [
     (None, False), (1, False), (2, False), (5, False), (64, False), (None, True), (3, True),
-])
+], indirect=["hermite_in_place"])
 def test_slice_step_does_not_depend_on_hermite_chunk(M, Lambda, closure, nu, hyper_n, eta_z,
-                                                     hermite_chunk, in_place, monkeypatch):
+                                                     hermite_chunk, hermite_in_place):
     """The slices advance in place in groups of hermite_chunk (Issue #186). Every group
     size, with or without a remainder group and larger than M + 1 (all at once), gives
-    the Hermite-basis reference to round-off. in_place lowers the threshold
-    HERMITE_IN_PLACE_ENTRIES to 0, so the default on this small grid also takes the path
-    of large g: one slice at a time. It uses its own grid shape, so jit cannot reuse a
-    step traced with the default threshold."""
-    if in_place:
-        monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
+    the Hermite-basis reference to round-off. With no hermite_chunk, the in-place path
+    of large g goes one slice at a time."""
     with enable_x64():
-        grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=6 if in_place else 8)
+        grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=8)
         state = _random_state(grid, M, Lambda, nu, seed=30 + M)
         kw = dict(STEP, nu=nu, hyper_n=hyper_n, eta_z=eta_z, closure=closure)
         new = _kernel_step(state, eigensystem=_eigensystem(M, Lambda, closure),
