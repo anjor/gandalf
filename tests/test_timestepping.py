@@ -2661,11 +2661,11 @@ class TestIMEXARS343:
 
 def test_imex222_step_memory():
     """Issue #186: at 256³ the Hermite RHS goes through the moments in groups of eight
-    and the implicit solves one k_z plane at a time, in place, and the stage-B
-    right-hand side absorbs N_1 before N_2 exists. XLA's memory analysis of the
-    compiled step (arguments + outputs + temporaries; the CPU compiler here, nothing is
-    allocated) stays below 5.5 copies of g at M = 63 (4.6 measured). Before, it needed
-    7.1."""
+    and the implicit solves one k_z plane at a time, in place. The stage-B right-hand
+    side absorbs N_1 before N_2 exists, and g_rhs adds N_2 into it group by group.
+    XLA's memory analysis of the compiled step (arguments + outputs + temporaries; the
+    CPU compiler here, nothing is allocated) stays below 4 copies of g at M = 63 (3.6
+    measured). It was 4.6 with N_2 formed whole and 7.1 before the in-place path."""
     import math
 
     from krmhd.timestepping import KRMHDFields, _gandalf_step_imex222_jit
@@ -2690,7 +2690,7 @@ def test_imex222_step_memory():
     peak = (stats.argument_size_in_bytes + stats.output_size_in_bytes
             + stats.temp_size_in_bytes - stats.alias_size_in_bytes)
     g_bytes = Nz * Ny * (Nx // 2 + 1) * (M + 1) * cplx.itemsize
-    assert peak < 5.5 * g_bytes, f"peak = {peak / g_bytes:.2f} × g"
+    assert peak < 4.0 * g_bytes, f"peak = {peak / g_bytes:.2f} × g"
 
 
 @pytest.mark.parametrize("scheme", ["lawson_rk4", "imex_rk222", "imex_ars343"])

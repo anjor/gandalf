@@ -107,9 +107,10 @@ RMHD is an asymptotic expansion in the small parameter ε:
     one slice at a time (`hermite_chunk`), `g_rhs` in groups of eight moments and `imex_solve`
     one k_z plane at a time (Issue #186). On a GPU that is when 14 g-sized buffers exceed the
     device's memory, since in place is about 4 times slower there; on the CPU, above 2^26
-    entries. `hermite.HERMITE_IN_PLACE_ENTRIES = <int>` forces an entry threshold. On an 80 GB
-    GPU, `imex_rk222` at 256³, M = 64 needs `XLA_PYTHON_CLIENT_MEM_FRACTION=0.95`: in place it
-    needs 57.4 GiB, more than the default 75% pool.
+    entries. `hermite.HERMITE_IN_PLACE_ENTRIES = <int>` forces an entry threshold. In place,
+    `imex_rk222` adds its stage-B N_2 into the right-hand side as `g_rhs` makes it (`acc=`), so
+    at 256³, M = 64 it peaks at 37.7 GiB on an A100 and fits the default 75% pool of an 80 GB
+    GPU.
   - Multi-GPU: `lawson_rk4` shards its slices over a one-axis `jax.sharding.Mesh`
     (`gandalf_step(mesh=...)`, `StepParams(mesh=...)`; Issue #191). g is split along k_z,
     z± are replicated, and each step makes two all-to-alls of g's size. This cuts wall

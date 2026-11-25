@@ -1084,10 +1084,12 @@ def _gandalf_step_imex222_jit(
         interaction. For eta*dt*|k_perp|^(2r) << 1 (the typical turbulence
         regime), the extra splitting error is negligible.
 
-    Memory (Issue #186): when hermite.advance_in_place(g), g_rhs goes through the moments in groups of eight and
-    imex_solve one k_z plane at a time, each in place, and the stage-B
-    right-hand side absorbs N_1 before N_2 is computed. The step then holds
-    about four and a half copies of g instead of seven.
+    Memory (Issue #186): when hermite.advance_in_place(g), g_rhs goes through
+    the moments in groups of eight and imex_solve one k_z plane at a time, each
+    in place. The stage-B right-hand side absorbs N_1 before N_2 is computed,
+    and g_rhs adds N_2 into it group by group, so N_2 never exists whole. On an
+    A100 the compiled step then holds 4.6 copies of g (arguments, output and
+    temporaries) instead of 7.0.
 
     z+/- coupling time (Issue #158):
         Stage B evaluates N(g^(1), z+/-^(γ)) with z+/- sampled at t+γ·dt,
@@ -1222,12 +1224,22 @@ def _gandalf_step_imex222_jit(
         g=g_1,
         time=fields.time + _IMEX_GAMMA * dt,
     )
-    N_2 = compute_nl_g(fields_gamma)
 
     # Explicit L*g^(1): a three-point stencil in m
     L_g1 = apply_implicit_operator(g_1, kz, beta_i, nu, Lambda, M, hyper_n, closure)
 
-    rhs_2 = rhs_2 + (dt * (1.0 - _IMEX_GAMMA)) * L_g1 + (dt * (1.0 - _IMEX_DELTA)) * N_2
+    if advance_in_place(fields.g) and M > 0:
+        # N_2 is added into rhs_2 one group of moments at a time, so it never
+        # exists whole (Issue #186). Same terms, summed in the same order. At
+        # M = 0, _krmhd_rhs_jit gives N = 0, so that case stays below.
+        rhs_2 = g_rhs(
+            g_1, fields_gamma.z_plus, fields_gamma.z_minus, kx, ky, kz_zero, dealias_mask,
+            beta_i, Lambda, Nz, Ny, Nx, closure=closure,
+            acc=rhs_2 + (dt * (1.0 - _IMEX_GAMMA)) * L_g1, scale=dt * (1.0 - _IMEX_DELTA),
+        )
+    else:
+        N_2 = compute_nl_g(fields_gamma)
+        rhs_2 = rhs_2 + (dt * (1.0 - _IMEX_GAMMA)) * L_g1 + (dt * (1.0 - _IMEX_DELTA)) * N_2
     g_new = imex_solve(factor, rhs_2)
 
     # -------------------------------------------------------------------------
