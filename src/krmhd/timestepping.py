@@ -20,8 +20,10 @@ perpendicular advection are diagonal (Issue #184).
 gandalf_step(scheme=...) selects the Hermite integrator. The default
 "imex_rk222" (ARS(2,2,2)) treats streaming and hyper-collisions implicitly.
 "imex_ars343" (ARS(3,4,3), Issue #166) does the same with a third-order
-pair whose explicit part is stable for advection, and advances z± with the
-same explicit stages. "lawson_rk4" is the integrating-factor path above.
+pair and advances z± with the same explicit stages. Its explicit part is
+stable for advection, but once g streams the pair is not, and like
+imex_rk222 it needs hyper-collisions and hyper-resistivity (Issue #200).
+"lawson_rk4" is the integrating-factor path above.
 
 Example usage:
     >>> grid = SpectralGrid3D.create(Nx=64, Ny=64, Nz=32)
@@ -1447,6 +1449,13 @@ def _gandalf_step_imex343_jit(
     _ars343_explicit_a4), stable for |dt·ρ| ≤ 2√2, where ρ is the spectral
     radius of the advection operator.
 
+    That bound holds for z± and for g on the k_z = 0 plane, not for g that
+    streams (Issue #200). The implicit stages treat streaming and the
+    explicit stages treat advection, and together they amplify some modes
+    at every dt > 0. Like imex_rk222, g then needs hyper-collisions and
+    hyper-resistivity, though at the same dt 3 to 17 times less of them
+    in the worst case. docs/numerical_methods.md has the numbers.
+
     Tableau (γ ≈ 0.4358665215, c₃ = (1+γ)/2, b₁, b₂ from _ARS343_*):
 
         Implicit A:                    Explicit Â:
@@ -1791,12 +1800,18 @@ def gandalf_step(
             - "imex_ars343": ARS(3,4,3) IMEX scheme (Issue #166). Same
               implicit operator as imex_rk222, with an L-stable third-order
               implicit part. Its explicit part has RK4's stability
-              polynomial, stable for |dt·ρ| ≤ 2√2, so advection is stable
-              without dissipation. z± use the same explicit tableau in
-              Lawson form, so the z± trajectory differs from the midpoint
-              RK2 of the other two schemes. Third order for the coupled
-              system with η = η_z = 0. Costs one more tridiagonal solve
-              per step than imex_rk222.
+              polynomial, so z± and g on the k_z = 0 plane advect stably
+              for |dt·ρ| ≤ 2√2 without dissipation. z± use the same
+              explicit tableau in Lawson form, so the z± trajectory differs
+              from the midpoint RK2 of the other two schemes. Third order
+              for the coupled system with η = η_z = 0. Costs one more
+              tridiagonal solve per step than imex_rk222.
+              Once g streams (k_z ≠ 0), g grows at every dt unless
+              hyper-collisions and hyper-resistivity damp it (Issue #200),
+              as in imex_rk222, though at the same dt imex_ars343 needs 3
+              to 17 times less of them in the worst case.
+              docs/numerical_methods.md has the numbers and the settings it
+              needs.
             - "lawson_rk4": legacy mixed integrating-factor + Lawson-RK4 path,
               retained for comparison and rollback. Known to be unstable at
               high M·k_z (see Issue #137).
@@ -2273,10 +2288,15 @@ def compute_cfl_timestep(
         - imex_ars343 meets the 2√2 bound only without streaming. With
           streaming the implicit stages couple imaginary streaming and
           imaginary advection, and the amplification exceeds 1 at every
-          dt > 0 (in a frozen shear flow, about 1.00001, 1.007 and 1.10
-          per step at dt·ρ = 0.7, 1.4 and 2.7). Like imex_rk222, it then
-          relies on hyper-collisions and hyper-resistivity, and the exact
-          mode's larger dt raises the per-step growth.
+          dt > 0 (Issue #200). In a frozen shear flow without dissipation
+          the most amplified mode grows by 1.0011, 1.005 and 1.017 per
+          step at dt·ρ = 0.54, 0.85 and 1.41, which are the Courant and
+          exact dt at cfl_safety=0.3 and half the RK4 limit. Like
+          imex_rk222, it then relies on hyper-collisions and
+          hyper-resistivity, and the exact mode's larger dt raises the
+          per-step growth. In that flow ν = η = 1 (r = n = 2) keep g
+          bounded up to dt·ρ = 2.69. docs/numerical_methods.md has the
+          worst case and the settings the scheme needs.
 
     Note:
         For typical KRMHD with strong guide field, v_A usually dominates

@@ -714,6 +714,64 @@ dt_safe = compute_cfl_timestep(state, grid, cfl_safety_factor=0.5)
 
 **Note:** GANDALF integrating factor removes linear wave CFL constraint (only nonlinear advection matters).
 
+### `imex_ars343` needs dissipation once g streams
+
+The explicit tableau of `scheme="imex_ars343"` has the stability polynomial of RK4. Without dissipation, the scheme therefore advects stably for dt·ρ ≤ 2√2, where ρ is the spectral radius of the advection operator. That holds for z± and for g on the k_z = 0 plane. Once g streams (k_z ≠ 0), the bound fails (Issue #200). The implicit stages treat streaming and the explicit stages treat advection, and the combined step amplifies some modes at every dt > 0. Like `imex_rk222`, the scheme then relies on hyper-collisions and hyper-resistivity, but it needs much less of them.
+
+`scripts/ars343_stability_study.py` measures this in the frozen shear flow of Issue #200. z± = (1 ± 1/2)Φ with Φ = cos x + (1/2) sin 2x, so every Elsasser bracket vanishes and z± stay fixed. The grid is 16×16×8 with L = 2π, M = 8, Λ = √5 and β_i = 1. ρ = 23.96 is the slice advection radius that `compute_cfl_timestep(mode="exact")` uses. The step is y = dt·ρ/2√2, the fraction of the RK4 limit. At `cfl_safety=0.3`, `compute_cfl_timestep` gives y = 0.19, and its exact mode gives y = 0.3. The script builds the step map of g exactly and reports its spectral radius, which is the amplification per step of the most amplified mode. Above 1, g grows without bound.
+
+| Setting | Scheme | y = 0.19 | y = 0.3 | y = 0.5 | y = 0.95 |
+|---|---|---|---|---|---|
+| η = ν = 0 | `imex_ars343` | 1.0011 | 1.0050 | 1.0165 | 1.112 |
+| η = ν = 0 | `imex_rk222` | 1.0154 | 1.092 | 1.567 | 4.34 |
+| η = ν = 0 | `lawson_rk4` | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+| ν = η = 0.5, r = n = 2 | `imex_ars343` | 0.9995 | 0.9993 | 0.9988 | 1.030 |
+| ν = η = 0.5, r = n = 2 | `imex_rk222` | 1.0040 | 1.072 | 1.525 | 4.16 |
+| ν = η = 1, r = n = 2 | `imex_ars343` | 0.9991 | 0.9986 | 0.9976 | 0.9954 |
+| ν = η = 1, r = n = 2 | `imex_rk222` | 0.9991 | 1.053 | 1.484 | 3.98 |
+
+In this flow, the 32³ settings of [recommended_parameters.md](recommended_parameters.md), ν = η = 0.5 to 1 with r = n = 2, are enough for `imex_ars343`. ν = η = 0.5 bound g up to y = 0.5, and ν = η = 1 up to y = 0.95. `imex_rk222` with ν = η = 1 is bounded only at y = 0.19.
+
+The next table gives the smallest ν = η (r = n = 2) that bounds g. The ρ = 96 rows multiply Φ by 4 at the same k_z.
+
+| Scheme | ρ | y = 0.3 | y = 0.5 | y = 0.95 |
+|---|---|---|---|---|
+| `imex_ars343` | 24 | 0.14 | 0.36 | 0.92 |
+| `imex_rk222` | 24 | 2.4 | 8.4 | 19 |
+| `imex_ars343` | 96 | 0.039 | 0.067 | 0.16 |
+| `imex_rk222` | 96 | 7.4 | 26 | 67 |
+
+When ρ grows 4 times, the threshold of `imex_rk222` grows 3 to 3.5 times, because its explicit stage amplifies advection without any streaming. The threshold of `imex_ars343` falls instead. Its growth needs a streaming rate near the advection rate, and the fastest growth is at about 1.1 times it. The faster flow at the same k_z moves the two rates apart. The frozen flow therefore gives no general bound for `imex_ars343`.
+
+The worst case is one mode with advection rate ω, streaming rate σ and damping rate κ, with the σ that grows fastest (`ars343_stability_study.py scalar`). The table gives the damping that keeps that mode bounded, relative to ω. Hyper-collisions sit in the implicit operator and need a rate κ. Hyper-resistivity multiplies g by exp(-e) after the step and needs a factor e per step.
+
+| y | `imex_ars343` κ/ω | `imex_rk222` κ/ω | `imex_ars343` e/(ω·dt) | `imex_rk222` e/(ω·dt) |
+|---|---|---|---|---|
+| 0.19 | 0.010 | 0.17 | 0.010 | 0.12 |
+| 0.3 | 0.036 | 0.49 | 0.035 | 0.26 |
+| 0.5 | 0.13 | 1.26 | 0.11 | 0.45 |
+| 0.95 | 0.51 | 2.6 | 0.20 | 0.56 |
+
+In the worst case, `imex_ars343` needs 3 to 17 times less damping than `imex_rk222` at the same dt.
+
+What `imex_ars343` needs with streaming:
+
+- Every mode that advects at rate ω needs a damping rate above c·ω, with c = κ/ω from the worst-case table. That is c = 0.010 at y = 0.19 and c = 0.036 at y = 0.3. At these steps, hyper-collisions and hyper-resistivity damp about equally well per unit rate, so their rates add.
+- The fastest modes are at the grid scale, with ω up to ρ. The normalized hyper-collision rate ν·(m/M)^n is at most ν, and the hyper-resistive rate η·(k⊥²/k⊥²_max)^r is at most η. In the worst case, a run therefore needs ν + η ≥ c·ρ. ν = η = 1 then cover ρ up to about 55 at y = 0.3 and up to about 200 at y = 0.19. This estimate comes from the scalar model, not from a run.
+- A larger ρ needs a larger ν and η, or a smaller y. For small y, c falls about as y³, so halving the step cuts the damping it needs by about 8.
+- For comparison, `lawson_rk4` keeps g bounded without dissipation for y < 1.
+
+The commands below rerun the numbers. The times are for an 8-core Apple M1 Pro CPU.
+
+```bash
+uv run python scripts/ars343_stability_study.py table                    # first table, 1 min
+uv run python scripts/ars343_stability_study.py threshold                # ρ = 24 thresholds, 3 min
+uv run python scripts/ars343_stability_study.py threshold --amplitude 4  # ρ = 96 thresholds, 1 min
+uv run python scripts/ars343_stability_study.py scalar                   # worst case, 15 s
+```
+
+`test_imex_ars343_with_streaming_needs_dissipation` in `tests/test_advection_radius.py` checks the growth without dissipation at y = 0.5 and the two ν = η settings at y = 0.5 and y = 0.95.
+
 ### Typical Timesteps
 
 | Resolution | Box size | Typical dt | Steps per τ_A |
