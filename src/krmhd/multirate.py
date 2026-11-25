@@ -257,6 +257,10 @@ def _gandalf_step_lawson_rk4_multirate_jit(
 
     The step runs in place like lawson_rk4's in-place path: one g-sized buffer
     holds g, then the slices, then g^(n+1).
+
+    The eigensystem must meet lawson_rk4's conditions: real and well
+    conditioned. At Λ = 1 with odd M, T is defective and
+    compute_streaming_eigensystem raises a ValueError (Issue #192).
     """
     # z± exactly as in lawson_rk4: at t + dt/2 (Euler predictor) and at t + dt, undamped
     z_plus_half, z_minus_half, z_plus_new, z_minus_new = _elsasser_midpoint(

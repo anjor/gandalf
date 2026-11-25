@@ -538,11 +538,13 @@ def _gandalf_step_lawson_rk4_jit(
     - It must be real. Each slice is then the transform of a real field, which
       the real FFTs of _slice_advection_rhs assume. A complex eigensystem
       (T has complex eigenvalues for Λ < 1) raises a ValueError at trace time.
-    - The eigenvectors are well conditioned away from Λ = 1: cond(P) ≈ 1.4 at
-      Λ = √5 for every M ≤ 768. For odd M, cond(P) grows like (Λ - 1)^(-1/2)
-      as Λ → 1 (about 10 at Λ = 1.01 and 100 at Λ = 1.0001). At Λ = 1 with odd
-      M, T is defective (λ = 0 is a double root with one eigenvector) and the
-      step is wrong in either form (Issue #192).
+    - It must be well conditioned: the step loses about cond(P)·eps. cond(P)
+      ≈ 1.4 at Λ = √5 for every M ≤ 768. For odd M, cond(P) grows like
+      (Λ - 1)^(-1/2) as Λ → 1 (about 10 at Λ = 1.01 and 100 at Λ = 1.0001). At
+      Λ = 1 with odd M, T is defective (λ = 0 is a double root with one
+      eigenvector) and cond(P) is 4e14 or more, so compute_streaming_eigensystem
+      raises a ValueError for cond(P) > 1e3 (Issue #192). Use an IMEX scheme
+      there, or Λ ≠ 1.
 
     At M = 1 the step integrates the system defined by T with the zero
     closure, (Tg)_1 = T[1,0]·g_0, as _krmhd_rhs_jit and the IMEX schemes do

@@ -99,8 +99,9 @@ RMHD is an asymptotic expansion in the small parameter ε:
     advection, z± advanced with the same explicit stages; Issue #166) or `"lawson_rk4"`
     (integrating factor + RK4, run in the eigenbasis of the streaming matrix, where
     streaming and advection are both diagonal; Issue #184)
-  - `lawson_rk4` needs real, well-conditioned eigenvectors of T. At Λ = 1 with odd M,
-    T is defective and the step is wrong (Issue #192); use an IMEX scheme there.
+  - `lawson_rk4` and `lawson_rk4_multirate` need real, well-conditioned eigenvectors of T.
+    At Λ = 1 with odd M, T is defective, so both raise a ValueError (cond(P) > 1e3;
+    Issue #192). Use an IMEX scheme or Λ ≠ 1 there.
   - The explicit stage of `imex_rk222` amplifies advected modes at every dt. It relies on
     hyper-collisions and hyper-resistivity, so dt_cfl alone does not guarantee stability.
   - Memory: when `hermite.advance_in_place(g)` holds, g is advanced in place: `lawson_rk4`
