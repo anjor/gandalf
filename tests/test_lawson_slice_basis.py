@@ -31,6 +31,7 @@ from krmhd.physics import (
     z_minus_rhs,
     z_plus_rhs,
 )
+from krmhd.runloop import DeviceLoop, FixedDt, RunConfig, StepParams
 from krmhd.spectral import SpectralGrid3D
 from krmhd.timestepping import (
     KRMHDFields,
@@ -375,6 +376,48 @@ def test_complex_eigensystem_raises():
     with pytest.raises(ValueError, match="real eigensystem"):
         _kernel_step(state, 1e-3, 1.0, 1.0, 2, 6, 0.0, 1, "zero",
                      (evals, P.astype(jnp.complex64), P_inv.astype(jnp.complex64)))
+
+
+LAWSON_SCHEMES = ("lawson_rk4", "lawson_rk4_multirate")
+
+
+@pytest.mark.parametrize("scheme", LAWSON_SCHEMES)
+@pytest.mark.parametrize("M,closure", [(1, "zero"), (3, "zero"), (5, "symmetric")])
+def test_lawson_refuses_defective_streaming_matrix(scheme, M, closure):
+    """Issue #192: at Λ = 1 with odd M, λ = 0 is a double eigenvalue of T with one
+    eigenvector, so T = P diag(λ) P⁻¹ does not exist. Every entry to a Lawson step
+    refuses it: gandalf_step, a one-device mesh and DeviceLoop."""
+    grid = SpectralGrid3D.create(Nx=8, Ny=8, Nz=8)
+    state = _random_state(grid, M, 1.0, 0.0, seed=M)
+    with pytest.raises(ValueError, match="imex_rk222"):
+        gandalf_step(state, dt=1e-3, eta=1.0, v_A=1.0, scheme=scheme, closure=closure)
+    if scheme == "lawson_rk4":
+        mesh = jax.sharding.Mesh(jax.devices()[:1], ("slices",))
+        with pytest.raises(ValueError, match="imex_rk222"):
+            gandalf_step(state, dt=1e-3, eta=1.0, v_A=1.0, scheme=scheme, closure=closure,
+                         mesh=mesh)
+    step = StepParams(eta=1.0, v_A=1.0, scheme=scheme, closure=closure)
+    with pytest.raises(ValueError, match="imex_rk222"):
+        DeviceLoop(state, RunConfig(step=step, dt=FixedDt(1e-3)))
+
+
+@pytest.mark.parametrize("scheme", LAWSON_SCHEMES)
+@pytest.mark.parametrize("M,Lambda", [(4, 1.0), (8, 1.0), (3, 1.0 + 1e-4), (5, 1.01)])
+def test_lawson_streaming_near_lambda_one_matches_expm(scheme, M, Lambda):
+    """Λ = 1 with even M (cond(P) 2-3) and Λ near 1 with odd M (cond(P) 100 and 11)
+    still work: one pure-streaming step equals expm(-i√β_i k_z T dt) g."""
+    with enable_x64():
+        grid = SpectralGrid3D.create(Nx=8, Ny=8, Nz=16)
+        state = _random_state(grid, M, Lambda, 0.0, seed=M)
+        zero = jnp.zeros_like(state.z_plus)
+        state = state.model_copy(update=dict(z_plus=zero, z_minus=zero))
+        dt = 0.01
+        new = gandalf_step(state, dt=dt, eta=0.0, v_A=1.0, nu=0.0, scheme=scheme)
+        T = compute_streaming_matrix(M, Lambda, "zero")
+        U = np.stack([expm(-1j * math.sqrt(state.beta_i) * k * T * dt)
+                      for k in np.asarray(grid.kz)])
+        ref = jnp.einsum("zmn,zyxn->zyxm", jnp.asarray(U), state.g)
+        assert _rel_diff(new.g, ref) < 1e-12, f"g differs by {_rel_diff(new.g, ref):.2e}"
 
 
 def _count_primitive(jaxpr, name: str) -> int:
