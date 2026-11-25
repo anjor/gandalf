@@ -4,10 +4,10 @@ Issue #136 reported that every 128³ forced run of `alfvenic_cascade_benchmark.p
 
 ## Result
 
-- Current code is stable in every rerun. Six runs at 64³ and 128³, with both forcings, reached 500 to 1000 τ_A. That is 3 to 8 times the old blowup times. All six pass every criterion below.
+- Current code is stable in every rerun. Six runs at 64³ and 128³, with both forcings, reached 500 to 1000 τ_A. That is 3 to 8 times the old blowup times. All six pass every criterion below. These runs test the Alfvénic sector only: g starts at zero and is not forced, so it stays zero, and every run uses `imex_rk222` at a fixed dt.
 - Nothing piles up at the cutoff. Every time-averaged E(n⊥) falls monotonically from n_edge/2 to the 2/3 edge. Once the cascade reaches the hyper-resistive range, the energy fraction near the edge levels off. Over the last 100 τ_A it decays in four runs, and in the other two it e-folds in 190 τ_A or more. The stepper's energy error stays below 1.3% of the injection.
 - dt stays at the Alfvén limit for the whole of every run. The largest Elsasser advection speed, max|∇⊥z±| = 0.36 at 128³, is below v_A.
-- The old blowup came from the integrating-factor phase on the nonlinear increment, which #148 fixed. The v0.4.4 benchmark reproduces the blowup at 32³. The commit before #148 still blows up at the rescaled amplitude, and the commit with #148 does not.
+- The old blowup came from the integrating-factor phase on the nonlinear increment, which #148 fixed. The v0.4.4 benchmark reproduces the blowup at 32³. The commit before #148 still blows up at the rescaled amplitude, and the commit with #148 does not. The bisect ran at 32³ only. That the 64³ and 128³ blowups had the same cause is inferred.
 - Two features that the issue reported as symptoms come from the setup, not from the numerics. Shell forcing grows an n_z = 0 condensate that keeps E(t) rising. At 128³ the rescaled amplitudes inject 1/16 of the 64³ power, so their cascade needs 500 to 1000 τ_A to reach the cutoff.
 
 ## Setup
