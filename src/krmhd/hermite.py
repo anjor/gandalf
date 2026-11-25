@@ -663,6 +663,8 @@ HERMITE_CLOSURES: tuple[str, ...] = ("zero", "symmetric")
 #   place above CPU_IN_PLACE_ENTRIES entries, where it is as fast or faster.
 # - An int: in place above that many entries, on any device. Tests and
 #   benchmarks force a path with 0 or 2**62.
+# jit reads it when it traces a step, so set it before the first step or call
+# jax.clear_caches().
 HERMITE_IN_PLACE_ENTRIES: Optional[int] = None
 
 # The all-at-once imex_rk222 and lawson_rk4 steps both peak at 11.1 g-sized

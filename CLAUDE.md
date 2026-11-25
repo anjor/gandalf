@@ -108,7 +108,8 @@ RMHD is an asymptotic expansion in the small parameter ε:
     one slice at a time (`hermite_chunk`), `g_rhs` in groups of eight moments and `imex_solve`
     one k_z plane at a time (Issue #186). On a GPU that is when 14 g-sized buffers exceed the
     device's memory, since in place is about 4 times slower there; on the CPU, above 2^26
-    entries. `hermite.HERMITE_IN_PLACE_ENTRIES = <int>` forces an entry threshold. In place,
+    entries. `hermite.HERMITE_IN_PLACE_ENTRIES = <int>` forces an entry threshold. jit reads it
+    when it traces a step, so set it before the first step or call `jax.clear_caches()`. In place,
     `imex_rk222` adds its stage-B N_2 into the right-hand side as `g_rhs` makes it (`acc=`), so
     at 256³, M = 64 it peaks at 37.7 GiB on an A100 and fits the default 75% pool of an 80 GB
     GPU.
