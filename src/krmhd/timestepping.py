@@ -2260,9 +2260,10 @@ def compute_cfl_timestep(
           real λ_j is attained at the extreme eigenvalues, so only two
           gradient magnitudes are evaluated. Complex eigenvalues (Λ < 1)
           use the triangle bound |∇⊥Φ| + √β_i |λ| |∇⊥Ψ|.
-        - CFL violation → exponential instability. An eroding CFL margin as
-          forced runs grow in amplitude is a candidate mechanism for the
-          late-time blowups of Issue #136.
+        - CFL violation → exponential instability. The late-time blowups of
+          Issue #136 were not one: dt stayed at the Alfvén limit, and the
+          cause was the integrating-factor phase fixed in #148
+          (docs/long_run_stability_study.md).
         - dt_cfl does not by itself guarantee a stable step (Issue #166).
           The explicit advection stage of scheme="imex_rk222" amplifies
           every advected mode by about (dt·ρ)⁴/8 per step, where ρ is the
