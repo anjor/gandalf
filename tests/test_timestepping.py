@@ -2696,13 +2696,13 @@ def test_imex222_step_memory():
 
 @pytest.mark.parametrize("scheme", ["lawson_rk4", "imex_rk222", "imex_ars343"])
 @pytest.mark.parametrize("mixed", [False, True])
-def test_in_place_step_keeps_dtypes(scheme, mixed, monkeypatch):
+@pytest.mark.parametrize("hermite_in_place", [False], indirect=True)
+def test_in_place_step_keeps_dtypes(scheme, mixed, hermite_in_place):
     """Issue #186: the in-place path for large g gives the dtypes and values of the
     all-at-once path, also for a complex64 state under float64 and for complex64 g next
-    to complex128 z±. HERMITE_IN_PLACE_ENTRIES = 0 forces it on this small grid."""
+    to complex128 z±."""
     from jax.experimental import enable_x64
 
-    from krmhd import hermite
     from krmhd.physics import KRMHDState, enforce_hermitian_state
 
     def step(state):
@@ -2726,8 +2726,7 @@ def test_in_place_step_keeps_dtypes(scheme, mixed, monkeypatch):
             Lambda=5.0**0.5, time=0.0, grid=grid,
         ))
         ref = step(state)
-        monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
-        jax.clear_caches()
+        hermite_in_place(True)
         new = step(state)
         for name in ("z_plus", "z_minus", "g"):
             a, b = getattr(new, name), getattr(ref, name)

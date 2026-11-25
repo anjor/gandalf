@@ -24,7 +24,6 @@ import pytest
 from jax.experimental import enable_x64
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from krmhd import hermite
 from krmhd.forcing import WhiteNoiseBand
 from krmhd.hermite import compute_streaming_eigensystem
 from krmhd.physics import KRMHDState, enforce_hermitian_state
@@ -122,11 +121,9 @@ def test_sharded_step_matches_one_device(n_devices, M, closure, nu, hyper_n, eta
             assert err < 1e-13, f"{name} differs by {err:.2e}"
 
 
-def test_sharded_step_in_place_by_size(monkeypatch):
-    """With HERMITE_IN_PLACE_ENTRIES = 0 each device advances its slices in place,
-    one at a time, as one device does for large g. Own grid shape, so jit cannot
-    reuse a step traced with the default threshold."""
-    monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
+def test_sharded_step_in_place_by_size(hermite_in_place):
+    """In place, each device advances its slices one at a time, as one device
+    does for large g."""
     with enable_x64():
         grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=4)
         kw = dict(STEP, nu=1.0, hyper_n=3, eta_z=0.0, closure="symmetric")
