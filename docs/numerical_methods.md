@@ -757,7 +757,7 @@ In the worst case, `imex_ars343` needs 3 to 17 times less damping than `imex_rk2
 What `imex_ars343` needs with streaming:
 
 - Every mode that advects at rate ω needs a damping rate above c·ω, with c = κ/ω from the worst-case table. That is c = 0.010 at y = 0.19 and c = 0.036 at y = 0.3. At these steps, hyper-collisions and hyper-resistivity damp about equally well per unit rate, so their rates add.
-- The fastest modes are at the grid scale, with ω up to ρ. The normalized hyper-collision rate ν·(m/M)^n is at most ν, and the hyper-resistive rate η·(k⊥²/k⊥²_max)^r is at most η. In the worst case, a run therefore needs ν + η ≥ c·ρ. ν = η = 1 then cover ρ up to about 55 at y = 0.3 and up to about 200 at y = 0.19. This estimate comes from the scalar model, not from a run.
+- The fastest modes are at the grid scale, with ω up to ρ. The normalized hyper-collision rate ν·(m/M)^n is at most ν, and the hyper-resistive rate η·(k⊥²/k⊥²_max)^r is at most η. In the worst case, a run therefore needs ν + η ≥ c·ρ. ν = η = 1 then meet that bound for ρ up to about 55 at y = 0.3 and up to about 200 at y = 0.19. The bound is necessary, not sufficient: m = 0 and 1 get no hyper-collisions, and modes well below k⊥_max get little hyper-resistivity. This estimate comes from the scalar model, not from a run.
 - A larger ρ needs a larger ν and η, or a smaller y. For small y, c falls about as y³, so halving the step cuts the damping it needs by about 8.
 - For comparison, `lawson_rk4` keeps g bounded without dissipation for y < 1.
 
