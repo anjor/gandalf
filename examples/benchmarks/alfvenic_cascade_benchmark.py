@@ -23,8 +23,14 @@ Expected runtime (default 50 τ_A):
 
 Steady-State Considerations:
 - True steady state requires energy injection = dissipation (plateau in E(t))
-- Default runtime (50 τ_A) should achieve steady state for 32³ and 64³
-- For 128³ or publication quality: use --total-time 100 for cleaner results
+- The default runtime (50 τ_A) does not reach steady state. A fixed amplitude
+  injects a physical power that falls as N⁻⁴, and the cascade needs hundreds
+  of τ_A to reach the dissipation range: 64³ with --balanced-elsasser at
+  amplitude 0.10 levels off near 200 τ_A, 128³ at amplitude 0.40 near 200 τ_A
+- The default shell forcing includes the n_z = 0 plane. Those 2D modes cascade
+  inversely to n⊥ = 1, and E(t) keeps rising there for hundreds of τ_A. Use
+  --balanced-elsasser for a plateau
+- Long runs are stable (Issue #136); see docs/long_run_stability_study.md
 - Check "Steady-state check" output during run: target ΔE/⟨E⟩ < 2%
 - Averaging over final 20 τ_A (30-50) provides better statistics than shorter windows
 
