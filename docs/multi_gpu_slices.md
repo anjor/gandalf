@@ -1,6 +1,6 @@
 # Lawson-RK4 on several GPUs: sharding the Hermite slices
 
-Issue #191, item 2. In the eigenbasis of the streaming matrix the M + 1 Hermite slices are independent between collision updates (#184), so `lawson_rk4` can advance them on different GPUs. This cuts wall time, not cost: the 64³, M = 768 run took 56 h on one B200. The GPU speed-up below is an estimate. `scripts/multidevice_benchmark.py` measures it.
+Issue #191, item 2. In the eigenbasis of the streaming matrix the M + 1 Hermite slices are independent between collision updates (#184), so `lawson_rk4` can advance them on different GPUs. This cuts wall time, not cost: the 64³, M = 768 run took 56 h on one B200. On four B200s the step is 4.1 times faster at M = 768 than on one (measured, see below).
 
 ## Usage
 
@@ -20,7 +20,7 @@ loop = DeviceLoop(state, config, key=key)
 - The mesh needs `scheme="lawson_rk4"`, one axis, M ≥ 1 and Nz divisible by the number of devices. Otherwise `gandalf_step` and `DeviceLoop` raise `ValueError`.
 - The state comes back with g split along k_z (Nz/D planes on each of D devices) and z± whole on every device. Diagnostics, checkpoints and accounting hooks use it as any `jax.Array`: XLA adds the reductions over the split axis, and `np.asarray` gathers it.
 - Results match one device to round-off. Without a mesh the step traces exactly as before.
-- `hermite_chunk` and the in-place threshold (`hermite.HERMITE_IN_PLACE_ENTRIES`) apply to each device's share of g.
+- `hermite_chunk` and the in-place rule (`hermite.advance_in_place`) apply to each device's share of g.
 
 ## Design
 
@@ -55,7 +55,7 @@ Between steps each device holds its share of g. The table below gives the memory
 | 256 | 1 / 2 / 4 / 8 | 1.17 / 1.26 / 0.67 / 0.34 GB (2.1 / 4.5 / 4.9 / 4.9) | 4.45 / 2.52 / 1.28 / 0.66 GB (8.0 / 9.1 / 9.2 / 9.4) |
 | 768 | 1 / 2 / 4 / 8 | 3.41 / 3.77 / 2.00 / 1.04 GB (2.1 / 4.5 / 4.8 / 5.0) | 13.29 / 7.50 / 3.77 / 1.91 GB (8.0 / 9.0 / 9.1 / 9.2) |
 
-One device in place holds about two copies of g, the input and the output. On a mesh the in-place path holds 4.5 to 5 shares per device. The exchanges add about 2.5 shares: the copy padded to D·n_own slices, the all-to-all's input chunks and its output. In place, sharding therefore saves memory only from D = 4 on. All at once, each device holds about 9 shares, against 8 on one device. The in-place threshold is 2^26 entries per device. At 64³, M = 768, one GPU (1.55 × 2^26 entries) therefore runs in place, while two or more GPUs (0.77 × 2^26 each at D = 2) run all at once and use more memory per device than one GPU did. Memory does not limit these runs on a B200 with 180 GB. Sharding for memory matters at 256³ and above. Exchanging the slices in groups could bound the extra shares, if that becomes the limit.
+One device in place holds about two copies of g, the input and the output. On a mesh the in-place path holds 4.5 to 5 shares per device. The exchanges add about 2.5 shares: the copy padded to D·n_own slices, the all-to-all's input chunks and its output. In place, sharding therefore saves memory only from D = 4 on. All at once, each device holds about 9 shares, against 8 on one device. A GPU runs its share in place only when 14 shares exceed its memory, since in place is about 4 times slower on a GPU (`hermite.advance_in_place`). At 64³, M = 768 every device count on a B200 with 180 GB therefore runs all at once. Sharding for memory matters at 256³ and above. Exchanging the slices in groups could bound the extra shares, if that becomes the limit.
 
 ## Expected GPU scaling (estimate, not measured)
 
@@ -88,6 +88,22 @@ A mutation that gives every device the eigenvalues of slice group 0 fails every 
 
 The overhead check uses 32³, M = 64 on 4 virtual CPU devices that share the machine's 8 cores, with the machine loaded by other work. These are not speed-ups. One device ran 130–137 ms per step and kept 1.5 cores busy. Four devices ran 41–46 ms per step and kept 5.4–6.0 cores busy. CPU time per step was 199–202 ms on one device and 243–250 ms on four. The extra 23% is the z± work done on four devices (9 slice-equivalents more than one device's 68) and the padding from 65 to 68 slices. That is 18% by count, and the all-to-all copies take the rest. The all-to-all pair alone took 4.5 ms.
 
+## Measured on four B200s
+
+`scripts/multidevice_benchmark.py` with its defaults ran on Modal on 2026-11-25 in 8.4 minutes. The results are in `gandalf-results:multigpu_slices_b200x4_20261125`. The table gives ms per step of `lawson_rk4` at 64³, complex128, in a forced `DeviceLoop`: the median of 5 rounds of 20 steps. Two and four GPUs ran all at once.
+
+| M | 1 GPU, all at once | 1 GPU, in place | 2 GPUs | 4 GPUs | speed-up at 4 | all-to-all pair at 4 |
+|---|---|---|---|---|---|---|
+| 256 | 25.2 | 72.7 | 13.2 | 7.5 | 3.35× | 0.87 ms |
+| 512 | 57.4 | 147 | 26.9 | 14.4 | 3.98× | 1.24 ms |
+| 768 | 91.0 | 241 | 42.4 | 22.3 | 4.08× | 1.64 ms |
+
+- T₁ at M = 768 is 91 ms, twice the 45 ms estimate. Communication is therefore a smaller share than modelled, and the speed-up beats the model: 2.14× at D = 2 and 4.08× at D = 4, against 1.9× and 3.7×.
+- The all-to-all pair takes 2.3 ms at D = 2 and 1.6 ms at D = 4 for M = 768, about twice the modelled T_a2a and 5 to 7% of the step.
+- g is bitwise equal to one GPU's at every device count.
+- In place, one GPU is 2.6 to 2.9 times slower than all at once, so a GPU runs in place only when all at once does not fit (#206).
+- At 4.08×, the 56 h run of 64³, M = 768 would take about 14 h on four B200s.
+
 ## GPU measurement plan
 
 Run from a checkout that contains this change:
@@ -102,7 +118,7 @@ modal volume get gandalf-results multigpu_slices_b200x4 ./multigpu_slices_b200x4
 
 - `modal run` builds an ephemeral app from the local checkout, so `MODAL_SCRIPT_GPU=B200:4` gives this run four B200s and leaves the deployed app's GPU type unchanged. Modal's parser (modal 1.6.4) reads `B200:4` as four B200s, so `modal_app.py` needs no change. The call is tied to the local client and stops if the laptop sleeps.
 - The defaults are 64³, M = 256, 512 and 768, devices 1, 2 and 4, and paths `auto`, `in_place` and `batched`. Each (M, path, device count) is 20 steps per sample over 5 interleaved rounds, after a compiling call. `--paths auto batched` cuts the run by a third. `MODAL_SCRIPT_GPU=B200:8` adds D = 8. `--memory` adds the GPU compiler's memory per device, at the cost of one more compile per loop.
-- The run length is a guess: 30–60 min, mostly compiles. At Modal's listed B200 rate (check it), that is about $15–30 for four GPUs.
+- The default run took 8.4 minutes on 2026-11-25.
 - Read the table in `modal_run.log` or `multidevice_benchmark.json`:
   - `speed-up` for path `auto` is what a run gets. For `in_place` it isolates the sharding, because every device count takes the same path. The baseline is the faster one-GPU path, `batched` or `in_place`.
   - Compare `all-to-all pair ms` with T_a2a above. It is the communication cost.

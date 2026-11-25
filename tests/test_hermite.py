@@ -974,3 +974,47 @@ class TestIMEXOperator:
 if __name__ == "__main__":
     # Allow running tests directly
     pytest.main([__file__, "-v"])
+
+
+class TestAdvanceInPlace:
+    """hermite.advance_in_place: in place only when the all-at-once step does not fit (Issue #186)."""
+
+    class _Device:
+        def __init__(self, platform, bytes_limit=None):
+            self.platform = platform
+            self._stats = None if bytes_limit is None else {"bytes_limit": bytes_limit}
+
+        def memory_stats(self):
+            return self._stats
+
+    def _with_device(self, monkeypatch, device):
+        from krmhd import hermite
+
+        monkeypatch.setattr(hermite.jax, "local_devices", lambda: [device])
+        return hermite
+
+    def test_gpu_keeps_g_all_at_once_while_it_fits(self, monkeypatch):
+        """On an 80 GB GPU, imex_rk222's 128³, M = 128 g (2.2 GiB) stays all at once,
+        where in place is 4 times slower; 256³, M = 64 (8.2 GiB) goes in place."""
+        hermite = self._with_device(monkeypatch, self._Device("gpu", 60 * 2**30))
+        small = jax.ShapeDtypeStruct((128, 128, 65, 129), jnp.complex128)
+        large = jax.ShapeDtypeStruct((256, 256, 129, 65), jnp.complex128)
+        assert not hermite.advance_in_place(small)
+        assert hermite.advance_in_place(large)
+        # complex64 halves the bytes: 14 × 4.1 GiB fits 60 GiB
+        assert not hermite.advance_in_place(jax.ShapeDtypeStruct(large.shape, jnp.complex64))
+
+    def test_cpu_goes_in_place_above_2_to_the_26_entries(self, monkeypatch):
+        hermite = self._with_device(monkeypatch, self._Device("cpu"))
+        assert not hermite.advance_in_place(jax.ShapeDtypeStruct((2**26,), jnp.complex128))
+        assert hermite.advance_in_place(jax.ShapeDtypeStruct((2**26 + 1,), jnp.complex128))
+
+    def test_device_without_memory_stats_uses_the_entry_rule(self, monkeypatch):
+        hermite = self._with_device(monkeypatch, self._Device("gpu"))
+        assert hermite.advance_in_place(jax.ShapeDtypeStruct((2**26 + 1,), jnp.complex128))
+
+    @pytest.mark.parametrize("entries, expected", [(0, True), (2**62, False)])
+    def test_an_entry_count_forces_the_path_on_any_device(self, monkeypatch, entries, expected):
+        hermite = self._with_device(monkeypatch, self._Device("gpu", 60 * 2**30))
+        monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", entries)
+        assert hermite.advance_in_place(jnp.zeros((4, 4, 3, 9), jnp.complex64)) is expected

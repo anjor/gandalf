@@ -8,7 +8,7 @@ at --n³ and each --M, in DeviceLoop at a fixed dt. For each M and each Hermite
 path, one loop per device count advances --steps steps per call, the device
 counts interleaved (forward, then reversed) for --rounds rounds. The paths force
 how each device advances its slices: "auto" is the default threshold
-(hermite.HERMITE_IN_PLACE_ENTRIES on each device's share of g), "in_place" one
+(hermite.advance_in_place on each device's share of g), "in_place" one
 slice at a time, "batched" all at once.
 
 Reported per (M, path, devices): median ms per step and its range over the
@@ -68,7 +68,7 @@ BAND = dict(n_min=1, n_max=2, band="perp_lowkz", max_nz=1, include_nz0=False)
 FORCING = Forcing(alfven=WhiteNoiseBand(amplitude=0.05, **BAND),
                   hermite=WhiteNoiseBand(amplitude=0.05, **BAND), moments=(0,))
 # hermite.HERMITE_IN_PLACE_ENTRIES for each path
-PATHS = {"auto": hermite.HERMITE_IN_PLACE_ENTRIES, "in_place": 0, "batched": 2**62}
+PATHS = {"auto": None, "in_place": 0, "batched": 2**62}
 
 
 def initial_fields(grid: SpectralGrid3D, M: int, dtype) -> tuple:
@@ -175,11 +175,11 @@ def run_path(grid, M, path, device_counts, dt, dtype, steps, rounds, memory) -> 
     rows = []
     for D in device_counts:
         st = loops[D].state
-        share = (grid.Nz // D) * grid.Ny * (grid.Nx // 2 + 1) * (M + 1)
+        share = jax.ShapeDtypeStruct((grid.Nz // D, grid.Ny, grid.Nx // 2 + 1, M + 1), st.g.dtype)
         ms = 1e3 * np.asarray(times[D])
         rows.append(dict(
             M=M, path=path, devices=D,
-            device_path="in_place" if share > hermite.HERMITE_IN_PLACE_ENTRIES else "batched",
+            device_path="in_place" if hermite.advance_in_place(share) else "batched",
             ms_per_step_median=float(np.median(ms)), ms_min=float(ms.min()), ms_max=float(ms.max()),
             first_call_s=first_call[D],
             g_rel_diff_vs_first=rel_diff(st.g, ref.g),
