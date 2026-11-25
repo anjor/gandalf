@@ -26,7 +26,7 @@ Steady-State Considerations:
 - The default runtime (50 τ_A) does not reach steady state. A fixed amplitude
   injects a physical power that falls as N⁻⁴, and the cascade needs hundreds
   of τ_A to reach the dissipation range: 64³ with --balanced-elsasser at
-  amplitude 0.10 levels off near 200 τ_A, 128³ at amplitude 0.40 near 300 τ_A
+  amplitude 0.10 levels off near 200 τ_A, 128³ at amplitude 0.40 near 200 τ_A
 - The default shell forcing includes the n_z = 0 plane. Those 2D modes cascade
   inversely to n⊥ = 1, and E(t) keeps rising there for hundreds of τ_A. Use
   --balanced-elsasser for a plateau
