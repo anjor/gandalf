@@ -2013,6 +2013,26 @@ class TestHermiteRHS:
             assert rhs.dtype == jnp.complex128
             assert _rel_diff(rhs, ref) < 1e-13, f"differs by {_rel_diff(rhs, ref):.2e}"
 
+    @pytest.mark.parametrize("M", [0, 3, 17])
+    @pytest.mark.parametrize("in_place", [False, True])
+    def test_adds_into_acc(self, M, in_place, monkeypatch):
+        """With acc and scale, g_rhs returns acc + scale·∂g/∂t, also in place, where each
+        group of moments is added into acc as it is made (Issue #186). M = 17 has two
+        groups of eight and a remainder."""
+        if in_place:
+            monkeypatch.setattr(hermite, "HERMITE_IN_PLACE_ENTRIES", 0)
+        jax.clear_caches()  # the rule is read at trace time
+        with enable_x64():
+            grid = SpectralGrid3D.create(Nx=12, Ny=10, Nz=8)
+            g, z_plus, z_minus = _random_hermite_inputs(grid, M, seed=M + 1)
+            acc = _random_hermite_inputs(grid, M, seed=M + 2)[0]
+            args = (g, z_plus, z_minus, grid.kx, grid.ky, grid.kz, grid.dealias_mask,
+                    0.7, math.sqrt(5.0), grid.Nz, grid.Ny, grid.Nx)
+            total = g_rhs(*args, acc=acc, scale=-0.3)
+            expected = acc - 0.3 * g_rhs(*args)
+            assert total.dtype == jnp.complex128
+            assert _rel_diff(total, expected) < 1e-15, f"differs by {_rel_diff(total, expected):.2e}"
+
     def test_float32_matches_reference(self):
         """complex64 input stays complex64 and agrees with the reference to float32 round-off."""
         grid = SpectralGrid3D.create(Nx=16, Ny=16, Nz=8)
