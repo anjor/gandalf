@@ -967,9 +967,9 @@ def g_rhs(
     one forward FFT. That is 3 FFTs per moment plus 4 for the gradients of Φ
     and Ψ, and each transform covers all moments in one batched FFT call.
 
-    Memory (Issue #186): when g has more than hermite.HERMITE_IN_PLACE_ENTRIES
-    entries, the moments go one at a time instead, in groups of eight that are
-    read and written together, into the output in place. The gradients of
+    Memory (Issue #186): when hermite.advance_in_place(g), the moments go one
+    at a time instead, in groups of eight that are read and written together,
+    into the output in place. The gradients of
     gₘ₋₁ and gₘ are carried to the next moment, so the cost stays 3 FFTs per
     moment, and the temporaries are two groups of moments and about ten
     real-space fields rather than several copies of g.

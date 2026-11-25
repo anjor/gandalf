@@ -524,8 +524,8 @@ def _gandalf_step_lawson_rk4_jit(
     same scheme: the two forms agree to round-off.
 
     Memory (Issue #186): small g goes through all at once, and the step then
-    holds about six g-sized temporaries. When g has more than
-    hermite.HERMITE_IN_PLACE_ENTRIES entries, or hermite_chunk is smaller
+    holds about six g-sized temporaries. When hermite.advance_in_place(g)
+    (the all-at-once step does not fit the device), or hermite_chunk is smaller
     than M+1, the step runs in place instead: the projections go one k_z
     plane at a time, and because the slices are independent, each group of
     hermite_chunk slices (default one) runs all four stages and is written
@@ -588,8 +588,8 @@ def _gandalf_step_lawson_rk4_jit(
         closure: Hermite closure (static). It enters only through the
             eigensystem of T passed in, which gandalf_step builds for it.
         hermite_chunk: Slices advanced together in place (static). None
-            (default): one slice at a time when g has more than
-            hermite.HERMITE_IN_PLACE_ENTRIES entries, all at once otherwise.
+            (default): one slice at a time when hermite.advance_in_place(g),
+            all at once otherwise.
             With a mesh, both apply to each device's share of g and slices.
             Results do not depend on it beyond round-off.
         mesh: One-axis jax.sharding.Mesh to shard the slices over (static;
@@ -1084,8 +1084,7 @@ def _gandalf_step_imex222_jit(
         interaction. For eta*dt*|k_perp|^(2r) << 1 (the typical turbulence
         regime), the extra splitting error is negligible.
 
-    Memory (Issue #186): for g above hermite.HERMITE_IN_PLACE_ENTRIES
-    entries, g_rhs goes through the moments in groups of eight and
+    Memory (Issue #186): when hermite.advance_in_place(g), g_rhs goes through the moments in groups of eight and
     imex_solve one k_z plane at a time, each in place, and the stage-B
     right-hand side absorbs N_1 before N_2 is computed. The step then holds
     about four and a half copies of g instead of seven.
@@ -1851,9 +1850,9 @@ def gandalf_step(
         hermite_chunk: Number of Hermite slices that scheme="lawson_rk4"
             advances at once, in place (Issue #186). The step's temporaries
             then scale with it, not with M. The default (None) advances one
-            slice at a time when g has more than
-            hermite.HERMITE_IN_PLACE_ENTRIES (2^26) entries and all of them
-            at once otherwise. Results do not depend on it beyond round-off.
+            slice at a time when hermite.advance_in_place(g), that is when
+            the all-at-once step does not fit the device's memory, and all
+            of them at once otherwise. Results do not depend on it beyond round-off.
             For "lawson_rk4_multirate" the default is one slice at a time.
         mesh: One-axis jax.sharding.Mesh over which scheme="lawson_rk4"
             shards its Hermite slices (Issue #191), e.g.

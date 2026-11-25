@@ -20,7 +20,7 @@ loop = DeviceLoop(state, config, key=key)
 - The mesh needs `scheme="lawson_rk4"`, one axis, M ≥ 1 and Nz divisible by the number of devices. Otherwise `gandalf_step` and `DeviceLoop` raise `ValueError`.
 - The state comes back with g split along k_z (Nz/D planes on each of D devices) and z± whole on every device. Diagnostics, checkpoints and accounting hooks use it as any `jax.Array`: XLA adds the reductions over the split axis, and `np.asarray` gathers it.
 - Results match one device to round-off. Without a mesh the step traces exactly as before.
-- `hermite_chunk` and the in-place threshold (`hermite.HERMITE_IN_PLACE_ENTRIES`) apply to each device's share of g.
+- `hermite_chunk` and the in-place rule (`hermite.advance_in_place`) apply to each device's share of g.
 
 ## Design
 
@@ -55,7 +55,7 @@ Between steps each device holds its share of g. The table below gives the memory
 | 256 | 1 / 2 / 4 / 8 | 1.17 / 1.26 / 0.67 / 0.34 GB (2.1 / 4.5 / 4.9 / 4.9) | 4.45 / 2.52 / 1.28 / 0.66 GB (8.0 / 9.1 / 9.2 / 9.4) |
 | 768 | 1 / 2 / 4 / 8 | 3.41 / 3.77 / 2.00 / 1.04 GB (2.1 / 4.5 / 4.8 / 5.0) | 13.29 / 7.50 / 3.77 / 1.91 GB (8.0 / 9.0 / 9.1 / 9.2) |
 
-One device in place holds about two copies of g, the input and the output. On a mesh the in-place path holds 4.5 to 5 shares per device. The exchanges add about 2.5 shares: the copy padded to D·n_own slices, the all-to-all's input chunks and its output. In place, sharding therefore saves memory only from D = 4 on. All at once, each device holds about 9 shares, against 8 on one device. The in-place threshold is 2^26 entries per device. At 64³, M = 768, one GPU (1.55 × 2^26 entries) therefore runs in place, while two or more GPUs (0.77 × 2^26 each at D = 2) run all at once and use more memory per device than one GPU did. Memory does not limit these runs on a B200 with 180 GB. Sharding for memory matters at 256³ and above. Exchanging the slices in groups could bound the extra shares, if that becomes the limit.
+One device in place holds about two copies of g, the input and the output. On a mesh the in-place path holds 4.5 to 5 shares per device. The exchanges add about 2.5 shares: the copy padded to D·n_own slices, the all-to-all's input chunks and its output. In place, sharding therefore saves memory only from D = 4 on. All at once, each device holds about 9 shares, against 8 on one device. A GPU runs its share in place only when 12 shares exceed its memory, since in place is about 4 times slower on a GPU (`hermite.advance_in_place`). At 64³, M = 768 every device count on a B200 with 180 GB therefore runs all at once. Sharding for memory matters at 256³ and above. Exchanging the slices in groups could bound the extra shares, if that becomes the limit.
 
 ## Expected GPU scaling (estimate, not measured)
 

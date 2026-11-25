@@ -651,17 +651,39 @@ def check_hermite_convergence(
 
 HERMITE_CLOSURES: tuple[str, ...] = ("zero", "symmetric")
 
-# Hermite arrays g with more entries than this are advanced in place (Issue
-# #186): the lawson_rk4 slice step, physics.g_rhs and imex_solve then work on
-# one slice, moment or k_z plane at a time, so their temporaries do not grow
-# with M. Smaller g (2^26 entries is 1 GiB in complex128) goes through all at
-# once, which is faster on small grids.
-HERMITE_IN_PLACE_ENTRIES = 2**26
+# Advancing g in place (Issue #186) makes the lawson_rk4 slice step,
+# physics.g_rhs and imex_solve work on one slice, moment or k_z plane at a time,
+# so their temporaries do not grow with M. On a GPU it costs time: imex_rk222 at
+# 128³, M = 128 takes 1.02 s per step in place on an A100 against 0.25 s all at
+# once. So g goes in place only when the all-at-once step does not fit:
+#
+# - None (default): on a device that reports its memory (GPU, TPU), in place
+#   when ALL_AT_ONCE_G_BUFFERS g-sized buffers exceed its limit. On the CPU, in
+#   place above CPU_IN_PLACE_ENTRIES entries, where it is as fast or faster.
+# - An int: in place above that many entries, on any device. Tests and
+#   benchmarks force a path with 0 or 2**62.
+HERMITE_IN_PLACE_ENTRIES: Optional[int] = None
+
+# The all-at-once imex_rk222 step peaks at 10.3 g-sized buffers on an A100
+# (22.7 GiB at 128³, M = 128, complex128). 12 leaves room for cuFFT workspace.
+ALL_AT_ONCE_G_BUFFERS = 12
+CPU_IN_PLACE_ENTRIES = 2**26  # 1 GiB in complex128
 
 
-def advance_in_place(g: Array) -> bool:
-    """Whether g is large enough to be advanced in place (HERMITE_IN_PLACE_ENTRIES)."""
-    return g.size > HERMITE_IN_PLACE_ENTRIES
+def advance_in_place(g: Any) -> bool:
+    """Whether g (an array, tracer or jax.ShapeDtypeStruct) is advanced in place.
+
+    Decided at trace time on the default device; see HERMITE_IN_PLACE_ENTRIES.
+    On a mesh, g is one device's share.
+    """
+    size = int(np.prod(g.shape))
+    if HERMITE_IN_PLACE_ENTRIES is not None:
+        return size > HERMITE_IN_PLACE_ENTRIES
+    device = jax.local_devices()[0]
+    stats = None if device.platform == "cpu" else device.memory_stats()
+    if not stats or "bytes_limit" not in stats:
+        return size > CPU_IN_PLACE_ENTRIES
+    return ALL_AT_ONCE_G_BUFFERS * size * jnp.dtype(g.dtype).itemsize > stats["bytes_limit"]
 
 
 def validate_closure(closure: str, M: int) -> None:
@@ -1026,8 +1048,7 @@ def imex_solve(factor: ImexFactor, rhs: Array) -> Array:
     on the moment-major transpose, so each step reads one contiguous
     (Nz, Ny, Nx//2+1) slab, and update that one buffer in place: the solve
     needs one g-sized temporary beyond rhs. Cost is O(M) per Fourier point.
-    When rhs has more than HERMITE_IN_PLACE_ENTRIES entries (Issue #186), the
-    solve runs one k_z plane at a time and overwrites rhs in place, so the
+    When advance_in_place(rhs) (Issue #186), the solve runs one k_z plane at a time and overwrites rhs in place, so the
     temporary is one plane instead.
 
     Returns:
