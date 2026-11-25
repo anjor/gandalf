@@ -87,8 +87,9 @@ def _python_loop(state, params, n_steps, dt=None, key=None, cfl_safety=0.3):
     """The reference: force, step, and (dt=None) re-evaluate the CFL dt each step."""
     dts = []
     for _ in range(n_steps):
+        mode = "multirate" if params.scheme == "lawson_rk4_multirate" else "courant"
         step_dt = dt if dt is not None else compute_cfl_timestep(
-            state, params.v_A, cfl_safety, params.closure
+            state, params.v_A, cfl_safety, params.closure, mode=mode
         )
         dts.append(step_dt)
         if key is not None:
@@ -106,7 +107,9 @@ def _record_dt(n_steps: int) -> Accounting:
     return Accounting(init=(jnp.zeros(n_steps), jnp.zeros((), jnp.int32)), update=update)
 
 
-@pytest.mark.parametrize("scheme", ["lawson_rk4", "imex_rk222", "imex_ars343"])
+@pytest.mark.parametrize(
+    "scheme", ["lawson_rk4", "imex_rk222", "imex_ars343", "lawson_rk4_multirate"]
+)
 def test_fixed_dt_matches_gandalf_step(scheme):
     params = PARAMS._replace(scheme=scheme)
     ref, _, _ = _python_loop(_state(), params, 5, dt=1e-3)
@@ -137,7 +140,9 @@ def test_forcing_and_adaptive_dt_match_python_loop():
 
 
 @pytest.mark.parametrize("forced", [False, True])
-@pytest.mark.parametrize("scheme", ["lawson_rk4", "imex_rk222", "imex_ars343"])
+@pytest.mark.parametrize(
+    "scheme", ["lawson_rk4", "imex_rk222", "imex_ars343", "lawson_rk4_multirate"]
+)
 def test_adaptive_dt_matches_python_loop_float64(scheme, forced):
     """In float64 (the P1 runs' precision) the steps and the CFL dt agree to float64 round-off.
 
@@ -177,7 +182,9 @@ def test_mixed_precision_state_runs_in_the_promoted_dtype():
         assert loop.state.g.dtype == ref.g.dtype == jnp.complex128
 
 
-@pytest.mark.parametrize("scheme", ["lawson_rk4", "imex_rk222", "imex_ars343"])
+@pytest.mark.parametrize(
+    "scheme", ["lawson_rk4", "imex_rk222", "imex_ars343", "lawson_rk4_multirate"]
+)
 def test_complex64_state_with_float64_accounting(scheme):
     """Under float64 a complex64 state steps in float32 and the hook sums in float64 (Issue #191)."""
     with enable_x64():

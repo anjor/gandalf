@@ -61,6 +61,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from krmhd.forcing import WhiteNoiseBand, _add_to_moments
 from krmhd.hermite import compute_streaming_eigensystem
+from krmhd.multirate import _gandalf_step_lawson_rk4_multirate_jit
 from krmhd.physics import KRMHDState
 from krmhd.spectral import SpectralGrid3D
 from krmhd.timestepping import (
@@ -82,6 +83,10 @@ class StepParams(NamedTuple):
 
     nu=None uses the state's nu, as in gandalf_step. mesh shards the
     lawson_rk4 slices over its devices, as in gandalf_step (Issue #191).
+    substep_cfl applies to scheme="lawson_rk4_multirate" only: a float, or a
+    tuple of one Courant number per slice (multirate.exact_substep_cfl). The
+    loop passes it to the kernel as data, so a new value does not recompile
+    the loop.
     """
 
     eta: float
@@ -94,6 +99,7 @@ class StepParams(NamedTuple):
     hyper_rz: int = 1
     closure: HermiteClosure = "zero"
     mesh: Optional[Mesh] = None
+    substep_cfl: Union[float, Tuple[float, ...]] = 0.3
 
 
 @dataclass(frozen=True)
@@ -128,7 +134,11 @@ class AdaptiveDtPolicy(Protocol):
 
 @dataclass(frozen=True)
 class CflDt:
-    """dt = compute_cfl_timestep(state, v_A, cfl_safety, closure), on the device."""
+    """dt = compute_cfl_timestep(state, v_A, cfl_safety, closure), on the device.
+
+    For scheme="lawson_rk4_multirate" it is mode="multirate": the Elsasser and
+    v_A terms only, since the step substeps each slice to its own limit.
+    """
 
     cfl_safety: float = 0.3
     every: int = 1
@@ -148,7 +158,8 @@ class CflDt:
         step: StepParams,
     ) -> Array:
         return cfl_timestep_estimate(
-            z_plus, z_minus, grid, M, beta_i, Lambda, step.v_A, self.cfl_safety, step.closure
+            z_plus, z_minus, grid, M, beta_i, Lambda, step.v_A, self.cfl_safety, step.closure,
+            hermite=step.scheme != "lawson_rk4_multirate",
         )
 
 
@@ -247,14 +258,20 @@ def _cast_floats(tree: Any, dtype: Any) -> Any:
 def _scheme_constants(state: KRMHDState, step: StepParams) -> Tuple[Array, ...]:
     """Per-run constants of the scheme's step kernel.
 
-    lawson_rk4: the eigensystem of the streaming matrix. IMEX: none; the
-    kernels factor the tridiagonal (I - γ dt L) themselves, so dt may be traced.
+    lawson_rk4: the eigensystem of the streaming matrix. lawson_rk4_multirate:
+    also substep_cfl·Δ, the substep Courant limit. IMEX: none; the kernels
+    factor the tridiagonal (I - γ dt L) themselves, so dt may be traced.
     """
-    if step.scheme == "lawson_rk4":
+    if step.scheme in ("lawson_rk4", "lawson_rk4_multirate"):
         _, eigenvalues, P, P_inv = compute_streaming_eigensystem(
             state.M, state.Lambda, step.closure
         )
-        return eigenvalues, P.T, P_inv.T
+        if step.scheme == "lawson_rk4":
+            return eigenvalues, P.T, P_inv.T
+        grid = state.grid
+        spacing = min(grid.Lx / grid.Nx, grid.Ly / grid.Ny, grid.Lz / grid.Nz)
+        courant = jnp.asarray(step.substep_cfl, dtype=float) * spacing
+        return eigenvalues, P.T, P_inv.T, courant
     return ()
 
 
@@ -277,6 +294,14 @@ def _scheme_step(
             *args, eta_z=p.eta_z, hyper_rz=p.hyper_rz,
             streaming_eigenvalues=eigenvalues, streaming_P_T=P_T,
             streaming_P_inv_T=P_inv_T, closure=p.closure, mesh=p.mesh,
+        )
+    if p.scheme == "lawson_rk4_multirate":
+        eigenvalues, P_T, P_inv_T, substep_courant = consts
+        return _gandalf_step_lawson_rk4_multirate_jit(
+            *args, eta_z=p.eta_z, hyper_rz=p.hyper_rz,
+            streaming_eigenvalues=eigenvalues, streaming_P_T=P_T,
+            streaming_P_inv_T=P_inv_T, closure=p.closure,
+            substep_courant=substep_courant,
         )
     kernel = _gandalf_step_imex343_jit if p.scheme == "imex_ars343" else _gandalf_step_imex222_jit
     return kernel(*args, eta_z=p.eta_z, hyper_rz=p.hyper_rz, closure=p.closure)
@@ -426,7 +451,8 @@ class DeviceLoop:
                     raise ValueError(f"forced moment {m!r} must be an int in 0..M={state.M}")
 
         self._plan = _Plan(
-            step=step,
+            # substep_cfl reaches the kernel as data (_scheme_constants)
+            step=step._replace(substep_cfl=0.0),
             dt=config.dt,
             forcing=forcing,
             update=None if config.accounting is None else config.accounting.update,
@@ -456,7 +482,7 @@ class DeviceLoop:
             )
         _validate_step_args(
             state, float(dt0), step.eta, nu, step.hyper_r, step.hyper_n, step.scheme,
-            step.eta_z, step.hyper_rz, step.closure,
+            step.eta_z, step.hyper_rz, step.closure, step.substep_cfl,
         )
         validate_mesh(step.mesh, step.scheme, state.M, state.grid.Nz)
         self._consts = _cast_floats(_scheme_constants(state, step), real)

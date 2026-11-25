@@ -110,6 +110,10 @@ RMHD is an asymptotic expansion in the small parameter ε:
     (`gandalf_step(mesh=...)`, `StepParams(mesh=...)`; Issue #191). g is split along k_z,
     z± are replicated, and each step makes two all-to-alls of g's size. This cuts wall
     time, not cost. See docs/multi_gpu_slices.md.
+  - Multirate: `scheme="lawson_rk4_multirate"` (krmhd/multirate.py; Issue #191) steps z± at
+    their own Courant limit (`compute_cfl_timestep(mode="multirate")`) and each slice with
+    its own number of Lawson-RK4 substeps, Φ and Ψ interpolated in time. About 2× cheaper
+    at M = 64; needs hyper-resistivity. See docs/multirate_slices_study.md.
 - **Poisson solver**: k²φ = ∇²⊥A∥ in Fourier space
 - **Field line following**: Requires full 3D for interpolation across z-planes
 
@@ -121,6 +125,7 @@ krmhd/
 ├── spectral.py      # ✅ COMPLETE: FFT operations, derivatives, dealiasing (2D/3D)
 ├── physics.py       # ✅ COMPLETE: Poisson bracket, Elsasser RHS, Hermite moment RHS
 ├── timestepping.py  # ✅ COMPLETE: gandalf_step (IF+RK2 for z±; IMEX-RK222 or Lawson-RK4 for g; or IMEX-ARS343 for both), CFL
+├── multirate.py     # ✅ COMPLETE: Multirate Lawson-RK4, a step per phase-velocity slice (Issue #191)
 ├── runloop.py       # ✅ COMPLETE: DeviceLoop: many steps per jitted call, with forcing, accounting hook and dt on the device (Issue #188)
 ├── hermite.py       # ✅ COMPLETE: Hermite basis for kinetic physics
 ├── diagnostics.py   # ✅ COMPLETE: Energy spectra (1D, k⊥, k∥), history, visualization
