@@ -179,7 +179,9 @@ def main() -> None:
     p.add_argument("runs", nargs="+")
     p.add_argument("--fig-dir", default=".")
     p.add_argument("--window", type=float, default=100.0)
+    p.add_argument("--markdown", action="store_true", help="also print one table row per run")
     a = p.parse_args()
+    rows = []
     for r in a.runs:
         run = Path(r)
         ts, spec, cfg = load(run)
@@ -189,6 +191,18 @@ def main() -> None:
         for k, v in out.items():
             print(f"   {k:18s} {v:.4g}" if isinstance(v, float) else f"   {k:18s} {v}")
         figure(run.name, ts, spec, cfg, Eavg, Path(a.fig_dir) / f"{run.name}.png")
+        rows.append(
+            f"| {cfg['resolution']}³ | {cfg['forcing']} | {cfg['amplitude']} | {out['t_last']:.0f} "
+            f"| {out['E_ratio']:.2f} | {out['zmax_ratio']:.2f} | {out['U_max']:.3f} "
+            f"| {out['falloff_max_ratio']:.2f} | {out['E_edge_over_peak']:.1e} "
+            f"| {out['f_edge_efold']:+.0f} | {out['diss_over_inj']:.2f} | {out['num_over_inj']:.1e} "
+            f"| {'pass' if out['stable'] else 'fail: ' + ', '.join(k for k in ('reached', 'plateau', 'zmax_ok', 'falloff', 'edge_ok') if not out[k])} |"
+        )
+    if a.markdown:
+        print("| N | forcing | amplitude | t_end [τ_A] | E ratio | max z± ratio | max ∇⊥z± "
+              "| largest E(n+1)/E(n) | E(n_edge)/peak | edge e-fold [τ_A] | diss/inj | stepper error/inj | criteria |")
+        print("|" + "---|" * 13)
+        print("\n".join(rows))
 
 
 if __name__ == "__main__":
