@@ -807,6 +807,14 @@ def free_energy_weights(M: int, Lambda: float, closure: str = "zero") -> np.ndar
     return weights
 
 
+# Largest cond(P) of T's eigenvector matrix that compute_streaming_eigensystem
+# accepts (Issue #192). A Lawson step built on P loses about cond(P)·eps: measured
+# 6.5e-8·cond(P) in float32 and 1.3e-16·cond(P) in float64 against scipy expm, so
+# 1e3 caps the float32 loss near 1e-4. For M <= 256, cond(P) <= 15 at Lambda >= 1.01,
+# Lambda < 0, and Lambda = 1 with even M; it is 4e14 or more at Lambda = 1 with odd M.
+_MAX_EIGENVECTOR_COND = 1e3
+
+
 def compute_streaming_eigensystem(
     M: int, Lambda: float = 1.0, closure: str = "zero"
 ) -> tuple[Array, Array, Array, Array]:
@@ -833,6 +841,11 @@ def compute_streaming_eigensystem(
         eigenvalues: (M+1,) array of eigenvalues
         P: (M+1, M+1) matrix of right eigenvectors
         P_inv: (M+1, M+1) inverse of P
+
+    Raises:
+        ValueError: If T has complex eigenvalues (Lambda < 1), or if cond(P)
+            exceeds 1e3, as at Lambda = 1 with odd M, where T is defective
+            (Issue #192). Both Lawson schemes then refuse to step.
     """
     return _streaming_eigensystem(M, Lambda, closure, jnp.result_type(float))
 
@@ -850,7 +863,6 @@ def _streaming_eigensystem(
         P_inv = P.T  # Orthogonal for symmetric T
     else:
         eigenvalues, P = np.linalg.eig(T)
-        P_inv = np.linalg.inv(P)
         if np.any(np.abs(np.imag(eigenvalues)) > 1e-6):
             raise ValueError(
                 f"Streaming matrix has complex eigenvalues for Lambda={Lambda}. "
@@ -858,6 +870,18 @@ def _streaming_eigensystem(
                 f"RMHD ordering requires Lambda >= 1. Max |Im(eigenvalue)| = "
                 f"{np.max(np.abs(np.imag(eigenvalues))):.2e}"
             )
+        cond = np.linalg.cond(P)
+        if cond > _MAX_EIGENVECTOR_COND:
+            raise ValueError(
+                f"The eigenvector matrix P of the streaming matrix T is ill-conditioned "
+                f"at Lambda={Lambda}, M={M}: cond(P) = {cond:.1e} > "
+                f"{_MAX_EIGENVECTOR_COND:.0e}. At Lambda = 1 with odd M, T is defective: "
+                f"0 is a double eigenvalue with one eigenvector (Issue #192). The Lawson "
+                f"schemes ('lawson_rk4', 'lawson_rk4_multirate') step in the eigenbasis "
+                f"of T, so their step would be wrong. Use scheme='imex_rk222' or "
+                f"'imex_ars343', or Lambda != 1."
+            )
+        P_inv = np.linalg.inv(P)
 
     return jnp.array(T), jnp.array(eigenvalues), jnp.array(P), jnp.array(P_inv)
 

@@ -1893,7 +1893,8 @@ class TestIMEX222:
         first few short steps where an O(v_A*kz*dt^2) discrepancy would be
         below tolerance.
         """
-        state0 = self._make_random_state(M=3, nu=0.0, z_amp=0.02, g_amp=0.01)
+        # Even M: lawson_rk4 refuses Λ = 1 with odd M (Issue #192). z± do not see g.
+        state0 = self._make_random_state(M=4, nu=0.0, z_amp=0.02, g_amp=0.01)
         v_A = 2.0
         dt = 0.005
         n_steps = 200  # T = 1.0, ~ one parallel Alfven crossing

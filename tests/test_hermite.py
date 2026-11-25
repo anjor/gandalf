@@ -726,6 +726,11 @@ class TestStreamingMatrix:
 
         for M in [2, 5, 10, 20]:
             for Lambda in [1.0, 2.0, 1e10]:
+                if Lambda == 1.0 and M % 2:
+                    # T is defective: no P exists (Issue #192)
+                    with pytest.raises(ValueError, match="defective"):
+                        compute_streaming_eigensystem(M, Lambda)
+                    continue
                 T = np.array(compute_streaming_matrix(M, Lambda))
                 _, eigenvalues, P, P_inv = compute_streaming_eigensystem(M, Lambda)
                 eigenvalues = np.array(eigenvalues)
@@ -750,12 +755,15 @@ class TestStreamingMatrix:
         For Lambda=1 (default), T[1,0]=0 making T block-diagonal with real eigenvalues.
         For Lambda>1, the asymmetry is mild enough that eigenvalues remain real.
         For Lambda<1, complex eigenvalues can appear (known limitation).
+        Lambda=1 with odd M is defective and raises (Issue #192).
         """
         import numpy as np
         from krmhd.hermite import compute_streaming_eigensystem
 
         for Lambda in [1.0, 2.0, 5.0, 10.0]:
             for M in [2, 5, 10, 20]:
+                if Lambda == 1.0 and M % 2:
+                    continue
                 _, eigenvalues, _, _ = compute_streaming_eigensystem(M, Lambda)
                 assert np.allclose(np.imag(eigenvalues), 0.0, atol=1e-8), \
                     f"Complex eigenvalues for M={M}, Lambda={Lambda}: {eigenvalues}"
