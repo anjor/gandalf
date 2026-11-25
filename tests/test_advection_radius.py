@@ -18,6 +18,7 @@ import pytest
 from jax.experimental import enable_x64
 from scipy.sparse.linalg import LinearOperator, eigsh
 
+from krmhd.diagnostics import hermite_free_energy
 from krmhd.physics import KRMHDState, poisson_bracket_3d
 from krmhd.spectral import SpectralGrid3D
 from krmhd.timestepping import (
@@ -280,6 +281,39 @@ class TestSharpStabilityLimit:
             ratios[factor] = self._slice_norm(state) / n0
         assert ratios[0.95] <= 1.0 + 1e-4
         assert ratios[1.05] > 1e3
+
+    @pytest.mark.parametrize(
+        "y, eta_nu, n_steps, grows",
+        [(0.5, 0.0, 300, True), (0.5, 0.5, 200, False), (0.95, 0.5, 300, True),
+         (0.95, 1.0, 200, False)],
+        ids=["ideal_y0.5", "nu_eta_0.5_y0.5", "nu_eta_0.5_y0.95", "nu_eta_1_y0.95"],
+    )
+    def test_imex_ars343_with_streaming_needs_dissipation(self, y, eta_nu, n_steps, grows):
+        """Issue #200: with g on every kz plane, imex_ars343 relies on dissipation.
+
+        dt = y·2√2/ρ. Without dissipation g grows at y = 0.5, where lawson_rk4
+        is bounded. ν = η = 0.5 (r = n = 2) bound it at y = 0.5 but not at
+        0.95, and ν = η = 1 bound it at 0.95. Dissipation first removes the
+        strongly damped modes, so the test compares W at the end of the run
+        with W halfway. docs/numerical_methods.md has the amplification per
+        step.
+        """
+        state = self._frozen_shear_state(g_on_kz0_plane=False)
+        speeds = _slice_speeds(state.M, state.Lambda, "zero", state.beta_i)
+        rho = float(jnp.max(_radius(state.grid, state.z_plus, state.z_minus, speeds, tol=1e-6).rho))
+        dt = y * RK4_IMAGINARY_AXIS_LIMIT / rho
+        for step in range(n_steps):
+            if step == n_steps // 2:
+                w_half = hermite_free_energy(state)
+            state = gandalf_step(
+                state, dt, eta=eta_nu, v_A=1.0, nu=eta_nu, hyper_r=2, hyper_n=2,
+                scheme="imex_ars343",
+            )
+        late_growth = hermite_free_energy(state) / w_half
+        if grows:
+            assert late_growth > 4.0
+        else:
+            assert late_growth < 1.0
 
 
 class TestCFLExactMode:

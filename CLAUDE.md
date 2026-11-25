@@ -95,8 +95,8 @@ RMHD is an asymptotic expansion in the small parameter ε:
 - **Time stepping**:
   - Elsasser z±: integrating factor (exact linear propagation) + Lawson midpoint RK2
   - Hermite g: `scheme="imex_rk222"` (default; ARS(2,2,2), streaming + hyper-collisions
-    implicit, advection explicit), `"imex_ars343"` (ARS(3,4,3); explicit part stable for
-    advection, z± advanced with the same explicit stages; Issue #166) or `"lawson_rk4"`
+    implicit, advection explicit), `"imex_ars343"` (ARS(3,4,3); z± advanced with the same
+    explicit stages; Issue #166) or `"lawson_rk4"`
     (integrating factor + RK4, run in the eigenbasis of the streaming matrix, where
     streaming and advection are both diagonal; Issue #184)
   - `lawson_rk4` and `lawson_rk4_multirate` need real, well-conditioned eigenvectors of T.
@@ -104,6 +104,10 @@ RMHD is an asymptotic expansion in the small parameter ε:
     Issue #192). Use an IMEX scheme or Λ ≠ 1 there.
   - The explicit stage of `imex_rk222` amplifies advected modes at every dt. It relies on
     hyper-collisions and hyper-resistivity, so dt_cfl alone does not guarantee stability.
+  - `imex_ars343` advects z± and g on k_z = 0 stably for dt·ρ ≤ 2√2 without dissipation. Once
+    g streams, it also amplifies advected modes at every dt (Issue #200) and relies on
+    hyper-collisions and hyper-resistivity, 3 to 17 times less than `imex_rk222` in the worst
+    case. docs/numerical_methods.md gives the damping it needs.
   - Memory: when `hermite.advance_in_place(g)` holds, g is advanced in place: `lawson_rk4`
     one slice at a time (`hermite_chunk`), `g_rhs` in groups of eight moments and `imex_solve`
     one k_z plane at a time (Issue #186). On a GPU that is when 14 g-sized buffers exceed the
