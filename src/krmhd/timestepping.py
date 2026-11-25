@@ -1792,8 +1792,10 @@ def gandalf_step(
               takes ceil(dt·v_j / (substep_cfl·Δ)) Lawson-RK4 substeps, with
               Φ and Ψ interpolated in time. Take dt from
               compute_cfl_timestep(mode="multirate"). With one substep per
-              slice it is lawson_rk4. docs/multirate_slices_study.md has its
-              stability, order and cost.
+              slice it is lawson_rk4. z± then run at their own Courant limit
+              with midpoint RK2, which needs hyper-resistivity, as in
+              imex_rk222. docs/multirate_slices_study.md has its stability,
+              order and cost.
 
             NOTE: scheme is a per-call argument and is NOT stored on
             KRMHDState. Callers looping over time must pass it explicitly
