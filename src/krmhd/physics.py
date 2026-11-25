@@ -943,6 +943,8 @@ def g_rhs(
     Ny: int,
     Nx: int,
     closure: str = "zero",
+    acc: Array | None = None,
+    scale: float = 1.0,
 ) -> Array:
     """
     Right-hand side of the Hermite hierarchy for all moments (thesis Eqs. 2.7-2.10).
@@ -972,7 +974,9 @@ def g_rhs(
     into the output in place. The gradients of
     gₘ₋₁ and gₘ are carried to the next moment, so the cost stays 3 FFTs per
     moment, and the temporaries are two groups of moments and about ten
-    real-space fields rather than several copies of g.
+    real-space fields rather than several copies of g. Given `acc`, each group
+    is added into it, so a caller that needs only acc + scale·∂g/∂t never holds
+    ∂g/∂t whole.
 
     Args:
         g: Hermite moments in Fourier space [Nz, Ny, Nx//2+1, M+1]
@@ -983,10 +987,12 @@ def g_rhs(
         Lambda: Kinetic parameter Λ in T[1,0] = (1 - 1/Λ)/√2
         Nz, Ny, Nx: Grid dimensions (static)
         closure: "zero" (default) or "symmetric" (static; requires M ≥ 2)
+        acc: Optional array of g's shape to add the result into
+        scale: Factor on ∂g/∂t when `acc` is given
 
     Returns:
         ∂g/∂t [Nz, Ny, Nx//2+1, M+1], projected onto the 2/3 band, with the
-        k = 0 mode of every moment set to zero.
+        k = 0 mode of every moment set to zero; acc + scale·∂g/∂t if `acc` is given.
 
     Reference:
         Thesis §2.2, Eqs. 2.7-2.10
@@ -1062,12 +1068,19 @@ def g_rhs(
 
             buf = jnp.zeros((size,) + g.shape[:-1], rhs.dtype)
             buf, grads = jax.lax.fori_loop(0, size, fill, (buf, grads))
-            rhs = jax.lax.dynamic_update_slice_in_dim(rhs, jnp.moveaxis(buf, 0, -1), j0, axis=-1)
+            part = jnp.moveaxis(buf, 0, -1)
+            if acc is not None:
+                part = jax.lax.dynamic_slice_in_dim(rhs, j0, size, axis=-1) + scale * part
+            rhs = jax.lax.dynamic_update_slice_in_dim(rhs, part, j0, axis=-1)
             return rhs, grads
 
         zero = jnp.zeros_like(dphi_dx)  # gradient of g₋₁
         dtype = jnp.result_type(g, z_plus, z_minus, kx, ky, kz)  # as the batched path
-        carry = (jnp.zeros(g.shape, dtype), ((zero, zero), gradient(g[..., 0])))
+        if acc is None:
+            start = jnp.zeros(g.shape, dtype)
+        else:  # the dtype of acc + scale·∂g/∂t, as below
+            start = acc.astype(jnp.result_type(acc, scale, dtype))
+        carry = (start, ((zero, zero), gradient(g[..., 0])))
         size = min(8, M + 1)
         n_full, rem = divmod(M + 1, size)
         carry = jax.lax.fori_loop(0, n_full, lambda i, c: group(i * size, size, c), carry)
@@ -1090,7 +1103,8 @@ def g_rhs(
 
     rhs = -(jnp.fft.rfftn(brackets, axes=(-3, -2, -1)) + streaming) * dealias_mask
     rhs = rhs.at[:, 0, 0, 0].set(0.0)
-    return jnp.moveaxis(rhs, 0, -1)
+    rhs = jnp.moveaxis(rhs, 0, -1)
+    return rhs if acc is None else acc + scale * rhs
 
 
 # =============================================================================
