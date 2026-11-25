@@ -653,9 +653,10 @@ HERMITE_CLOSURES: tuple[str, ...] = ("zero", "symmetric")
 
 # Advancing g in place (Issue #186) makes the lawson_rk4 slice step,
 # physics.g_rhs and imex_solve work on one slice, moment or k_z plane at a time,
-# so their temporaries do not grow with M. On a GPU it costs time: imex_rk222 at
-# 128³, M = 128 takes 1.02 s per step in place on an A100 against 0.25 s all at
-# once. So g goes in place only when the all-at-once step does not fit:
+# so their temporaries do not grow with M. On a GPU it costs time: at 128³,
+# M = 128 on an A100, imex_rk222 takes 0.93 s per step in place against 0.25 s
+# all at once, and lawson_rk4 0.37 s against 0.32 s. So g goes in place only
+# when the all-at-once step does not fit:
 #
 # - None (default): on a device that reports its memory (GPU, TPU), in place
 #   when ALL_AT_ONCE_G_BUFFERS g-sized buffers exceed its limit. On the CPU, in
@@ -664,9 +665,11 @@ HERMITE_CLOSURES: tuple[str, ...] = ("zero", "symmetric")
 #   benchmarks force a path with 0 or 2**62.
 HERMITE_IN_PLACE_ENTRIES: Optional[int] = None
 
-# The all-at-once imex_rk222 step peaks at 10.3 g-sized buffers on an A100
-# (22.7 GiB at 128³, M = 128, complex128). 12 leaves room for cuFFT workspace.
-ALL_AT_ONCE_G_BUFFERS = 12
+# The all-at-once imex_rk222 and lawson_rk4 steps both peak at 11.1 g-sized
+# buffers on an A100 (22.7 GiB for a 2.05 GiB g at 128³, M = 128, complex128,
+# through gandalf_step). 14 leaves a fifth of the memory for cuFFT workspace
+# and fragmentation.
+ALL_AT_ONCE_G_BUFFERS = 14
 CPU_IN_PLACE_ENTRIES = 2**26  # 1 GiB in complex128
 
 

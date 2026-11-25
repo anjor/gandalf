@@ -105,7 +105,7 @@ RMHD is an asymptotic expansion in the small parameter ε:
     hyper-collisions and hyper-resistivity, so dt_cfl alone does not guarantee stability.
   - Memory: when `hermite.advance_in_place(g)` holds, g is advanced in place: `lawson_rk4`
     one slice at a time (`hermite_chunk`), `g_rhs` in groups of eight moments and `imex_solve`
-    one k_z plane at a time (Issue #186). On a GPU that is when 12 g-sized buffers exceed the
+    one k_z plane at a time (Issue #186). On a GPU that is when 14 g-sized buffers exceed the
     device's memory, since in place is about 4 times slower there; on the CPU, above 2^26
     entries. `hermite.HERMITE_IN_PLACE_ENTRIES = <int>` forces an entry threshold.
   - Multi-GPU: `lawson_rk4` shards its slices over a one-axis `jax.sharding.Mesh`

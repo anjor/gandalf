@@ -1001,7 +1001,7 @@ class TestAdvanceInPlace:
         large = jax.ShapeDtypeStruct((256, 256, 129, 65), jnp.complex128)
         assert not hermite.advance_in_place(small)
         assert hermite.advance_in_place(large)
-        # complex64 halves the bytes: 256³, M = 64 then fits too
+        # complex64 halves the bytes: 14 × 4.1 GiB fits 60 GiB
         assert not hermite.advance_in_place(jax.ShapeDtypeStruct(large.shape, jnp.complex64))
 
     def test_cpu_goes_in_place_above_2_to_the_26_entries(self, monkeypatch):
