@@ -339,6 +339,19 @@ def test_cfl_multirate_mode_leaves_out_the_hermite_term():
         )
 
 
+def test_cfl_multirate_mode_refuses_a_defective_streaming_matrix():
+    grid = SpectralGrid3D.create(Nx=8, Ny=8, Nz=8)
+    odd = _turbulent_state(grid, 5, amplitude=0.5, Lambda=1.0)
+    with pytest.raises(ValueError):
+        gandalf_step(odd, 1e-3, eta=0.0, v_A=1.0, scheme="lawson_rk4_multirate")
+    with pytest.raises(ValueError):
+        compute_cfl_timestep(odd, v_A=1.0, mode="multirate")
+    for mode in ("courant", "exact"):
+        assert compute_cfl_timestep(odd, v_A=1.0, mode=mode) > 0
+    even = _turbulent_state(grid, 4, amplitude=0.5, Lambda=1.0)
+    assert compute_cfl_timestep(even, v_A=1.0, mode="multirate") > 0
+
+
 def test_rejects_bad_arguments():
     grid = SpectralGrid3D.create(Nx=8, Ny=8, Nz=8)
     state = _turbulent_state(grid, 4, amplitude=0.5)
