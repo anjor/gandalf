@@ -76,15 +76,6 @@ RMHD is an asymptotic expansion in the small parameter ε:
 
 ## Technical Stack
 
-### Core Dependencies
-- **JAX**: Primary framework (runs on Apple Metal)
-- **jax.numpy**: Array operations
-- **jax.scipy.fft**: Spectral transforms
-- **Pydantic**: Data validation and settings management (v2.0+)
-- **h5py**: Data I/O
-- **matplotlib**: Diagnostics/visualization
-- **Optax**: For any optimization needs (optional)
-
 ### Numerical Methods
 - **Spatial dimensions**: 3D Fourier spectral (x, y, z) with z ∥ B₀
   - Perpendicular (x,y): Standard 2D FFT with 2/3 dealiasing
@@ -130,39 +121,11 @@ RMHD is an asymptotic expansion in the small parameter ε:
 
 ## Code Architecture
 
-### Module Structure
-```
-krmhd/
-├── spectral.py      # ✅ COMPLETE: FFT operations, derivatives, dealiasing (2D/3D)
-├── physics.py       # ✅ COMPLETE: Poisson bracket, Elsasser RHS, Hermite moment RHS
-├── timestepping.py  # ✅ COMPLETE: gandalf_step (IF+RK2 for z±; IMEX-RK222 or Lawson-RK4 for g; or IMEX-ARS343 for both), CFL
-├── multirate.py     # ✅ COMPLETE: Multirate Lawson-RK4, a step per phase-velocity slice (Issue #191)
-├── runloop.py       # ✅ COMPLETE: DeviceLoop: many steps per jitted call, with forcing, accounting hook and dt on the device (Issue #188)
-├── hermite.py       # ✅ COMPLETE: Hermite basis for kinetic physics
-├── diagnostics.py   # ✅ COMPLETE: Energy spectra (1D, k⊥, k∥), history, visualization
-├── forcing.py       # ✅ COMPLETE: Gaussian white noise forcing, energy injection diagnostics (Issue #29)
-├── io.py            # ✅ COMPLETE: HDF5 checkpointing and timeseries I/O (Issue #13)
-└── validation.py    # Linear physics tests (Issue #10)
-
-examples/
-├── forcing_minimal.py              # ✅ COMPLETE: Minimal forcing example (~50 lines, 2s runtime)
-├── driven_turbulence.py            # ✅ COMPLETE: Comprehensive driven turbulence with forcing (317 lines, 20s runtime)
-├── decaying_turbulence.py          # ✅ COMPLETE: Turbulent cascade with diagnostics (Issue #12)
-├── orszag_tang.py                  # ✅ COMPLETE: Orszag-Tang vortex benchmark (Issue #11)
-├── alfvenic_cascade_benchmark.py   # ✅ COMPLETE: Alfvénic cascade benchmark (Thesis Section 2.6.3)
-├── hyper_dissipation_demo.py       # ✅ COMPLETE: Hyper-dissipation r=1 vs r=2 comparison (Issue #28)
-└── plot_checkpoint_spectrum.py     # ✅ COMPLETE: Post-processing tool for checkpoint analysis
-```
-
 ### Design Principles
-1. **Functional style**: Pure functions, no side effects
-2. **JAX patterns**: Use vmap/scan instead of loops
-3. **JIT everything**: @jax.jit on all performance-critical functions
-4. **Explicit typing**: Full type hints for clarity
-5. **Physics transparency**: Variable names match physics notation
-6. **UV for package management**: Use uv for package management and/or running ad hoc
+1. **Physics transparency**: Variable names match physics notation
+2. **UV for package management**: Use uv for package management and/or running ad hoc
 scripts
-7. **Commit quick**: Commit logical changes quickly and often to ensure there are
+3. **Commit quick**: Commit logical changes quickly and often to ensure there are
 checkpoints to return to.
 
 ## Implementation Guidelines
@@ -209,23 +172,6 @@ This implementation uses **normalized hyper-dissipation** matching the original 
 - **IMPORTANT**: Overflow safety ≠ numerical stability. High-order (r≥4) may require
   additional parameter tuning or exhibit instabilities in forced turbulence (see Issue #82)
 
-**Detecting Numerical Instabilities:**
-When running turbulence simulations, watch for these warning signs:
-1. **Monitor max field amplitude**: Track `max(|z±|)` during evolution
-   - Healthy: Saturates to O(1-10) values in forced turbulence
-   - Warning: Exponential growth beyond O(100) indicates instability
-2. **Plot E(t) on log scale**: Detect exponential growth
-   - Healthy: Steady plateau or slow linear growth in forced runs
-   - Warning: Straight line on log-scale = exponential blow-up
-3. **Check for NaN/Inf**: Added in alfvenic_cascade_benchmark.py:350-360
-   - Terminates with diagnostic message if detected
-4. **Spectrum pile-up**: Look for energy accumulating at k_max
-   - Healthy: Sharp exponential cutoff from hyper-dissipation
-   - Warning: Flat spectrum extending to k_max = dealiasing failure
-
-
-See Diagnostics section for full details on compute_turbulence_diagnostics().
-
 **Implementation details:**
 - **Hyper-resistivity**: Applied via multiplicative factor exp(-η·(k⊥²/k⊥²_max)^r·dt) to z± in Fourier space
   - Normalization by k⊥²_max at 2/3 dealiasing boundary (matches damping_kernel.cu:50)
@@ -241,21 +187,7 @@ See Diagnostics section for full details on compute_turbulence_diagnostics().
   - This implementation: `_gandalf_step_lawson_rk4_jit` / `_gandalf_step_imex222_jit` /
     `_gandalf_step_imex343_jit` in timestepping.py
 
-## Validation Suite
-
-### Linear Physics Tests
-1. **Alfvén wave dispersion**: ω² = k∥²v_A²
-2. **Slow mode damping**: Verify passive advection without back-reaction
-3. **Landau damping**: Emerges from parallel streaming in Hermite moments
-
-### Nonlinear Benchmarks
-1. **Orszag-Tang vortex**: Standard MHD test (fluid limit)
-2. **Decaying turbulence**: Check k⁻⁵/³ spectrum
-3. **Alfvénic cascade** (Thesis Section 2.6.3, Figure 2.2): Forced turbulence with k⊥⁻⁵/³ critical-balance spectrum
-4. **Energy partition**: Verify equipartition in steady state
-5. **Selective decay**: Magnetic energy should dominate at late times
-
-### Critical Checks
+## Critical Checks
 - Slow modes must remain passive (no spurious coupling)
 - Phase mixing in v∥ (if using Hermite representation)
 - CFL condition: dt < min(dx/v_A, dx²/η)
@@ -282,7 +214,3 @@ perpendicular Poisson bracket {f,g} = ẑ·(∇⊥f × ∇⊥g). However, we use
 2. **Parallel structure**: Track energy distribution in k∥ space
 3. **Initial conditions**: Allow z-dependent structures (wave packets, etc.)
 4. **Landau physics**: Need k∥ distribution for proper kinetic damping
-
-## Questions for User
-Track any clarifications needed during development
-
