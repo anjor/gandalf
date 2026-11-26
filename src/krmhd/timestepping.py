@@ -2236,6 +2236,12 @@ def compute_cfl_timestep(
     Returns:
         Maximum safe timestep dt
 
+    Raises:
+        ValueError: If mode is not a CFL mode. With mode="multirate", also
+            where lawson_rk4_multirate cannot step: T has complex eigenvalues
+            (Lambda < 1), or T is defective (Lambda = 1 with odd M, Issue #192).
+            The other modes still return a dt there, for the IMEX schemes.
+
     Example:
         >>> dt = compute_cfl_timestep(state, v_A=1.0, cfl_safety=0.3)
         >>> # Use this dt for time integration
@@ -2308,6 +2314,8 @@ def compute_cfl_timestep(
     dt_slices = None
     if state.M > 0 and mode == "exact":
         dt_slices = _exact_slice_timestep(state, closure)
+    if mode == "multirate":
+        compute_streaming_eigensystem(state.M, state.Lambda, closure)
 
     dt_cfl = cfl_timestep_estimate(
         state.z_plus, state.z_minus, state.grid, state.M, state.beta_i, state.Lambda,
