@@ -2239,7 +2239,8 @@ def compute_cfl_timestep(
     Raises:
         ValueError: If mode is not a CFL mode. With mode="multirate", also
             where lawson_rk4_multirate cannot step: T has complex eigenvalues
-            (Lambda < 1), or T is defective (Lambda = 1 with odd M, Issue #192).
+            (only at some Lambda < 1, such as Lambda = 0.5 with M = 8), or T is
+            defective (Lambda = 1 with odd M, Issue #192).
             The other modes still return a dt there, for the IMEX schemes.
 
     Example:
